@@ -285,12 +285,10 @@ export default async function DashboardPage() {
     ),
     // 11. Upcoming Events (General)
     query(
-      `SELECT e.id, e.name, e.slug, e.start_time,
-             json_build_object('name', l.name, 'address', l.address) AS listing
-       FROM events e
-       LEFT JOIN listings l ON e.listing_id = l.id
-       WHERE e.status = 'published' AND e.start_time >= $1
-       ORDER BY e.start_time ASC
+      `SELECT id, name, slug, start_time
+       FROM events
+       WHERE status = 'published' AND start_time >= $1
+       ORDER BY start_time ASC
        LIMIT 2`,
       [new Date().toISOString()]
     ),

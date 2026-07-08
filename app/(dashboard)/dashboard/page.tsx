@@ -264,14 +264,7 @@ export default async function DashboardPage() {
     ),
     // 9. User Badges (Full List)
     query(
-      `SELECT json_build_object(
-               'id', b.id, 'name', b.name, 'description', b.description,
-               'icon_url', b.icon_url, 'xp_reward', b.xp_reward, 'created_at', b.created_at
-             ) AS badge
-       FROM user_badges ub
-       LEFT JOIN badges b ON ub.badge_id = b.id
-       WHERE ub.user_id = $1
-       ORDER BY ub.awarded_at DESC`,
+      `SELECT json_build_object('id', badge_id) AS badge FROM user_badges WHERE user_id = $1`,
       [user.id]
     ),
     // 10. User Favorites (For Recommendations)

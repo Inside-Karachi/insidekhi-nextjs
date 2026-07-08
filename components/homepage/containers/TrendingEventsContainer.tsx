@@ -1,37 +1,29 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { TrendingEventsSection } from "@/components/homepage/TrendingEventsSection";
 import { formatEventDate } from "@/lib/utils/date-utils";
 
 export async function TrendingEventsContainer() {
-  const supabase = await createServerSupabase({ useServiceRole: true });
-
-  const { data: upcomingEventRows, error: eventsError } = await supabase
-    .from("events_with_details")
-    .select(
-      `
-      event_id,
-      event_name,
-      event_slug,
-      event_description,
-      start_time,
-      end_time,
-      location_name,
-      address
-    `,
-    )
-    .eq("event_status", "published")
-    .gte("start_time", new Date().toISOString())
-    .order("start_time", { ascending: true })
-    .order("event_id", { ascending: true })
-    .limit(3);
-
-  if (eventsError) {
-    console.error("Error fetching trending events", {
-      message: eventsError.message,
-      details: eventsError.details,
-      hint: eventsError.hint,
-      code: eventsError.code,
-    });
+  let upcomingEventRows;
+  try {
+    const res = await query(
+      `SELECT 
+        event_id,
+        event_name,
+        event_slug,
+        event_description,
+        start_time,
+        end_time,
+        location_name,
+        address
+       FROM events_with_details
+       WHERE event_status = 'published' AND start_time >= $1
+       ORDER BY start_time ASC, event_id ASC
+       LIMIT 3`,
+      [new Date().toISOString()]
+    );
+    upcomingEventRows = res.rows;
+  } catch (eventsError: any) {
+    console.error("Error fetching trending events", eventsError);
     return null;
   }
 
@@ -44,7 +36,7 @@ export async function TrendingEventsContainer() {
         acc.push(event);
         return acc;
       },
-      [] as NonNullable<typeof upcomingEventRows>,
+      [] as any[],
     ) || [];
 
   const eventIds = uniqueUpcomingEventRows
@@ -54,28 +46,22 @@ export async function TrendingEventsContainer() {
   let ticketTypesByEvent = new Map<number, { name: string; price: number }[]>();
 
   if (eventIds.length > 0) {
-    const { data: ticketTypes, error: ticketTypesError } = await supabase
-      .from("ticket_types")
-      .select("event_id, name, price")
-      .in("event_id", eventIds)
-      .order("price", { ascending: true });
-
-    if (ticketTypesError) {
-      // Keep rendering events even when ticket pricing rows are restricted.
-      console.warn("Error fetching ticket types for trending events", {
-        message: ticketTypesError.message,
-        details: ticketTypesError.details,
-        hint: ticketTypesError.hint,
-        code: ticketTypesError.code,
-      });
-    } else if (ticketTypes) {
+    try {
+      const resTickets = await query(
+        `SELECT event_id, name, price FROM ticket_types WHERE event_id = ANY($1) ORDER BY price ASC`,
+        [eventIds]
+      );
+      const ticketTypes = resTickets.rows;
+      
       ticketTypesByEvent = ticketTypes.reduce((acc, ticketType) => {
         if (typeof ticketType.event_id !== "number") return acc;
         const existing = acc.get(ticketType.event_id) || [];
-        existing.push({ name: ticketType.name, price: ticketType.price });
+        existing.push({ name: ticketType.name, price: Number(ticketType.price) });
         acc.set(ticketType.event_id, existing);
         return acc;
       }, new Map<number, { name: string; price: number }[]>());
+    } catch (ticketTypesError) {
+      console.warn("Error fetching ticket types for trending events", ticketTypesError);
     }
   }
 

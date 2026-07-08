@@ -3,17 +3,22 @@ import { createServerSupabase } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
 import { canModerateShares } from "@/lib/auth/gamification-permissions";
 
-// Use service role for generating signed URLs for private bucket
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
-);
+export const dynamic = "force-dynamic";
+
+// Helper to get supabaseAdmin lazily
+function getSupabaseAdmin() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    }
+  );
+}
+
 
 export async function GET(_request: NextRequest) {
   try {
@@ -99,7 +104,7 @@ export async function GET(_request: NextRequest) {
               // Remove query params if any
               const cleanPath = filePath.split("?")[0];
 
-              const { data: signedData } = await supabaseAdmin.storage
+              const { data: signedData } = await getSupabaseAdmin().storage
                 .from("share-screenshots")
                 .createSignedUrl(cleanPath, 60 * 60); // 1 hour validity
 

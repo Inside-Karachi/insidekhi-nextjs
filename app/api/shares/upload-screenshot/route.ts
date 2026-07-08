@@ -3,17 +3,22 @@ import { createClient } from "@supabase/supabase-js";
 import { createServerSupabase } from "@/lib/supabase/server";
 import type { UploadScreenshotResponse } from "@/types/invite-share.types";
 
-// Use service role for storage uploads
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
-);
+export const dynamic = "force-dynamic";
+
+// Helper to get supabaseAdmin lazily
+function getSupabaseAdmin() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    }
+  );
+}
+
 
 export async function POST(request: NextRequest) {
   try {
@@ -96,7 +101,7 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(arrayBuffer);
 
     // Upload to Supabase Storage
-    const { error: uploadError } = await supabaseAdmin.storage
+    const { error: uploadError } = await getSupabaseAdmin().storage
       .from("share-screenshots")
       .upload(filePath, buffer, {
         contentType: file.type,
@@ -117,7 +122,7 @@ export async function POST(request: NextRequest) {
     // Get public URL
     const {
       data: { publicUrl },
-    } = supabaseAdmin.storage.from("share-screenshots").getPublicUrl(filePath);
+    } = getSupabaseAdmin().storage.from("share-screenshots").getPublicUrl(filePath);
 
     // Call RPC to update share with screenshot
     const { data: rpcData, error: rpcError } = await supabase.rpc(

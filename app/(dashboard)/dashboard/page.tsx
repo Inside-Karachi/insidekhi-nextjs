@@ -1,4 +1,3 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { getFriendlyActivityName } from "@/lib/gamification";
 
 import { redirect } from "next/navigation";
@@ -9,6 +8,8 @@ import { PremiumQuickActions } from "@/components/dashboard/PremiumQuickActions"
 import { PremiumBottomSection } from "@/components/dashboard/PremiumBottomSection";
 import { InviteShareDashboardSection } from "@/components/dashboard/InviteShareDashboardSection";
 import { cookies } from "next/headers";
+import { getSessionFromCookies } from "@/lib/auth/session";
+import { query } from "@/lib/db";
 
 // Force dynamic rendering to ensure fresh data on every request
 export const dynamic = "force-dynamic";
@@ -103,231 +104,57 @@ interface Review {
 }
 
 export default async function DashboardPage() {
-  const supabase = await createServerSupabase();
+  const sessionUser = await getSessionFromCookies();
 
-  // Get current user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
+  if (!sessionUser) {
     redirect("/login");
   }
+
+  // Construct mock user object matching original Supabase structure
+  const user = {
+    id: sessionUser.userId,
+    email: sessionUser.email,
+  };
 
   // Parallel fetch: Profile and initial required data
-  const [profileResponse, ranksDataResponse] = await Promise.all([
-    supabase
-      .from("profiles")
-      .select(
-        `
-        *,
-        reviews!reviews_user_id_fkey(count),
-        bookings:bookings(count),
-        favorites:favorite_listings(count)
-      `,
-      )
-      .eq("id", user.id)
-      .single(),
-    supabase
-      .from("user_ranks")
-      .select(
-        `
-        rank:ranks(
-          id,
-          name,
-          slug,
-          color,
-          min_xp_required
-        )
-      `,
-      )
-      .eq("user_id", user.id)
-      .eq("current_rank", true)
-      .single(),
-  ]);
+  const profileQuery = query(
+    `SELECT p.*,
+       (SELECT COUNT(*) FROM reviews WHERE user_id = $1) AS reviews_count,
+       (SELECT COUNT(*) FROM bookings WHERE user_id = $1) AS bookings_count,
+       (SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1) AS favorites_count
+     FROM public.profiles p
+     WHERE p.id = $1
+     LIMIT 1`,
+    [user.id]
+  );
 
-  const { data: profile, error: profileError } = profileResponse;
-  const { data: ranksData } = ranksDataResponse;
+  const ranksQuery = query(
+    `SELECT r.id, r.name, r.slug, r.color, r.min_xp_required
+     FROM user_ranks ur
+     LEFT JOIN ranks r ON ur.rank_id = r.id
+     WHERE ur.user_id = $1 AND ur.current_rank = true
+     LIMIT 1`,
+    [user.id]
+  );
 
-  if (profileError) {
-    console.error("Failed to load profile for dashboard:", profileError);
-    // If profile loading fails, redirect to login
+  const [profileRes, ranksRes] = await Promise.all([profileQuery, ranksQuery]);
+  const rawProfile = profileRes.rows[0];
+  const rank = ranksRes.rows[0];
+
+  if (!rawProfile) {
+    console.error("Failed to load profile for dashboard: user profile not found");
     redirect("/login");
   }
 
-  // Use active_role to determine which dashboard to show
-  // Staff switched to public_user will see the public dashboard
-  const activeRole = profile?.active_role || profile?.role;
+  // Map database object back to Supabase client shape expected by components
+  const profile = {
+    ...rawProfile,
+    reviews: [{ count: Number(rawProfile.reviews_count || 0) }],
+    bookings: [{ count: Number(rawProfile.bookings_count || 0) }],
+    favorites: [{ count: Number(rawProfile.favorites_count || 0) }],
+  };
 
-  // Check user type based on ACTIVE ROLE (not permanent role)
-  const isAdmin = activeRole === "admin" || activeRole === "super_admin";
-  const isLister = activeRole === "lister";
-  const isOrganizer = activeRole === "organizer";
-  const isBusinessOwner = activeRole === "business_owner";
-
-  // Show appropriate dashboard based on ACTIVE user role
-  if (isAdmin) {
-    if (activeRole === "super_admin") {
-      const { SuperAdminDashboardWrapper } =
-        await import("@/components/dashboard/SuperAdminDashboardWrapper");
-      return <SuperAdminDashboardWrapper user={user} profile={profile} />;
-    }
-    const { AdminDashboard } =
-      await import("@/components/dashboard/AdminDashboard");
-    return <AdminDashboard user={user} profile={profile} />;
-  }
-
-  // Show organizer dashboard for organizer users
-  if (isOrganizer) {
-    const { OrganizerDashboard } =
-      await import("@/components/dashboard/OrganizerDashboard");
-    return <OrganizerDashboard user={user} profile={profile} />;
-  }
-
-  // Show business owner dashboard for business owner users
-  if (isBusinessOwner) {
-    const { BusinessOwnerDashboard } =
-      await import("@/components/business-owner/BusinessOwnerDashboard");
-    return <BusinessOwnerDashboard user={user} profile={profile} />;
-  }
-
-  // Show lister dashboard for lister users
-  if (isLister) {
-    const cookieStore = await cookies();
-    // ... (Lister logic remains same, it was already somewhat isolated)
-    // Use admin dashboard API to get platform-wide statistics
-    const response = await fetch(
-      `${
-        process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
-      }/api/admin/dashboard`,
-      {
-        headers: {
-          Cookie: cookieStore.toString(),
-        },
-        cache: "no-store",
-      },
-    );
-
-    let dashboardData;
-
-    if (response.ok) {
-      const result = await response.json();
-      if (result.success && result.data) {
-        dashboardData = {
-          statistics: result.data.statistics,
-          recentActivity: result.data.recentActivity,
-        };
-      }
-    }
-
-    if (!dashboardData) {
-      // Create admin client to bypass RLS for platform-wide stats
-      const { createServerSupabase: createAdminSupabase } =
-        await import("@/lib/supabase/server");
-      const adminSupabase = await createAdminSupabase({ useServiceRole: true });
-
-      // Get platform-wide statistics
-      const [
-        { count: totalListingsCount },
-        { count: activeListingsCount },
-        { count: totalEventsCount },
-        { count: publishedEventsCount },
-        { count: totalReviewsCount },
-        { count: pendingReviewsCount },
-        { count: totalUsersCount },
-        { count: activeUsersCount },
-        { data: recentListings },
-        { data: recentEvents },
-      ] = await Promise.all([
-        adminSupabase
-          .from("listings")
-          .select("*", { count: "exact", head: true }),
-        adminSupabase
-          .from("listings")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "published"),
-        adminSupabase
-          .from("events")
-          .select("*", { count: "exact", head: true }),
-        adminSupabase
-          .from("events")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "published"),
-        adminSupabase
-          .from("reviews")
-          .select("*", { count: "exact", head: true }),
-        adminSupabase
-          .from("reviews")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "pending"),
-        adminSupabase
-          .from("profiles")
-          .select("*", { count: "exact", head: true }),
-        adminSupabase
-          .from("profiles")
-          .select("*", { count: "exact", head: true })
-          .gte(
-            "created_at",
-            new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
-          ),
-        adminSupabase
-          .from("listings")
-          .select("id, name, status, created_at")
-          .order("created_at", { ascending: false })
-          .limit(5),
-        adminSupabase
-          .from("events")
-          .select("id, name, status, created_at")
-          .order("created_at", { ascending: false })
-          .limit(5),
-      ]);
-
-      dashboardData = {
-        statistics: {
-          totalUsers: totalUsersCount || 0,
-          activeUsers: activeUsersCount || 0,
-          totalEvents: totalEventsCount || 0,
-          publishedEvents: publishedEventsCount || 0,
-          totalListings: totalListingsCount || 0,
-          activeListings: activeListingsCount || 0,
-          totalReviews: totalReviewsCount || 0,
-          pendingReviews: pendingReviewsCount || 0,
-          totalComments: 0,
-          pendingComments: 0,
-          approvedComments: 0,
-          rejectedComments: 0,
-          flaggedComments: 0,
-        },
-        recentActivity: {
-          users: [],
-          events:
-            recentEvents?.map((e) => ({
-              id: e.id,
-              name: e.name || `Event ${e.id}`,
-              created_at: e.created_at,
-              status: e.status,
-            })) || [],
-          listings:
-            recentListings?.map((l) => ({
-              id: l.id,
-              name: l.name || `Listing ${l.id}`,
-              created_at: l.created_at,
-              status: l.status,
-            })) || [],
-        },
-      };
-    }
-
-    const { ListerDashboard } =
-      await import("@/components/dashboard/ListerDashboard");
-    return (
-      <ListerDashboard
-        user={user}
-        profile={profile}
-        dashboardData={dashboardData}
-      />
-    );
-  }
+  const ranksData = rank ? { rank } : null;
 
   // Calculate dates for insights
   const sevenDaysAgo = new Date();
@@ -337,167 +164,167 @@ export default async function DashboardPage() {
   const previousWeekEnd = new Date();
   previousWeekEnd.setDate(previousWeekEnd.getDate() - 7);
 
-  const fetchUpcomingEvents = async () => {
-    const baseQuery = supabase
-      .from("events")
-      .select(`id, name, slug, start_time, listing:listings(name, address)`)
-      .eq("status", "published")
-      .gte("start_time", new Date().toISOString())
-      .order("start_time", { ascending: true })
-      .limit(2);
-
-    const { data, error } = await baseQuery;
-    if (
-      error &&
-      (error.code === "42501" ||
-        error.message?.includes("is_business_owner") ||
-        error.message?.includes("is_staff"))
-    ) {
-      // Fallback for environments where function grants behind event RLS are incomplete.
-      const serviceSupabase = await createServerSupabase({
-        useServiceRole: true,
-      });
-      return serviceSupabase
-        .from("events")
-        .select(`id, name, slug, start_time, listing:listings(name, address)`)
-        .eq("status", "published")
-        .gte("start_time", new Date().toISOString())
-        .order("start_time", { ascending: true })
-        .limit(2);
-    }
-
-    return { data, error };
-  };
-
   // Parallel fetch: All user dashboard data
   const [
-    pointsActivityResponse,
-    userReviewsResponse,
-    userFavoritesActivityResponse,
-    userAchievementsResponse,
-    userBookingsResponse,
-    weeklyReviewsResponse,
-    weeklyBookingsResponse,
-    weeklyPointsResponse,
-    userBadgesResponse,
-    userFavoritesResponse,
-    upcomingEventsResponse,
-    allRanksResponse,
-    streakDataResponse,
-    previousWeekPointsResponse,
+    pointsActivityRes,
+    userReviewsRes,
+    userFavoritesActivityRes,
+    userAchievementsRes,
+    userBookingsRes,
+    weeklyReviewsRes,
+    weeklyBookingsRes,
+    weeklyPointsRes,
+    userBadgesRes,
+    userFavoritesRes,
+    upcomingEventsRes,
+    allRanksRes,
+    streakDataRes,
+    previousWeekPointsRes,
   ] = await Promise.all([
     // 1. Points Log
-    supabase
-      .from("points_log")
-      .select("*")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(5),
+    query(
+      `SELECT * FROM points_log WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5`,
+      [user.id]
+    ),
     // 2. Reviews
-    supabase
-      .from("reviews")
-      .select(`id, rating, comment, created_at, listing:listings(name, slug)`)
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(3),
+    query(
+      `SELECT r.id, r.rating, r.comment, r.created_at, 
+              json_build_object('name', l.name, 'slug', l.slug) AS listing
+       FROM reviews r
+       LEFT JOIN listings l ON r.listing_id = l.id
+       WHERE r.user_id = $1
+       ORDER BY r.created_at DESC
+       LIMIT 3`,
+      [user.id]
+    ),
     // 3. Favorites Activity
-    supabase
-      .from("favorite_listings")
-      .select(
-        `user_id, listing_id, created_at, listing:listings(name, slug, address)`,
-      )
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(3),
+    query(
+      `SELECT fl.user_id, fl.listing_id, fl.created_at,
+              json_build_object('name', l.name, 'slug', l.slug, 'address', l.address) AS listing
+       FROM favorite_listings fl
+       LEFT JOIN listings l ON fl.listing_id = l.id
+       WHERE fl.user_id = $1
+       ORDER BY fl.created_at DESC
+       LIMIT 3`,
+      [user.id]
+    ),
     // 4. Achievements Activity
-    supabase
-      .from("user_badges")
-      .select(
-        `user_id, badge_id, awarded_at, badge:badges(name, description, icon_url)`,
-      )
-      .eq("user_id", user.id)
-      .order("awarded_at", { ascending: false })
-      .limit(3),
+    query(
+      `SELECT ub.user_id, ub.badge_id, ub.awarded_at,
+              json_build_object('name', b.name, 'description', b.description, 'icon_url', b.icon_url) AS badge
+       FROM user_badges ub
+       LEFT JOIN badges b ON ub.badge_id = b.id
+       WHERE ub.user_id = $1
+       ORDER BY ub.awarded_at DESC
+       LIMIT 3`,
+      [user.id]
+    ),
     // 5. Bookings
-    supabase
-      .from("bookings")
-      .select(
-        `
-        id, total_amount, status, created_at,
-        booking_items(quantity, ticket_type:ticket_types(name, event:events(name, slug, start_time)))
-      `,
-      )
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(3),
+    query(
+      `SELECT b.id, b.total_amount, b.status, b.created_at,
+             (
+               SELECT json_agg(
+                 json_build_object(
+                   'quantity', bi.quantity,
+                   'ticket_type', json_build_object(
+                     'name', tt.name,
+                     'event', json_build_object(
+                       'name', e.name,
+                       'slug', e.slug,
+                       'start_time', e.start_time
+                     )
+                   )
+                 )
+               )
+               FROM booking_items bi
+               LEFT JOIN ticket_types tt ON bi.ticket_type_id = tt.id
+               LEFT JOIN events e ON tt.event_id = e.id
+               WHERE bi.booking_id = b.id
+             ) AS booking_items
+      FROM bookings b
+      WHERE b.user_id = $1
+      ORDER BY b.created_at DESC
+      LIMIT 3`,
+      [user.id]
+    ),
     // 6. Weekly Reviews
-    supabase
-      .from("reviews")
-      .select("id")
-      .eq("user_id", user.id)
-      .gte("created_at", sevenDaysAgo.toISOString()),
+    query(
+      `SELECT id FROM reviews WHERE user_id = $1 AND created_at >= $2`,
+      [user.id, sevenDaysAgo.toISOString()]
+    ),
     // 7. Weekly Bookings
-    supabase
-      .from("bookings")
-      .select("id")
-      .eq("user_id", user.id)
-      .gte("created_at", sevenDaysAgo.toISOString()),
+    query(
+      `SELECT id FROM bookings WHERE user_id = $1 AND created_at >= $2`,
+      [user.id, sevenDaysAgo.toISOString()]
+    ),
     // 8. Weekly Points
-    supabase
-      .from("points_log")
-      .select("points")
-      .eq("user_id", user.id)
-      .gte("created_at", sevenDaysAgo.toISOString()),
+    query(
+      `SELECT points FROM points_log WHERE user_id = $1 AND created_at >= $2`,
+      [user.id, sevenDaysAgo.toISOString()]
+    ),
     // 9. User Badges (Full List)
-    supabase
-      .from("user_badges")
-      .select(`badge:badges(*)`)
-      .eq("user_id", user.id)
-      .order("awarded_at", { ascending: false }),
+    query(
+      `SELECT json_build_object(
+               'id', b.id, 'name', b.name, 'description', b.description,
+               'icon_url', b.icon_url, 'xp_reward', b.xp_reward, 'created_at', b.created_at
+             ) AS badge
+       FROM user_badges ub
+       LEFT JOIN badges b ON ub.badge_id = b.id
+       WHERE ub.user_id = $1
+       ORDER BY ub.awarded_at DESC`,
+      [user.id]
+    ),
     // 10. User Favorites (For Recommendations)
-    supabase
-      .from("favorite_listings")
-      .select("listing:listings(category_id)")
-      .eq("user_id", user.id)
-      .limit(5),
+    query(
+      `SELECT json_build_object('category_id', l.category_id) AS listing
+       FROM favorite_listings fl
+       LEFT JOIN listings l ON fl.listing_id = l.id
+       WHERE fl.user_id = $1
+       LIMIT 5`,
+      [user.id]
+    ),
     // 11. Upcoming Events (General)
-    fetchUpcomingEvents(),
+    query(
+      `SELECT e.id, e.name, e.slug, e.start_time,
+             json_build_object('name', l.name, 'address', l.address) AS listing
+       FROM events e
+       LEFT JOIN listings l ON e.listing_id = l.id
+       WHERE e.status = 'published' AND e.start_time >= $1
+       ORDER BY e.start_time ASC
+       LIMIT 2`,
+      [new Date().toISOString()]
+    ),
     // 12. All Ranks
-    supabase
-      .from("ranks")
-      .select("id, name, slug, color, min_xp_required")
-      .eq("is_active", true)
-      .order("min_xp_required", { ascending: true }),
+    query(
+      `SELECT id, name, slug, color, min_xp_required FROM ranks WHERE is_active = true ORDER BY min_xp_required ASC`
+    ),
     // 13. Streak Data
-    supabase
-      .from("daily_login_streaks")
-      .select("current_streak")
-      .eq("user_id", user.id)
-      .single(),
+    query(
+      `SELECT current_streak FROM daily_login_streaks WHERE user_id = $1 LIMIT 1`,
+      [user.id]
+    ),
     // 14. Previous Week Points
-    supabase
-      .from("points_log")
-      .select("points")
-      .eq("user_id", user.id)
-      .gte("created_at", previousWeekStart.toISOString())
-      .lt("created_at", previousWeekEnd.toISOString()),
+    query(
+      `SELECT points FROM points_log WHERE user_id = $1 AND created_at >= $2 AND created_at < $3`,
+      [user.id, previousWeekStart.toISOString(), previousWeekEnd.toISOString()]
+    ),
   ]);
 
   // Extract Data from Responses
-  const { data: pointsActivity } = pointsActivityResponse;
-  const { data: userReviews } = userReviewsResponse;
-  const { data: userFavoritesActivity } = userFavoritesActivityResponse;
-  const { data: userAchievements } = userAchievementsResponse;
-  const { data: userBookings } = userBookingsResponse;
-  const { data: weeklyReviews } = weeklyReviewsResponse;
-  const { data: weeklyBookings } = weeklyBookingsResponse;
-  const { data: weeklyPoints } = weeklyPointsResponse;
-  const { data: userBadges } = userBadgesResponse;
-  const { data: userFavorites } = userFavoritesResponse;
-  const { data: upcomingEvents } = upcomingEventsResponse;
-  const { data: allRanks } = allRanksResponse;
-  const { data: streakData } = streakDataResponse;
-  const { data: previousWeekPoints } = previousWeekPointsResponse;
+  const pointsActivity = pointsActivityRes.rows;
+  const userReviews = userReviewsRes.rows;
+  const userFavoritesActivity = userFavoritesActivityRes.rows;
+  const userAchievements = userAchievementsRes.rows;
+  const userBookings = userBookingsRes.rows;
+  const weeklyReviews = weeklyReviewsRes.rows;
+  const weeklyBookings = weeklyBookingsRes.rows;
+  const weeklyPoints = weeklyPointsRes.rows;
+  const userBadges = userBadgesRes.rows;
+  const userFavorites = userFavoritesRes.rows;
+  const upcomingEvents = upcomingEventsRes.rows;
+  const allRanks = allRanksRes.rows;
+  const streakData = streakDataRes.rows[0];
+  const previousWeekPoints = previousWeekPointsRes.rows;;
 
   // --- Process Data & Derived State ---
 
@@ -598,21 +425,33 @@ export default async function DashboardPage() {
   let recommendedListings: MinimalListing[] = [];
 
   if (favoriteCategories.length > 0) {
-    const { data } = await supabase
-      .from("listings")
-      .select(`id, name, slug, address, reviews(rating)`)
-      .in("category_id", favoriteCategories)
-      .eq("status", "published")
-      .limit(4);
-    recommendedListings = data || [];
+    try {
+      const res = await query(
+        `SELECT l.id, l.name, l.slug, l.address,
+                (SELECT json_agg(json_build_object('rating', r.rating)) FROM reviews r WHERE r.listing_id = l.id) AS reviews
+         FROM listings l
+         WHERE l.category_id = ANY($1) AND l.status = 'published'
+         LIMIT 4`,
+        [favoriteCategories]
+      );
+      recommendedListings = res.rows;
+    } catch (e) {
+      console.error("Error fetching recommended listings:", e);
+    }
   } else {
-    const { data } = await supabase
-      .from("listings")
-      .select(`id, name, slug, address, reviews(rating)`)
-      .eq("status", "published")
-      .order("created_at", { ascending: false })
-      .limit(4);
-    recommendedListings = data || [];
+    try {
+      const res = await query(
+        `SELECT l.id, l.name, l.slug, l.address,
+                (SELECT json_agg(json_build_object('rating', r.rating)) FROM reviews r WHERE r.listing_id = l.id) AS reviews
+         FROM listings l
+         WHERE l.status = 'published'
+         ORDER BY l.created_at DESC
+         LIMIT 4`
+      );
+      recommendedListings = res.rows;
+    } catch (e) {
+      console.error("Error fetching recommended listings:", e);
+    }
   }
 
   return (

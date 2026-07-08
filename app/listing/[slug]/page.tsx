@@ -475,12 +475,17 @@ export default async function ListingPage({ params }: ListingPageProps) {
 
 // Generate static params for ISR (top 20 listings)
 export async function generateStaticParams() {
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+    console.warn("Supabase environment variables missing at build time. Skipping static params generation.");
+    return [];
+  }
+
   // Use createClient at build time (no cookies needed)
   const { createClient } = await import("@supabase/supabase-js");
 
   const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   );
 
   const { data: listings } = await supabase
@@ -497,12 +502,18 @@ export async function generateStaticParams() {
 
 // Generate metadata for SEO
 export async function generateMetadata({ params }: ListingPageProps) {
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+    return {
+      title: "Inside Karachi",
+    };
+  }
+
   // Use createClient at build time (no cookies needed for public data)
   const { createClient } = await import("@supabase/supabase-js");
 
   const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   );
 
   const { slug } = await params;

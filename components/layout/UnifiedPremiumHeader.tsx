@@ -1,0 +1,122 @@
+import { createServerSupabase } from "@/lib/supabase/server";
+import { PremiumHeader } from "@/components/dashboard/PremiumHeader";
+import { MobileNav } from "@/components/layout/MobileNav";
+
+interface UnifiedPremiumHeaderProps {
+  context?: "public" | "dashboard";
+  showDiscoveryPanel?: boolean;
+  onMenuClick?: () => void;
+  sidebarOpen?: boolean;
+}
+
+export async function UnifiedPremiumHeader({
+  context = "public",
+  showDiscoveryPanel = true,
+  onMenuClick,
+  sidebarOpen = false,
+}: UnifiedPremiumHeaderProps) {
+  // Only fetch user data if needed, avoid unnecessary queries
+  let user = null;
+  let profile = null;
+
+  try {
+    const supabase = await createServerSupabase();
+
+    // Get user session - this may fail during static rendering
+    const {
+      data: { user: userData },
+    } = await supabase.auth.getUser();
+    user = userData;
+
+    // Only fetch profile if user is logged in
+    if (user) {
+      const { data } = await supabase
+        .from("profiles")
+        .select("id, full_name, username, avatar_url, role, active_role")
+        .eq("id", user.id)
+        .single();
+      profile = data;
+    }
+  } catch (error) {
+    // During static rendering, cookies() will throw - this is expected
+    // User remains null, header will show logged-out state
+    if (
+      error instanceof Error &&
+      error.message?.includes("Dynamic server usage")
+    ) {
+      // Expected during build - silently continue with null user
+    } else {
+      console.error("Auth error in header:", error);
+    }
+  }
+
+  // Fetch navigation data only for mobile nav when needed
+  let parentCategories: Array<{
+    id: number;
+    name: string;
+    slug: string;
+    categories: Array<{ id: number; name: string; slug: string }>;
+  }> = [];
+  let simpleNavLinks: Array<{ id: number; name: string; slug: string }> = [];
+
+  if (context === "public") {
+    try {
+      const publicSupabase = await createServerSupabase({ publicAnon: true });
+      const [categoriesResult, navLinksResult] = await Promise.all([
+        publicSupabase
+          .from("categories")
+          .select("id, name, slug, categories!inner(id, name, slug)")
+          .is("parent_id", null)
+          .eq("is_enabled", true)
+          .order("name", { ascending: true }),
+        publicSupabase
+          .from("categories")
+          .select("id, name, slug")
+          .eq("is_enabled", true)
+          .in("slug", [
+            "events",
+            "things-to-do",
+            "eat-drink",
+            "where-to-stay",
+            "guides-reviews",
+          ]),
+      ]);
+
+      parentCategories = categoriesResult.data || [];
+      simpleNavLinks = navLinksResult.data || [];
+    } catch (error) {
+      // During static rendering, this may fail - continue with empty nav
+      if (
+        !(
+          error instanceof Error &&
+          error.message?.includes("Dynamic server usage")
+        )
+      ) {
+        console.error("Navigation data fetch error:", error);
+      }
+    }
+  }
+
+  return (
+    <>
+      <PremiumHeader
+        user={user}
+        profile={profile}
+        context={context}
+        showDiscoveryPanel={showDiscoveryPanel}
+        onMenuClick={onMenuClick}
+        sidebarOpen={sidebarOpen}
+      />
+
+      {/* Mobile Navigation - Only show on public pages */}
+      {context === "public" && (
+        <MobileNav
+          categoryNavItems={parentCategories || []}
+          simpleNavLinks={simpleNavLinks || []}
+          user={user}
+          profile={profile}
+        />
+      )}
+    </>
+  );
+}

@@ -1,0 +1,864 @@
+"use client";
+
+import * as React from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { cn } from "@/lib/utils";
+import { User } from "@supabase/supabase-js";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { Button } from "@/components/ui/button";
+import { createClient } from "@/lib/supabase/client";
+import { useUserGamification } from "@/hooks/useUserGamification";
+import { useRole } from "@/lib/context/RoleContext";
+import {
+  LayoutDashboard,
+  MapPin,
+  Calendar,
+  Heart,
+  Star,
+  Trophy,
+  User as UserIcon,
+  CreditCard,
+  Settings,
+  Bell,
+  LogOut,
+  ChevronRight,
+  Sparkles,
+  Home,
+  Shield,
+  BarChart3,
+  Users,
+  FileText,
+  ClipboardList,
+  ScanLine,
+  ClipboardCheck,
+  Store,
+} from "lucide-react";
+
+const navigation = [
+  { name: "Home", href: "/", icon: Home },
+  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+  { name: "Scan QR", href: "/dashboard/scan", icon: ScanLine },
+  { name: "Explore", href: "/dashboard/explore", icon: MapPin },
+  { name: "My Bookings", href: "/dashboard/bookings", icon: Calendar },
+  { name: "Favorites", href: "/dashboard/favorites", icon: Heart },
+  { name: "Reviews", href: "/dashboard/reviews", icon: Star },
+];
+
+// Business Owner navigation
+const businessOwnerNavigation = [
+  { name: "Home", href: "/", icon: Home },
+  {
+    name: "Dashboard",
+    href: "/dashboard/business",
+    icon: LayoutDashboard,
+  },
+  { name: "My Listings", href: "/dashboard/business/listings", icon: Store },
+  { name: "Analytics", href: "/dashboard/business/analytics", icon: BarChart3 },
+  { name: "Reviews", href: "/dashboard/business/reviews", icon: Star },
+  { name: "Reports", href: "/dashboard/business/reports", icon: FileText },
+];
+
+// Admin-focused navigation for staff accounts
+const adminMainNavigation = [
+  { name: "Home", href: "/", icon: Home },
+  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+  { name: "Scan QR", href: "/dashboard/scan", icon: ScanLine },
+];
+
+// Lister-focused navigation for content managers
+const listerNavigation = [
+  { name: "Home", href: "/", icon: Home },
+  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+  { name: "Scan QR", href: "/dashboard/scan", icon: ScanLine },
+  { name: "Listing Management", href: "/admin/listings", icon: MapPin },
+  {
+    name: "Listing Approvals",
+    href: "/admin/listings/approvals",
+    icon: ClipboardCheck,
+  },
+  { name: "Event Management", href: "/admin/events", icon: Calendar },
+  {
+    name: "Event Approvals",
+    href: "/admin/events/approvals",
+    icon: ClipboardCheck,
+  },
+  { name: "Review Moderation", href: "/admin/reviews", icon: Star },
+  { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList },
+];
+
+// Organizer-focused navigation
+const organizerMainNavigation = [
+  { name: "Home", href: "/", icon: Home },
+  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+  { name: "My Events", href: "/dashboard/events", icon: Calendar },
+  { name: "Scan Tickets", href: "/dashboard/scan", icon: ScanLine },
+];
+
+const organizerSecondaryNavigation = [
+  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
+  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
+  { name: "Settings", href: "/dashboard/settings", icon: Settings },
+];
+
+// Business Owner secondary navigation
+const businessOwnerSecondaryNavigation = [
+  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
+  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
+  { name: "Settings", href: "/dashboard/settings", icon: Settings },
+];
+
+type NavRequiredRole = import("@/types/auth.types").UserRole;
+
+interface SidebarNavItem {
+  name: string;
+  href: string;
+  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
+  requiredRole?: NavRequiredRole; // optional required role for visibility
+}
+
+const adminNavigation: SidebarNavItem[] = [
+  { name: "User Management", href: "/admin/users", icon: Users },
+  { name: "Event Management", href: "/admin/events", icon: Calendar },
+  {
+    name: "Event Approvals",
+    href: "/admin/events/approvals",
+    icon: ClipboardCheck,
+  },
+  { name: "Bookings", href: "/admin/bookings", icon: CreditCard },
+  {
+    name: "Listing Management",
+    href: "/admin/listings",
+    icon: MapPin,
+  },
+  {
+    name: "Listing Approvals",
+    href: "/admin/listings/approvals",
+    icon: ClipboardCheck,
+  },
+  { name: "Review Moderation", href: "/admin/reviews", icon: Star },
+  { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList },
+  { name: "Gamification", href: "/admin/gamification", icon: Trophy },
+  {
+    name: "Listing Scraper",
+    href: "/admin/listing-scraper",
+    icon: Store,
+    requiredRole: "super_admin",
+  },
+  {
+    name: "Logs Management",
+    href: "/admin/logs",
+    icon: FileText,
+    requiredRole: "super_admin",
+  },
+  { name: "Analytics", href: "/admin/analytics", icon: BarChart3 },
+  {
+    name: "Security Center",
+    href: "/admin/security",
+    icon: Shield,
+    requiredRole: "super_admin",
+  },
+  {
+    name: "System Settings",
+    href: "/admin/settings",
+    icon: Settings,
+    requiredRole: "super_admin",
+  },
+];
+
+const secondaryNavigation = [
+  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
+  { name: "Achievements", href: "/dashboard/achievements", icon: Trophy },
+  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
+  // { name: "Billing", href: "/dashboard/billing", icon: CreditCard },
+  { name: "Settings", href: "/dashboard/settings", icon: Settings },
+];
+
+// Admin-focused secondary navigation
+const adminSecondaryNavigation = [
+  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
+  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
+  { name: "Settings", href: "/dashboard/settings", icon: Settings },
+];
+
+// Lister-focused secondary navigation
+const listerSecondaryNavigation = [
+  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
+  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
+  { name: "Settings", href: "/dashboard/settings", icon: Settings },
+];
+
+interface ProfileShape {
+  id: string;
+  full_name?: string | null;
+  avatar_url?: string | null;
+  points?: number | null;
+  role?: string;
+  active_role?: string; // Added for role switching
+}
+
+interface SidebarStats {
+  users?: number;
+  events?: number;
+  listings?: number;
+  reviews?: number;
+  bookings?: number;
+  favorites?: number;
+}
+
+interface PremiumSidebarProps {
+  isOpen: boolean;
+  onClose: () => void;
+  user: User;
+  profile: ProfileShape | null;
+  stats?: SidebarStats;
+  loadingStats?: boolean;
+}
+
+export function PremiumSidebar({
+  isOpen,
+  onClose,
+  user,
+  profile,
+  stats = {},
+  loadingStats = false,
+}: PremiumSidebarProps) {
+  const pathname = usePathname();
+  const _supabase = createClient(); // Prefix with _ to indicate intentionally unused
+  const { user: roleUser, switchRole } = useRole();
+  const [isSwitching, setIsSwitching] = React.useState(false);
+
+  // Use active_role for navigation and display
+  const activeRole = (profile?.active_role || profile?.role) as string;
+  const permanentRole = profile?.role as string;
+  const canSwitchRoles = roleUser?.canSwitchRoles || false;
+
+  // Determine user type based on active role
+  const isAdmin = activeRole === "admin" || activeRole === "super_admin";
+  const isLister = activeRole === "lister";
+  const isOrganizer = activeRole === "organizer";
+  const isBusinessOwner = activeRole === "business_owner";
+
+  // Only fetch gamification data for regular users
+  const shouldShowGamification =
+    !isAdmin && !isLister && !isOrganizer && !isBusinessOwner;
+  const { xpTotal, rank } = useUserGamification(
+    shouldShowGamification ? user.id : "",
+  );
+
+  // Calculate progress to next rank - show current rank dynamically
+  const [currentRankDisplay, setCurrentRankDisplay] =
+    React.useState<string>(rank);
+  const [nextRankName, setNextRankName] = React.useState<string>("Explorer");
+  const [progressPercent, setProgressPercent] = React.useState<number>(0);
+
+  React.useEffect(() => {
+    const fetchRanks = async () => {
+      try {
+        const response = await fetch("/api/gamification/ranks");
+        if (response.ok) {
+          const data = await response.json();
+          const ranks = data.ranks || [];
+
+          // Always display the current rank from the hook
+          setCurrentRankDisplay(rank || "Unranked");
+
+          // Find current rank object to determine next rank
+          const currentRankObj = ranks.find(
+            (r: { name: string }) => r.name === rank,
+          );
+
+          if (!currentRankObj) {
+            // User might be unranked - show first achievable rank as next
+            if (ranks.length > 0) {
+              setNextRankName(ranks[0].name);
+              setProgressPercent(0);
+            }
+            return;
+          }
+
+          const currentIndex = ranks.indexOf(currentRankObj);
+
+          // Check if there's a next rank
+          if (currentIndex < ranks.length - 1) {
+            const nextRank = ranks[currentIndex + 1];
+            setNextRankName(nextRank.name);
+
+            // Calculate progress percentage using xpTotal from useUserGamification hook
+            const currentMinXP = currentRankObj.min_xp_required || 0;
+            const nextMinXP = nextRank.min_xp_required;
+            const xpRange = nextMinXP - currentMinXP;
+            const xpProgress = xpTotal - currentMinXP;
+            const percent =
+              xpRange > 0 ? Math.min((xpProgress / xpRange) * 100, 100) : 0;
+
+            setProgressPercent(Math.round(percent));
+          } else {
+            // At max rank - show current rank and 100%
+            setNextRankName(currentRankObj.name);
+            setProgressPercent(100);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to fetch ranks:", error);
+      }
+    };
+
+    if (shouldShowGamification) {
+      fetchRanks();
+    }
+  }, [rank, xpTotal, shouldShowGamification, isOpen]);
+
+  // Fetching logic moved to parent layout
+
+  // Create dynamic navigation based on user role
+  const dynamicNavigation = React.useMemo(() => {
+    if (isAdmin) return adminMainNavigation;
+    if (isLister) return listerNavigation;
+    if (isOrganizer) return organizerMainNavigation;
+    if (isBusinessOwner) return businessOwnerNavigation;
+    return navigation;
+  }, [isAdmin, isLister, isOrganizer, isBusinessOwner]);
+
+  // Create admin section for admin users
+  const adminSection = React.useMemo(() => {
+    if (!isAdmin) return [];
+
+    // Filter navigation items based on ACTIVE role
+    const isSuperAdmin = activeRole === "super_admin";
+
+    return adminNavigation.filter((item: SidebarNavItem) => {
+      // If the nav item requires a specific role, filter accordingly
+      if (item.requiredRole === "super_admin" && !isSuperAdmin) {
+        return false;
+      }
+      // Allow admins and super_admins to see admin-only items (default)
+      if (item.requiredRole === "admin" && !isAdmin) {
+        return false;
+      }
+      return true;
+    });
+  }, [isAdmin, activeRole]);
+
+  // Create dynamic secondary navigation based on user role
+  const dynamicSecondaryNavigation = React.useMemo(() => {
+    if (isAdmin) return adminSecondaryNavigation;
+    if (isLister) return listerSecondaryNavigation;
+    if (isOrganizer) return organizerSecondaryNavigation;
+    if (isBusinessOwner) return businessOwnerSecondaryNavigation;
+    return secondaryNavigation; // Public users get achievements
+  }, [isAdmin, isLister, isOrganizer, isBusinessOwner]);
+
+  const handleSignOut = async () => {
+    try {
+      const supabase = createClient();
+      // Local scope clears the session without a server round-trip; race a
+      // short timeout so a slow/stuck auth lock can never strand the user.
+      await Promise.race([
+        supabase.auth.signOut({ scope: "local" }),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    } catch (err) {
+      console.error("[SignOut] sidebar signOut error:", err);
+    } finally {
+      // Always redirect - a failed or slow signOut must never strand the user.
+      window.location.href = "/";
+    }
+  };
+
+  // Touch `user` to avoid unused-var linter warnings in some builds
+  const _userId = user?.id;
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <motion.aside
+          initial={{ x: -320, opacity: 0 }}
+          animate={{ x: 0, opacity: 1 }}
+          exit={{ x: -320, opacity: 0 }}
+          transition={{ type: "spring", stiffness: 400, damping: 30 }}
+          className="fixed left-0 top-20 bottom-0 z-40 w-80 lg:w-80"
+          data-user-id={_userId}
+        >
+          <div className="h-full bg-background/95 backdrop-blur-xl border-r border-border/50 shadow-premium-lg flex flex-col">
+            {/* User Profile Section - Fixed */}
+            <div className="flex-shrink-0 p-6 border-b border-border/50">
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.1 }}
+                className="space-y-4"
+              >
+                {/* User Level & Progress */}
+                <div className="p-4 rounded-2xl bg-gradient-to-br from-primary/10 via-primary/5 to-transparent border border-primary/20">
+                  <div className="flex items-center space-x-3 mb-3">
+                    <div
+                      className={cn(
+                        "w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg",
+                        isAdmin
+                          ? "bg-gradient-to-br from-red-500 to-red-600"
+                          : isLister
+                            ? "bg-gradient-to-br from-primary to-primary/80"
+                            : isOrganizer
+                              ? "bg-gradient-to-br from-purple-500 to-purple-600"
+                              : isBusinessOwner
+                                ? "bg-gradient-to-br from-blue-500 to-blue-600"
+                                : "bg-gradient-to-br from-primary to-primary/80",
+                      )}
+                    >
+                      {isAdmin ? (
+                        <Shield className="h-6 w-6 text-white" />
+                      ) : isLister ? (
+                        <MapPin className="h-6 w-6 text-white" />
+                      ) : isOrganizer ? (
+                        <Calendar className="h-6 w-6 text-white" />
+                      ) : isBusinessOwner ? (
+                        <Store className="h-6 w-6 text-white" />
+                      ) : (
+                        <Sparkles className="h-6 w-6 text-primary-foreground" />
+                      )}
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-foreground">
+                        {activeRole === "public_user"
+                          ? currentRankDisplay || "Explorer"
+                          : isAdmin
+                            ? "Administrator"
+                            : isLister
+                              ? "Content Manager"
+                              : isOrganizer
+                                ? "Event Organizer"
+                                : isBusinessOwner
+                                  ? "Business Owner"
+                                  : currentRankDisplay || "Unranked"}
+                      </h3>
+                      <p className="text-sm text-muted-foreground">
+                        {activeRole === "public_user"
+                          ? `${xpTotal || profile?.points || 0} XP`
+                          : isAdmin
+                            ? "Staff Account"
+                            : isLister
+                              ? "Lister Account"
+                              : isOrganizer
+                                ? "Organizer Account"
+                                : isBusinessOwner
+                                  ? "Business Account"
+                                  : `${xpTotal || profile?.points || 0} XP`}
+                      </p>
+                    </div>
+                  </div>
+                  {shouldShowGamification && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-muted-foreground">
+                          Progress to {nextRankName}
+                        </span>
+                        <span className="text-primary font-semibold">
+                          {progressPercent}%
+                        </span>
+                      </div>
+                      <div className="h-2 bg-muted rounded-full overflow-hidden">
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${progressPercent}%` }}
+                          transition={{ duration: 1, delay: 0.5 }}
+                          className="h-full bg-gradient-to-r from-primary to-primary/80 rounded-full"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {isAdmin && (
+                    <div className="p-3 bg-red-50 dark:bg-red-950/30 rounded-xl">
+                      <p className="text-xs text-red-700 dark:text-red-300 font-medium">
+                        Platform Administration Access
+                      </p>
+                    </div>
+                  )}
+                  {isLister && !isAdmin && (
+                    <div className="p-3 bg-gradient-to-r from-primary/10 to-primary/5 rounded-xl border border-primary/20">
+                      <p className="text-xs text-primary font-medium">
+                        Content Management Access
+                      </p>
+                    </div>
+                  )}
+                  {isOrganizer && !isAdmin && !isLister && (
+                    <div className="p-3 bg-gradient-to-r from-purple-50 to-purple-100/50 dark:from-purple-950/30 dark:to-purple-900/20 rounded-xl border border-purple-200/50 dark:border-purple-800/30">
+                      <p className="text-xs text-purple-700 dark:text-purple-300 font-medium">
+                        Event Management Access
+                      </p>
+                    </div>
+                  )}
+                  {isBusinessOwner && !isAdmin && !isLister && !isOrganizer && (
+                    <div className="p-3 bg-gradient-to-r from-blue-50 to-blue-100/50 dark:from-blue-950/30 dark:to-blue-900/20 rounded-xl border border-blue-200/50 dark:border-blue-800/30">
+                      <p className="text-xs text-blue-700 dark:text-blue-300 font-medium">
+                        Business Management Access
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Quick Stats */}
+                <div className="grid grid-cols-3 gap-3">
+                  {loadingStats ? (
+                    // Loading skeleton
+                    <>
+                      <div className="text-center p-3 rounded-xl bg-accent/30 animate-pulse">
+                        <div className="h-6 bg-muted rounded mb-1"></div>
+                        <div className="h-3 bg-muted rounded w-16 mx-auto"></div>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30 animate-pulse">
+                        <div className="h-6 bg-muted rounded mb-1"></div>
+                        <div className="h-3 bg-muted rounded w-16 mx-auto"></div>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30 animate-pulse">
+                        <div className="h-6 bg-muted rounded mb-1"></div>
+                        <div className="h-3 bg-muted rounded w-16 mx-auto"></div>
+                      </div>
+                    </>
+                  ) : isAdmin ? (
+                    // Admin stats - Real data
+                    <>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.users || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">Users</p>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.events || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">Events</p>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.listings || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Listings
+                        </p>
+                      </div>
+                    </>
+                  ) : isLister ? (
+                    // Lister stats - Real data
+                    <>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.listings || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Listings
+                        </p>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.events || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">Events</p>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.reviews || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">Reviews</p>
+                      </div>
+                    </>
+                  ) : isBusinessOwner ? (
+                    // Business Owner stats - Real data
+                    <>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.listings || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Listings
+                        </p>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.reviews || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">Reviews</p>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.bookings || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Bookings
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    // User stats - Real data
+                    <>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.reviews || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">Reviews</p>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.bookings || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Bookings
+                        </p>
+                      </div>
+                      <div className="text-center p-3 rounded-xl bg-accent/30">
+                        <p className="text-lg font-bold text-foreground">
+                          {stats.favorites || 0}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Favorites
+                        </p>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </motion.div>
+            </div>
+
+            {/* Navigation - Scrollable */}
+            <div className="flex-1 overflow-y-auto py-6 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent min-h-0">
+              {/* Main Navigation */}
+              <div className="px-6 mb-8">
+                <div className="space-y-2">
+                  {dynamicNavigation.map((item, index) => {
+                    const isActive = pathname === item.href;
+                    return (
+                      <motion.div
+                        key={item.name}
+                        initial={{ opacity: 0, x: -20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: 0.1 + index * 0.05 }}
+                      >
+                        <Link
+                          href={item.href}
+                          onClick={onClose}
+                          className={cn(
+                            "group flex items-center gap-4 rounded-2xl px-4 py-3 text-sm font-medium transition-all duration-300 relative overflow-hidden",
+                            isActive
+                              ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25"
+                              : "text-foreground hover:bg-accent/50 hover:scale-[1.02]",
+                          )}
+                        >
+                          <motion.div
+                            className={cn(
+                              "flex h-8 w-8 items-center justify-center rounded-xl transition-all duration-300",
+                              isActive
+                                ? "text-primary-foreground bg-white/20"
+                                : "text-muted-foreground group-hover:text-foreground bg-accent/30 group-hover:bg-primary/20",
+                            )}
+                            whileHover={{ scale: 1.1, rotate: 5 }}
+                          >
+                            <item.icon className="h-4 w-4" />
+                          </motion.div>
+                          <span className="flex-1">{item.name}</span>
+                          {isActive && (
+                            <motion.div
+                              initial={{ scale: 0 }}
+                              animate={{ scale: 1 }}
+                              transition={{ type: "spring" }}
+                            >
+                              <ChevronRight className="h-4 w-4 opacity-60" />
+                            </motion.div>
+                          )}
+                        </Link>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Divider */}
+              <div className="px-6 mb-6">
+                <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent" />
+              </div>
+
+              {/* Admin Section - Only for Admin Users */}
+              {isAdmin && adminSection.length > 0 && (
+                <>
+                  <div className="px-6 mb-8">
+                    <div className="mb-4">
+                      <div className="flex items-center gap-2 px-4">
+                        <Shield className="h-4 w-4 text-primary" />
+                        <p className="text-xs font-semibold text-primary uppercase tracking-wider">
+                          Admin Tools
+                        </p>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {adminSection.map((item, index) => {
+                        const isActive = pathname === item.href;
+                        return (
+                          <motion.div
+                            key={item.name}
+                            initial={{ opacity: 0, x: -20 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: 0.2 + index * 0.05 }}
+                          >
+                            <Link
+                              href={item.href}
+                              onClick={onClose}
+                              className={cn(
+                                "group flex items-center gap-4 rounded-2xl px-4 py-3 text-sm font-medium transition-all duration-300 relative overflow-hidden",
+                                isActive
+                                  ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25"
+                                  : "text-foreground hover:bg-primary/10 hover:scale-[1.02] hover:text-primary",
+                              )}
+                            >
+                              <motion.div
+                                className={cn(
+                                  "flex h-8 w-8 items-center justify-center rounded-xl transition-all duration-300",
+                                  isActive
+                                    ? "text-primary-foreground bg-white/20"
+                                    : "text-muted-foreground group-hover:text-primary bg-primary/10 group-hover:bg-primary/20",
+                                )}
+                                whileHover={{ scale: 1.1, rotate: 5 }}
+                              >
+                                <item.icon className="h-4 w-4" />
+                              </motion.div>
+                              <span className="flex-1">{item.name}</span>
+                              {isActive && (
+                                <motion.div
+                                  initial={{ scale: 0 }}
+                                  animate={{ scale: 1 }}
+                                  transition={{ type: "spring" }}
+                                >
+                                  <ChevronRight className="h-4 w-4 opacity-60" />
+                                </motion.div>
+                              )}
+                            </Link>
+                          </motion.div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Admin Divider */}
+                  <div className="px-6 mb-6">
+                    <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent" />
+                  </div>
+                </>
+              )}
+
+              {/* Account Section */}
+              <div className="px-6">
+                <div className="mb-4">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-4">
+                    Account
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  {dynamicSecondaryNavigation.map((item, index) => {
+                    const isActive = pathname === item.href;
+                    return (
+                      <motion.div
+                        key={item.name}
+                        initial={{ opacity: 0, x: -20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: 0.3 + index * 0.05 }}
+                      >
+                        <Link
+                          href={item.href}
+                          onClick={onClose}
+                          className={cn(
+                            "group flex items-center gap-4 rounded-2xl px-4 py-3 text-sm font-medium transition-all duration-300",
+                            isActive
+                              ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25"
+                              : "text-foreground hover:bg-accent/50 hover:scale-[1.02]",
+                          )}
+                        >
+                          <motion.div
+                            className={cn(
+                              "flex h-8 w-8 items-center justify-center rounded-xl transition-all duration-300",
+                              isActive
+                                ? "text-primary-foreground bg-white/20"
+                                : "text-muted-foreground group-hover:text-foreground bg-accent/30 group-hover:bg-primary/20",
+                            )}
+                            whileHover={{ scale: 1.1, rotate: 5 }}
+                          >
+                            <item.icon className="h-4 w-4" />
+                          </motion.div>
+                          <span className="flex-1">{item.name}</span>
+                        </Link>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Actions - Compact & Unified */}
+            <div className="flex-shrink-0 p-4 border-t border-border/50 space-y-2">
+              {canSwitchRoles && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.45 }}
+                >
+                  <Button
+                    onClick={async () => {
+                      setIsSwitching(true);
+                      try {
+                        const isStaffMode = activeRole !== "public_user";
+                        const targetRole = isStaffMode
+                          ? "public_user"
+                          : permanentRole;
+                        await switchRole(
+                          targetRole as import("@/types/auth.types").UserRole,
+                        );
+                        window.location.reload();
+                      } catch (error) {
+                        console.error("Role switch error:", error);
+                      } finally {
+                        setIsSwitching(false);
+                      }
+                    }}
+                    disabled={isSwitching}
+                    variant="outline"
+                    className="w-full justify-start gap-3 rounded-xl px-3 h-10 text-sm font-medium border-primary/20 hover:bg-primary/5 hover:text-primary hover:border-primary/50 transition-all duration-300"
+                  >
+                    <div className="flex h-5 w-5 items-center justify-center rounded-md bg-primary/10">
+                      {activeRole === "public_user" ? (
+                        <Shield className="h-3 w-3 text-primary" />
+                      ) : (
+                        <UserIcon className="h-3 w-3 text-primary" />
+                      )}
+                    </div>
+                    <span>
+                      {isSwitching
+                        ? "Switching..."
+                        : activeRole === "public_user"
+                          ? "Switch to Staff"
+                          : "Switch to Personal"}
+                    </span>
+                  </Button>
+                </motion.div>
+              )}
+
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.5 }}
+              >
+                <Button
+                  onClick={handleSignOut}
+                  variant="ghost"
+                  className="w-full justify-start gap-3 rounded-xl px-3 h-10 text-sm font-medium text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-all duration-300"
+                >
+                  <div className="flex h-5 w-5 items-center justify-center rounded-md">
+                    <LogOut className="h-4 w-4" />
+                  </div>
+                  <span>Sign Out</span>
+                </Button>
+              </motion.div>
+            </div>
+          </div>
+        </motion.aside>
+      )}
+    </AnimatePresence>
+  );
+}

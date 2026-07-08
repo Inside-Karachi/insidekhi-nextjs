@@ -1,0 +1,473 @@
+"use client";
+
+import { useState, useEffect, useCallback, useRef } from "react";
+import ReactDOM from "react-dom";
+import { AnimatePresence, motion } from "framer-motion";
+import { HeroSectionStatic } from "@/components/ui/HeroSectionStatic";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { useSearch } from "@/hooks/useSearch";
+import {
+  Search,
+  MapPin,
+  Star,
+  Users,
+  Calendar,
+  ArrowRight,
+  Sparkles,
+  Heart,
+  TrendingUp,
+  Award,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { useRouter } from "next/navigation";
+
+// Stats configuration - defined outside component to avoid recreation
+const stats = [
+  {
+    icon: Users,
+    label: "Active Users",
+    value: "50K+",
+    colors: {
+      bg: "from-blue-500/20 via-blue-500/10 to-blue-500/5",
+      border: "border-blue-500/30",
+      icon: "text-blue-500",
+      accent: "bg-blue-500",
+      glow: "hover:shadow-xl hover:shadow-blue-500/25",
+    },
+  },
+  {
+    icon: Star,
+    label: "Places Listed",
+    value: "2.5K+",
+    colors: {
+      bg: "from-amber-500/20 via-amber-500/10 to-amber-500/5",
+      border: "border-amber-500/30",
+      icon: "text-amber-500",
+      accent: "bg-amber-500",
+      glow: "hover:shadow-xl hover:shadow-amber-500/25",
+    },
+  },
+  {
+    icon: Calendar,
+    label: "Events Monthly",
+    value: "200+",
+    colors: {
+      bg: "from-emerald-500/20 via-emerald-500/10 to-emerald-500/5",
+      border: "border-emerald-500/30",
+      icon: "text-emerald-500",
+      accent: "bg-emerald-500",
+      glow: "hover:shadow-xl hover:shadow-emerald-500/25",
+    },
+  },
+  {
+    icon: Award,
+    label: "Reviews",
+    value: "15K+",
+    colors: {
+      bg: "from-purple-500/20 via-purple-500/10 to-purple-500/5",
+      border: "border-purple-500/30",
+      icon: "text-purple-500",
+      accent: "bg-purple-500",
+      glow: "hover:shadow-xl hover:shadow-purple-500/25",
+    },
+  },
+];
+
+export function PremiumHomepageHero() {
+  const [location, setLocation] = useState("Karachi, Pakistan");
+  const [userCoordinates, setUserCoordinates] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  const [isLoadingLocation, setIsLoadingLocation] = useState(false);
+  const router = useRouter();
+
+  // Ref for search container to calculate dropdown position
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+  const [dropdownPosition, setDropdownPosition] = useState({
+    top: 0,
+    left: 0,
+    width: 0,
+  });
+
+  // Use the production-ready search hook
+  const {
+    searchQuery,
+    setSearchQuery,
+    searchResults,
+    isSearching,
+    showResults,
+    setShowResults,
+    getResultUrl,
+  } = useSearch();
+
+  // Function to get location name from coordinates
+  const getLocationFromCoords = useCallback(
+    async (lat: number, lng: number): Promise<string> => {
+      try {
+        const response = await fetch(`/api/location?lat=${lat}&lng=${lng}`);
+        if (!response.ok) return "Karachi, Pakistan";
+        const data = await response.json();
+        return data.location || "Karachi, Pakistan";
+      } catch {
+        return "Karachi, Pakistan";
+      }
+    },
+    [],
+  );
+
+  // Request location only when user clicks the location display
+  const handleLocationClick = useCallback(() => {
+    if (!navigator.geolocation || isLoadingLocation) return;
+
+    setIsLoadingLocation(true);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude, longitude } = position.coords;
+        setUserCoordinates({ lat: latitude, lng: longitude });
+        const locationName = await getLocationFromCoords(latitude, longitude);
+        setLocation(locationName);
+        setIsLoadingLocation(false);
+      },
+      () => {
+        setIsLoadingLocation(false);
+      },
+      {
+        timeout: 10000,
+        enableHighAccuracy: false,
+        maximumAge: 300000,
+      },
+    );
+  }, [getLocationFromCoords, isLoadingLocation]);
+
+  // Lock body scroll and update dropdown position when showing results
+  useEffect(() => {
+    if (!showResults) return;
+
+    // Lock body scroll
+    const originalStyle = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    // Update dropdown position (using viewport coordinates for fixed positioning)
+    if (searchContainerRef.current) {
+      const rect = searchContainerRef.current.getBoundingClientRect();
+      setDropdownPosition({
+        top: rect.bottom + 8,
+        left: rect.left,
+        width: rect.width,
+      });
+    }
+
+    return () => {
+      document.body.style.overflow = originalStyle;
+    };
+  }, [showResults]);
+
+  // Handle search input change
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchQuery(e.target.value);
+  };
+
+  // Handler for Explore button
+  const handleExplore = () => {
+    if (searchQuery && searchQuery.trim().length > 0) {
+      router.push(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
+    } else {
+      // If user has selected location, navigate with distance sorting
+      if (userCoordinates) {
+        router.push(
+          `/listings?sort=distance&lat=${userCoordinates.lat.toFixed(6)}&lng=${userCoordinates.lng.toFixed(6)}`,
+        );
+      } else {
+        router.push("/listings");
+      }
+    }
+  };
+
+  return (
+    <HeroSectionStatic
+      floating={
+        <>
+          {/* Floating decorative icons - CSS animations */}
+          <div className="absolute top-16 sm:top-20 left-4 sm:left-20 p-2 sm:p-3 rounded-lg sm:rounded-xl bg-background/20 backdrop-blur-xl border border-border/30 animate-premium-float">
+            <Heart className="h-4 w-4 sm:h-6 sm:w-6 text-primary" />
+          </div>
+
+          <div
+            className="absolute top-24 sm:top-32 right-4 sm:right-32 p-2 sm:p-3 rounded-lg sm:rounded-xl bg-background/20 backdrop-blur-xl border border-border/30 floating-element-delayed"
+            style={{ animationDelay: "2s" }}
+          >
+            <TrendingUp className="h-4 w-4 sm:h-6 sm:w-6 text-green-500" />
+          </div>
+        </>
+      }
+    >
+      {/* Main Content - CSS animations for entrance */}
+      <div className="relative z-10 container mx-auto px-4 sm:px-6 lg:px-8 text-center">
+        {/* Badge */}
+        <div className="mb-8 animate-hero-fade-in">
+          <Badge className="px-6 py-2 text-sm font-semibold bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors">
+            <Sparkles className="h-4 w-4 mr-2" />
+            The Definitive Guide to Karachi
+          </Badge>
+        </div>
+
+        {/* Hero Heading */}
+        <div className="space-y-4 sm:space-y-6 mb-8 sm:mb-12 animate-hero-fade-in-delay-1">
+          <h1 className="text-2xl sm:text-3xl md:text-4xl lg:text-5xl xl:text-6xl font-bold tracking-tight">
+            Unlock the Best of{" "}
+            <span className="gradient-text-primary">Karachi</span>
+          </h1>
+          <p className="max-w-3xl mx-auto text-sm sm:text-base md:text-lg lg:text-xl text-muted-foreground leading-relaxed px-4 sm:px-0">
+            Discover hidden gems, trending spots, and exclusive experiences in
+            Pakistan&apos;s vibrant metropolis.
+            <span className="hidden sm:inline">
+              {" "}
+              Your ultimate companion for exploring the city that never sleeps.
+            </span>
+          </p>
+        </div>
+
+        {/* Search Bar */}
+        <div className="max-w-2xl mx-auto mb-8 sm:mb-12 md:mb-16 px-4 sm:px-0 animate-hero-fade-in-delay-2">
+          <div className="relative group" ref={searchContainerRef}>
+            {/* Glow Effect */}
+            <div className="absolute inset-0 bg-gradient-to-r from-primary/20 to-primary/10 rounded-2xl md:rounded-3xl blur-xl group-hover:blur-2xl transition-all duration-300" />
+
+            {/* Search Container */}
+            <div className="relative flex flex-col sm:flex-row bg-background/80 backdrop-blur-xl border border-border/50 rounded-2xl md:rounded-3xl shadow-premium-lg overflow-hidden">
+              <div className="relative flex-1">
+                <Search className="absolute left-4 sm:left-6 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+                <Input
+                  type="text"
+                  placeholder="Search restaurants, events, places..."
+                  value={searchQuery}
+                  onChange={handleSearchChange}
+                  onFocus={() =>
+                    searchQuery.length >= 2 && setShowResults(true)
+                  }
+                  onBlur={() => setTimeout(() => setShowResults(false), 200)}
+                  className="h-12 sm:h-14 md:h-16 pl-11 sm:pl-12 md:pl-14 pr-4 sm:pr-6 text-sm sm:text-base md:text-lg bg-transparent border-0 focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-muted-foreground/70"
+                />
+              </div>
+
+              <div
+                className="flex items-center px-4 sm:px-6 border-t sm:border-t-0 sm:border-l border-border/30 min-h-[48px] sm:min-h-[56px] md:min-h-[64px] cursor-pointer hover:bg-muted/30 transition-colors"
+                onClick={handleLocationClick}
+                title="Click to get your current location"
+              >
+                <MapPin className="h-4 w-4 sm:h-5 sm:w-5 text-muted-foreground mr-2 sm:mr-3 flex-shrink-0" />
+                <div className="flex items-center space-x-2 min-w-0">
+                  {isLoadingLocation && (
+                    <div className="h-3 w-3 border-2 border-muted-foreground/30 border-t-primary rounded-full animate-spin flex-shrink-0" />
+                  )}
+                  <span className="text-xs sm:text-sm font-medium text-muted-foreground truncate">
+                    {location}
+                  </span>
+                </div>
+              </div>
+
+              <div className="sm:flex-shrink-0">
+                <Button
+                  size="lg"
+                  className="h-12 sm:h-14 md:h-16 w-full sm:w-auto px-4 sm:px-6 md:px-8 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold rounded-none rounded-b-2xl sm:rounded-b-none sm:rounded-l-none sm:rounded-r-3xl md:rounded-r-3xl shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] group"
+                  onClick={handleExplore}
+                  aria-label={
+                    searchQuery && searchQuery.trim().length > 0
+                      ? `Explore results for ${searchQuery}`
+                      : "Explore all listings"
+                  }
+                >
+                  <span className="mr-2">Explore</span>
+                  <ArrowRight className="h-4 w-4 sm:h-5 sm:w-5 group-hover:translate-x-1 transition-transform duration-200" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Search Results Dropdown - Portal to escape parent transform stacking context */}
+        {typeof document !== "undefined" &&
+          ReactDOM.createPortal(
+            <AnimatePresence>
+              {showResults && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 10 }}
+                  transition={{ duration: 0.15 }}
+                  className="fixed z-[9999] bg-background backdrop-blur-xl border border-border/50 rounded-xl shadow-premium-lg overflow-hidden"
+                  style={{
+                    top: dropdownPosition.top,
+                    left: dropdownPosition.left,
+                    width: dropdownPosition.width,
+                  }}
+                >
+                  {isSearching ? (
+                    <div className="p-4 text-center text-muted-foreground">
+                      <div className="inline-flex items-center space-x-2">
+                        <div className="h-4 w-4 border-2 border-muted-foreground/30 border-t-primary rounded-full animate-spin" />
+                        <span>Searching...</span>
+                      </div>
+                    </div>
+                  ) : searchResults.length > 0 ? (
+                    <div className="max-h-64 overflow-y-auto">
+                      {searchResults.map((result) => (
+                        <button
+                          key={`${result.type}-${result.id}`}
+                          onClick={() => {
+                            setSearchQuery(result.name);
+                            setShowResults(false);
+                            try {
+                              window.dispatchEvent(
+                                new Event("insidekhi:closeDiscovery"),
+                              );
+                            } catch {
+                              /* ignore */
+                            }
+                            try {
+                              router.push(getResultUrl(result));
+                            } catch {
+                              window.location.href = getResultUrl(result);
+                            }
+                          }}
+                          className="w-full px-4 py-3 text-left hover:bg-primary/5 dark:hover:bg-primary/10 transition-colors duration-200 border-b border-border/20 last:border-b-0"
+                        >
+                          <div className="flex items-center space-x-3">
+                            <div className="flex-shrink-0">
+                              {result.type === "listing" && (
+                                <MapPin className="h-4 w-4 text-primary" />
+                              )}
+                              {result.type === "category" && (
+                                <Search className="h-4 w-4 text-primary" />
+                              )}
+                              {result.type === "event" && (
+                                <Calendar className="h-4 w-4 text-primary" />
+                              )}
+                              {result.type === "post" && (
+                                <Search className="h-4 w-4 text-primary" />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-medium text-foreground">
+                                {result.name}
+                              </div>
+                              {result.category && (
+                                <div className="text-xs text-muted-foreground">
+                                  {result.category}
+                                </div>
+                              )}
+                              {result.address && (
+                                <div className="text-xs text-muted-foreground">
+                                  {result.address}
+                                </div>
+                              )}
+                              {result.description && (
+                                <div className="text-xs text-muted-foreground truncate">
+                                  {result.description}
+                                </div>
+                              )}
+                            </div>
+                            <ArrowRight className="h-3 w-3 text-muted-foreground" />
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-4 text-center text-muted-foreground">
+                      <div className="text-sm">
+                        No results found for &ldquo;{searchQuery}&rdquo;
+                      </div>
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>,
+            document.body,
+          )}
+
+        {/* Stats Section - CSS animations */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6 max-w-4xl mx-auto animate-hero-fade-in-delay-3">
+          {stats.map((stat, index) => (
+            <div
+              key={stat.label}
+              className="group"
+              style={{ animationDelay: `${0.35 + index * 0.05}s` }}
+            >
+              <div
+                className={cn(
+                  "relative overflow-hidden rounded-xl sm:rounded-2xl p-4 sm:p-6 cursor-pointer",
+                  "backdrop-blur-xl border transition-all duration-500",
+                  "hover:scale-[1.02] hover:-translate-y-1",
+                  `bg-gradient-to-br ${stat.colors.bg}`,
+                  stat.colors.border,
+                  stat.colors.glow,
+                  "transform-gpu",
+                )}
+              >
+                {/* Border glow */}
+                <div className="absolute inset-0 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none">
+                  <div
+                    className={cn(
+                      "absolute inset-0 rounded-2xl opacity-30 blur-md",
+                      stat.colors.accent,
+                    )}
+                  />
+                  <div
+                    className={cn(
+                      "absolute inset-0 rounded-2xl opacity-10 blur-lg",
+                      stat.colors.accent,
+                    )}
+                  />
+                </div>
+
+                {/* Animated accent line */}
+                <div
+                  className={cn(
+                    "absolute top-0 left-0 h-1 w-0 group-hover:w-full transition-all duration-700 ease-out",
+                    stat.colors.accent,
+                  )}
+                />
+
+                <div className="relative z-10">
+                  <div className="flex flex-col items-center space-y-3">
+                    {/* Icon container */}
+                    <div
+                      className={cn(
+                        "relative p-2 md:p-3 rounded-xl transition-all duration-500",
+                        "group-hover:scale-110 group-hover:rotate-6 transform-gpu",
+                        `bg-gradient-to-br ${stat.colors.bg}`,
+                        "border border-white/20 dark:border-white/10",
+                        "shadow-lg group-hover:shadow-xl",
+                      )}
+                    >
+                      <div
+                        className={cn(
+                          "h-5 w-5 md:h-6 md:w-6",
+                          stat.colors.icon,
+                        )}
+                      >
+                        <stat.icon className="h-full w-full" />
+                      </div>
+                    </div>
+
+                    <div className="text-center">
+                      <div className="text-xl sm:text-2xl font-bold text-foreground">
+                        {stat.value}
+                      </div>
+                      <div className="text-xs sm:text-sm text-muted-foreground">
+                        {stat.label}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </HeroSectionStatic>
+  );
+}

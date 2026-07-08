@@ -26,22 +26,12 @@ export type RequireSessionResult = {
   profile: SessionProfile | null;
 };
 
-/**
- * Server-side gate for pages/layouts that require the custom JWT cookie.
- * Redirects to /login when missing. Optionally loads the profiles row.
- */
-export async function requireSessionUser(options?: {
-  /** When true (default), also fetch profiles for the session user. */
-  withProfile?: boolean;
-  /** Redirect here when session is missing. */
-  loginPath?: string;
-}): Promise<RequireSessionResult> {
-  const loginPath = options?.loginPath ?? "/login";
-  const withProfile = options?.withProfile !== false;
-
+async function loadSessionUser(
+  withProfile: boolean,
+): Promise<RequireSessionResult | null> {
   const session = await getSessionFromCookies();
   if (!session) {
-    redirect(loginPath);
+    return null;
   }
 
   const user: SessionUser = {
@@ -63,7 +53,6 @@ export async function requireSessionUser(options?: {
     return { session, user, profile: null };
   }
 
-  // Normalize null role → undefined so callers match existing UI prop types.
   const profile: SessionProfile = {
     ...row,
     id: String(row.id),
@@ -71,4 +60,36 @@ export async function requireSessionUser(options?: {
   };
 
   return { session, user, profile };
+}
+
+/**
+ * Optional server-side session lookup for public UI (header, nav).
+ * Returns null when unauthenticated instead of redirecting.
+ */
+export async function getOptionalSessionUser(options?: {
+  withProfile?: boolean;
+}): Promise<RequireSessionResult | null> {
+  const withProfile = options?.withProfile !== false;
+  return loadSessionUser(withProfile);
+}
+
+/**
+ * Server-side gate for pages/layouts that require the custom JWT cookie.
+ * Redirects to /login when missing. Optionally loads the profiles row.
+ */
+export async function requireSessionUser(options?: {
+  /** When true (default), also fetch profiles for the session user. */
+  withProfile?: boolean;
+  /** Redirect here when session is missing. */
+  loginPath?: string;
+}): Promise<RequireSessionResult> {
+  const loginPath = options?.loginPath ?? "/login";
+  const withProfile = options?.withProfile !== false;
+
+  const result = await loadSessionUser(withProfile);
+  if (!result) {
+    redirect(loginPath);
+  }
+
+  return result;
 }

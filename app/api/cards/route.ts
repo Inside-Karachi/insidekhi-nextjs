@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 export async function GET(request: NextRequest) {
   try {
@@ -9,60 +9,41 @@ export async function GET(request: NextRequest) {
     if (!bankId) {
       return NextResponse.json(
         { error: "bankId parameter is required" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const supabase = await createServerSupabase();
-
-    // First, try to find the bank - try numeric ID first, then code
-    let bankQuery = supabase.from("banks").select("id, code");
-
     const bankIdNum = parseInt(bankId, 10);
-    if (!isNaN(bankIdNum)) {
-      // If it's a number, query by ID first
-      bankQuery = bankQuery.eq("id", bankIdNum);
-    } else {
-      // If it's a string code, query by code
-      bankQuery = bankQuery.eq("code", bankId);
-    }
+    const { rows: bankRows } = await query(
+      !Number.isNaN(bankIdNum)
+        ? `SELECT id, code FROM banks WHERE id = $1 LIMIT 1`
+        : `SELECT id, code FROM banks WHERE code = $1 LIMIT 1`,
+      [Number.isNaN(bankIdNum) ? bankId : bankIdNum],
+    );
 
-    const { data: bank, error: bankError } = await bankQuery.single();
-
-    if (bankError || !bank) {
+    const bank = bankRows[0];
+    if (!bank) {
       return NextResponse.json({ error: "Bank not found" }, { status: 400 });
     }
 
-    const bankCode = bank.code || `bank-${bank.id}`;
+    const bankCode = (bank.code as string | null) || `bank-${bank.id}`;
 
-    // Fetching cards for bank_id
+    const { rows: cards } = await query(
+      `SELECT id, card_name, card_type, card_network, card_tier, image_filename
+       FROM card_variants
+       WHERE bank_id = $1 AND is_active = true
+       ORDER BY card_tier ASC, card_name ASC`,
+      [bank.id],
+    );
 
-    const { data: cards, error } = await supabase
-      .from("card_variants")
-      .select("*")
-      .eq("bank_id", bank.id)
-      .eq("is_active", true)
-      .order("card_tier", { ascending: true })
-      .order("card_name", { ascending: true });
-
-    if (error) {
-      console.error("Supabase error fetching cards:", error);
-      return NextResponse.json(
-        { error: "Failed to fetch cards", details: error.message },
-        { status: 500 }
-      );
-    }
-
-    // Return full card data for components that need complete card info
-    const cardData =
-      cards?.map((card) => ({
-        id: card.id,
-        card_name: card.card_name,
-        card_type: card.card_type,
-        card_network: card.card_network,
-        card_tier: card.card_tier,
-        image_filename: card.image_filename,
-      })) || [];
+    const cardData = cards.map((card) => ({
+      id: card.id,
+      card_name: card.card_name,
+      card_type: card.card_type,
+      card_network: card.card_network,
+      card_tier: card.card_tier,
+      image_filename: card.image_filename,
+    }));
 
     return NextResponse.json({
       success: true,
@@ -77,7 +58,7 @@ export async function GET(request: NextRequest) {
         error: "Internal server error",
         details: error instanceof Error ? error.message : "Unknown error",
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

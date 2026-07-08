@@ -1,26 +1,27 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { createServerSupabase } from "@/lib/supabase/server";
 import { User } from "lucide-react";
 import { UserDropdown } from "./UserDropdown";
+import { getOptionalSessionUser } from "@/lib/auth/require-session";
+import type { User as SupabaseUser } from "@supabase/supabase-js";
 
 // This is an async component to fetch the user's session on the server
 export async function UserNav() {
-  const supabase = await createServerSupabase();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  // Fetch user profile if logged in
-  let profile = null;
-  if (user) {
-    const { data } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .single();
-    profile = data;
-  }
+  const sessionData = await getOptionalSessionUser();
+  const user = sessionData
+    ? ({
+        id: sessionData.user.id,
+        email: sessionData.user.email,
+      } as SupabaseUser)
+    : null;
+  const profile = sessionData?.profile
+    ? {
+        full_name: sessionData.profile.full_name,
+        avatar_url: sessionData.profile.avatar_url,
+        role: sessionData.profile.role,
+        active_role: sessionData.profile.active_role ?? undefined,
+      }
+    : null;
 
   return (
     <div>
@@ -29,10 +30,10 @@ export async function UserNav() {
       ) : (
         // If the user is logged out, show a Sign In button
         <Button asChild variant="ghost" size="icon">
-            <Link href="/login">
-                <User className="h-5 w-5" />
-                <span className="sr-only">Sign In</span>
-            </Link>
+          <Link href="/login">
+            <User className="h-5 w-5" />
+            <span className="sr-only">Sign In</span>
+          </Link>
         </Button>
       )}
     </div>

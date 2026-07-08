@@ -356,7 +356,7 @@ export function PremiumBottomSection({
                     title={place.name}
                     subtitle={place.address}
                     rating={place.rating}
-                    href={`/listings/${place.slug}`}
+                    href={`/listing/${place.slug}`}
                     delay={0.1 + index * 0.1}
                   />
                 ))

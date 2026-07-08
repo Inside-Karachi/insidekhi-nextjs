@@ -1,38 +1,44 @@
 import { SupabaseClient } from "@supabase/supabase-js";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 /**
- * Given a server Supabase client (created via createServerSupabase without service role)
- * and an array of listing IDs, return a Set containing listing IDs the current
- * authenticated user has favorited. Returns an empty Set for unauthenticated users.
+ * Given listing IDs, return those favorited by the current user.
+ * Supports JWT session (web login) and Supabase auth as fallback.
  */
 export async function getFavoritedListingIdsForUser(
-  supabase: SupabaseClient,
-  listingIds: number[]
+  supabase: SupabaseClient | null,
+  listingIds: number[],
+  userId?: string | null,
 ): Promise<Set<number>> {
   if (!listingIds || listingIds.length === 0) return new Set();
 
   try {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return new Set();
+    let resolvedUserId = userId ?? null;
 
-    const { data, error } = await supabase
-      .from("favorite_listings")
-      .select("listing_id")
-      .in("listing_id", listingIds)
-      .eq("user_id", user.id);
-
-    if (error) {
-      console.error("Error fetching user favorites", error.message || error);
-      return new Set();
+    if (!resolvedUserId) {
+      const session = await getSessionFromCookies();
+      resolvedUserId = session?.userId ?? null;
     }
 
+    if (!resolvedUserId && supabase) {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      resolvedUserId = user?.id ?? null;
+    }
+
+    if (!resolvedUserId) return new Set();
+
+    const { rows } = await query(
+      `SELECT listing_id FROM favorite_listings
+       WHERE user_id = $1 AND listing_id = ANY($2)`,
+      [resolvedUserId, listingIds],
+    );
+
     const set = new Set<number>();
-    if (Array.isArray(data)) {
-      for (const row of data) {
-        if (row && typeof row.listing_id === "number") set.add(row.listing_id);
-      }
+    for (const row of rows) {
+      if (typeof row.listing_id === "number") set.add(row.listing_id);
     }
 
     return set;

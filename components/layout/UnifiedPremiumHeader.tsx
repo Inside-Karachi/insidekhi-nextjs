@@ -1,6 +1,8 @@
 import { createServerSupabase } from "@/lib/supabase/server";
 import { PremiumHeader } from "@/components/dashboard/PremiumHeader";
 import { MobileNav } from "@/components/layout/MobileNav";
+import { getOptionalSessionUser } from "@/lib/auth/require-session";
+import type { User } from "@supabase/supabase-js";
 
 interface UnifiedPremiumHeaderProps {
   context?: "public" | "dashboard";
@@ -15,31 +17,37 @@ export async function UnifiedPremiumHeader({
   onMenuClick,
   sidebarOpen = false,
 }: UnifiedPremiumHeaderProps) {
-  // Only fetch user data if needed, avoid unnecessary queries
-  let user = null;
-  let profile = null;
+  // Resolve JWT session for public header (login sets insidekhi_session, not Supabase cookies).
+  let user: User | null = null;
+  let profile: {
+    id: string;
+    full_name?: string | null;
+    username?: string | null;
+    avatar_url?: string | null;
+    role?: string;
+    active_role?: string;
+  } | null = null;
 
   try {
-    const supabase = await createServerSupabase();
-
-    // Get user session - this may fail during static rendering
-    const {
-      data: { user: userData },
-    } = await supabase.auth.getUser();
-    user = userData;
-
-    // Only fetch profile if user is logged in
-    if (user) {
-      const { data } = await supabase
-        .from("profiles")
-        .select("id, full_name, username, avatar_url, role, active_role")
-        .eq("id", user.id)
-        .single();
-      profile = data;
+    const sessionData = await getOptionalSessionUser();
+    if (sessionData) {
+      user = {
+        id: sessionData.user.id,
+        email: sessionData.user.email,
+      } as User;
+      if (sessionData.profile) {
+        profile = {
+          id: sessionData.profile.id,
+          full_name: sessionData.profile.full_name,
+          username: sessionData.profile.username as string | null | undefined,
+          avatar_url: sessionData.profile.avatar_url,
+          role: sessionData.profile.role,
+          active_role: sessionData.profile.active_role ?? undefined,
+        };
+      }
     }
   } catch (error) {
     // During static rendering, cookies() will throw - this is expected
-    // User remains null, header will show logged-out state
     if (
       error instanceof Error &&
       error.message?.includes("Dynamic server usage")

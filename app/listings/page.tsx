@@ -1,4 +1,3 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { PremiumListingsGrid } from "@/components/listings/PremiumListingsGrid";
 import { FeaturedListingsCarousel } from "@/components/listings/FeaturedListingsCarousel";
 import { PremiumListingsHeaderInline as PremiumListingsHeader } from "@/components/listings/PremiumListingsHeaderInline";
@@ -7,9 +6,9 @@ import { getNearbyListings } from "@/app/actions/nearby-listings";
 import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
 import { buildGridSearchParams } from "@/lib/utils/listings-filters";
 import {
-  buildListingSearchOrFilter,
   stableReorderBySearchRank,
 } from "@/lib/listings/search-relevance";
+import { query } from "@/lib/db";
 
 // Enable ISR with 60 second revalidation for listings page
 export const revalidate = 60;
@@ -39,106 +38,95 @@ interface ListingsPageProps {
 export default async function ListingsPage({
   searchParams,
 }: ListingsPageProps) {
-  const publicSupabase = await createServerSupabase({ publicAnon: true });
-  const userSupabase = await createServerSupabase();
   const resolvedSearchParams = await searchParams;
 
-  let listingsQuery = publicSupabase
-    .from("listings_with_details")
-    .select("*")
-    .eq("status", "published");
+  const whereClauses: string[] = ["status = 'published'"];
+  const queryParams: unknown[] = [];
 
   // Category filter: handles both parent and subcategories
   if (resolvedSearchParams.category) {
-    const { data: cat } = await publicSupabase
-      .from("categories")
-      .select("id, name, parent_id")
-      .eq("slug", resolvedSearchParams.category)
-      .single();
+    const { rows: catRows } = await query(
+      `SELECT id, name, parent_id FROM categories WHERE slug = $1 LIMIT 1`,
+      [resolvedSearchParams.category],
+    );
+    const cat = catRows[0];
 
     if (cat) {
+      let categoryNames: string[] = [String(cat.name)];
       if (cat.parent_id === null) {
-        // Parent category - include all subcategory names
-        const { data: subcategories } = await publicSupabase
-          .from("categories")
-          .select("name")
-          .eq("parent_id", cat.id);
-
-        const categoryNames = [
-          cat.name,
-          ...(subcategories?.map((sub) => sub.name) || []),
+        const { rows: subcategories } = await query(
+          `SELECT name FROM categories WHERE parent_id = $1`,
+          [cat.id],
+        );
+        categoryNames = [
+          String(cat.name),
+          ...subcategories.map((sub) => String(sub.name)),
         ];
-        listingsQuery = listingsQuery.in("category_name", categoryNames);
-      } else {
-        // Subcategory - exact match
-        listingsQuery = listingsQuery.eq("category_name", cat.name);
       }
+      queryParams.push(categoryNames);
+      whereClauses.push(`category_name = ANY($${queryParams.length})`);
     }
   }
 
   // Sub-category filter (overrides or refines category)
   if (resolvedSearchParams.sub) {
-    const { data: subCat } = await publicSupabase
-      .from("categories")
-      .select("name")
-      .eq("slug", resolvedSearchParams.sub)
-      .single();
-    if (subCat?.name)
-      listingsQuery = listingsQuery.eq("category_name", subCat.name);
+    const { rows: subCatRows } = await query(
+      `SELECT name FROM categories WHERE slug = $1 LIMIT 1`,
+      [resolvedSearchParams.sub],
+    );
+    const subCat = subCatRows[0];
+    if (subCat?.name) {
+      if (resolvedSearchParams.category) {
+        queryParams.pop();
+        whereClauses.pop();
+      }
+      queryParams.push(String(subCat.name));
+      whereClauses.push(`category_name = $${queryParams.length}`);
+    }
   }
 
   if (resolvedSearchParams.search) {
     const term = sanitizeSearchTerm(resolvedSearchParams.search);
-    const orClause = buildListingSearchOrFilter(term);
-    if (orClause) {
-      listingsQuery = listingsQuery.or(orClause);
+    if (term) {
+      queryParams.push(`%${term}%`);
+      const idx = queryParams.length;
+      whereClauses.push(
+        `(name ILIKE $${idx} OR description ILIKE $${idx} OR address ILIKE $${idx})`,
+      );
     }
   }
 
   if (resolvedSearchParams.rating) {
     const r = parseFloat(resolvedSearchParams.rating);
-    if (!isNaN(r)) listingsQuery = listingsQuery.gte("avg_rating", r);
-  }
-
-  if (resolvedSearchParams.open_now === "true") {
-    listingsQuery = listingsQuery.eq("is_open_now", true);
-  }
-
-  // Fetch all listings in chunks to bypass 1000 limit
-  const chunkSize = 1000;
-  let allListings: Array<Record<string, unknown>> = [];
-  let offset = 0;
-  let hasMore = true;
-
-  while (hasMore) {
-    const { data: chunk } = await listingsQuery.range(
-      offset,
-      offset + chunkSize - 1,
-    );
-    if (!chunk || chunk.length === 0) {
-      hasMore = false;
-    } else {
-      allListings = allListings.concat(chunk);
-      if (chunk.length < chunkSize) {
-        hasMore = false;
-      } else {
-        offset += chunkSize;
-      }
+    if (!Number.isNaN(r)) {
+      queryParams.push(r);
+      whereClauses.push(`avg_rating >= $${queryParams.length}`);
     }
   }
 
+  if (resolvedSearchParams.open_now === "true") {
+    whereClauses.push("is_open_now = true");
+  }
+
+  const whereSql = whereClauses.join(" AND ");
+  const { rows: allListings } = await query(
+    `SELECT * FROM listings_with_details WHERE ${whereSql} ORDER BY id ASC`,
+    queryParams,
+  );
+
   const rawListings = (allListings ?? []) as Array<Record<string, unknown>>;
   let enrichedListings: Listing[] = rawListings
-    .filter((l) => typeof l.id === "number" && l.id !== null)
-    .map((l) => l as Listing);
+    .filter((l) => l.id != null && !Number.isNaN(Number(l.id)))
+    .map((l) => ({ ...l, id: Number(l.id) }) as Listing);
   // No filter on category_name or category_id: show all published listings, even if category is missing
 
   // Fetch sort options to determine which sorts need deals data
-  const { data: sortOptionsData } = await publicSupabase
-    .from("sort_options")
-    .select("key, label, icon_name, is_default")
-    .eq("is_active", true)
-    .order("display_order", { ascending: true });
+  const { rows: sortOptionsData } = await query(
+    `SELECT key, label, icon_name, is_default
+     FROM sort_options
+     WHERE is_active = true
+     ORDER BY display_order ASC`,
+  );
 
   const sortOptions = sortOptionsData || [];
   const sortRequiresDeals = (sortKey: string) => {
@@ -163,12 +151,12 @@ export default async function ListingsPage({
     const listingIds = enrichedListings
       .map((l) => l.id)
       .filter((id) => id !== null);
-    const { data: deals } = await publicSupabase
-      .from("deals")
-      .select(
-        "id, listing_id, discount_value, is_active, bank_id, valid_card_variants",
-      )
-      .in("listing_id", listingIds);
+    const { rows: deals } = await query(
+      `SELECT id, listing_id, discount_value, is_active, bank_id, valid_card_variants
+       FROM deals
+       WHERE listing_id = ANY($1)`,
+      [listingIds],
+    );
     if (Array.isArray(deals)) {
       interface DealRow {
         listing_id: number | null;
@@ -346,15 +334,16 @@ export default async function ListingsPage({
     );
   }
 
-  const { data: categoriesData } = await publicSupabase
-    .from("categories")
-    .select("id, name, slug, parent_id, icon_name")
-    .eq("show_in_filters", true)
-    .eq("is_enabled", true)
-    .in("category_type", ["listing", "both"])
-    .neq("slug", "events")
-    .order("name", { ascending: true })
-    .limit(200);
+  const { rows: categoriesData } = await query(
+    `SELECT id, name, slug, parent_id, icon_name
+     FROM categories
+     WHERE show_in_filters = true
+       AND is_enabled = true
+       AND category_type IN ('listing', 'both')
+       AND slug <> 'events'
+     ORDER BY name ASC
+     LIMIT 200`,
+  );
 
   // Hydrate favorite flags server-side for the current user to avoid client round-trips
   try {
@@ -363,7 +352,7 @@ export default async function ListingsPage({
     const allIds = enrichedListings
       .map((l) => l.id)
       .filter((id) => id !== null) as number[];
-    const favSet = await getFavoritedListingIdsForUser(userSupabase, allIds);
+    const favSet = await getFavoritedListingIdsForUser(null, allIds);
     // Attach favorited flag to listings
     enrichedListings = enrichedListings.map((l) => ({
       ...l,
@@ -388,24 +377,26 @@ export default async function ListingsPage({
   };
 
   const listingIds = enrichedListings
-    .filter((l) => typeof l.id === "number" && l.id !== null)
-    .map((l) => l.id as number);
+    .filter((l) => l.id != null)
+    .map((l) => Number(l.id));
 
   const imagesMap: Record<number, ListingWithImages["images"]> = {};
 
   if (listingIds.length > 0) {
-    const { data: allImages } = await publicSupabase
-      .from("listing_images")
-      .select("*")
-      .in("listing_id", listingIds)
-      .order("display_order", { ascending: true });
+    const { rows: allImages } = await query(
+      `SELECT * FROM listing_images
+       WHERE listing_id = ANY($1)
+       ORDER BY display_order ASC`,
+      [listingIds],
+    );
 
     if (Array.isArray(allImages)) {
       allImages.forEach((img) => {
-        if (!imagesMap[img.listing_id]) {
-          imagesMap[img.listing_id] = [];
+        const listingId = img.listing_id as number;
+        if (!imagesMap[listingId]) {
+          imagesMap[listingId] = [];
         }
-        imagesMap[img.listing_id]!.push(img);
+        imagesMap[listingId]!.push(img as ListingWithImages["images"][number]);
       });
     }
   }

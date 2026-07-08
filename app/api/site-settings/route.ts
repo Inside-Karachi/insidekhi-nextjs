@@ -1,32 +1,23 @@
 import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 export async function GET() {
   try {
-    const supabase = await createServerSupabase({ publicAnon: true });
+    const { rows: settings } = await query(
+      `SELECT key, value FROM site_settings_active`,
+    );
 
-    const { data: settings, error } = await supabase
-      .from("site_settings_active")
-      .select("key, value");
-
-    if (error) {
-      console.error("Supabase error fetching site settings:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    // Convert to key-value object
-    const settingsObj =
-      settings?.reduce((acc, setting) => {
-        if (setting.key) {
-          acc[setting.key] = setting.value || "";
-        }
-        return acc;
-      }, {} as Record<string, string>) || {};
+    const settingsObj = settings.reduce<Record<string, string>>((acc, setting) => {
+      if (setting.key) {
+        acc[String(setting.key)] = String(setting.value ?? "");
+      }
+      return acc;
+    }, {});
 
     return NextResponse.json({
       success: true,
       settings: settingsObj,
-      count: settings?.length || 0,
+      count: settings.length,
     });
   } catch (error) {
     console.error("API error fetching site settings:", error);
@@ -35,7 +26,7 @@ export async function GET() {
         error: "Internal server error",
         details: error instanceof Error ? error.message : "Unknown error",
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

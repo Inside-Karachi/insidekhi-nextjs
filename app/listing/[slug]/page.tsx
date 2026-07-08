@@ -1,5 +1,5 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { notFound } from "next/navigation";
+import { query } from "@/lib/db";
 import { PremiumListingHero } from "@/components/listing/PremiumListingHeroServer";
 import { PremiumGallery } from "@/components/listing/PremiumGallery";
 import { ListingFeatures } from "@/components/listing/ListingFeatures";
@@ -39,96 +39,90 @@ interface ListingPageProps {
 }
 
 export default async function ListingPage({ params }: ListingPageProps) {
-  const publicSupabase = await createServerSupabase({ publicAnon: true });
-  const userSupabase = await createServerSupabase();
   const { slug } = await params;
 
-  // Fetch critical listing data
-  const { data: listing, error: listingError } = await publicSupabase
-    .from("listings_with_details")
-    .select("*")
-    .eq("slug", slug)
-    .eq("status", "published")
-    .single();
+  const { rows: listingRows } = await query(
+    `SELECT * FROM listings_with_details
+     WHERE slug = $1 AND status = 'published'
+     LIMIT 1`,
+    [slug],
+  );
+  const listing = listingRows[0];
 
-  if (listingError || !listing || !listing.id) {
-    if (listingError) {
-      console.error("[listing-page] Failed to fetch listing:", {
-        slug,
-        code: listingError.code,
-        message: listingError.message,
-      });
-    }
+  if (!listing || !listing.id) {
+    console.error("[listing-page] Failed to fetch listing:", { slug });
     notFound();
   }
 
-  // Fetch images, favorites, section data counts, branches, and opening hours in parallel
-  // This allows us to accurately determine which sections to show in QuickNavigation
+  const listingId = listing.id as number;
+  const nowIso = new Date().toISOString();
+
   const [
-    { data: images },
+    imagesResult,
     favSet,
-    { count: menuCount },
-    { count: dealsCount },
-    { count: hoursCount },
-    { data: branches },
-    { data: _openingHours }, // Not currently used - OpeningHoursContainer fetches its own data
+    menuCountResult,
+    dealsCountResult,
+    hoursCountResult,
+    branchesResult,
+    _openingHoursResult,
   ] = await Promise.all([
-    // Fetch images with reasonable limit (gallery max 20 + menu images)
-    publicSupabase
-      .from("listing_images")
-      .select("*")
-      .eq("listing_id", listing.id)
-      .order("display_order", { ascending: true })
-      .limit(50), // Reasonable limit: 10 gallery + up to 40 menu images
-    getFavoritedListingIdsForUser(userSupabase, [listing.id]).catch(
-      () => new Set(),
+    query(
+      `SELECT * FROM listing_images
+       WHERE listing_id = $1
+       ORDER BY display_order ASC
+       LIMIT 50`,
+      [listingId],
     ),
-    // Check if menu exists (only for restaurants)
-    publicSupabase
-      .from("menu_sections")
-      .select("*", { count: "exact", head: true })
-      .eq("listing_id", listing.id),
-    // Check if active deals exist
-    publicSupabase
-      .from("deals")
-      .select("*", { count: "exact", head: true })
-      .eq("listing_id", listing.id)
-      .eq("is_active", true)
-      .or(`end_date.is.null,end_date.gte.${new Date().toISOString()}`),
-    // Check if opening hours exist
-    publicSupabase
-      .from("opening_hours")
-      .select("*", { count: "exact", head: true })
-      .eq("listing_id", listing.id),
-    // Fetch branches (ordered by primary first, then created_at)
-    publicSupabase
-      .from("listing_branches")
-      .select("*")
-      .eq("listing_id", listing.id)
-      .order("is_primary", { ascending: false })
-      .order("created_at", { ascending: true }),
-    // Fetch opening hours data (for branch display)
-    publicSupabase
-      .from("opening_hours")
-      .select("*")
-      .eq("listing_id", listing.id)
-      .order("day_of_week", { ascending: true }),
+    getFavoritedListingIdsForUser(null, [listingId]).catch(() => new Set()),
+    query(
+      `SELECT COUNT(*)::integer AS count FROM menu_sections WHERE listing_id = $1`,
+      [listingId],
+    ),
+    query(
+      `SELECT COUNT(*)::integer AS count FROM deals
+       WHERE listing_id = $1
+         AND is_active = true
+         AND (end_date IS NULL OR end_date >= $2)`,
+      [listingId, nowIso],
+    ),
+    query(
+      `SELECT COUNT(*)::integer AS count FROM opening_hours WHERE listing_id = $1`,
+      [listingId],
+    ),
+    query(
+      `SELECT * FROM listing_branches
+       WHERE listing_id = $1
+       ORDER BY is_primary DESC, created_at ASC`,
+      [listingId],
+    ),
+    query(
+      `SELECT * FROM opening_hours
+       WHERE listing_id = $1
+       ORDER BY day_of_week ASC`,
+      [listingId],
+    ),
   ]);
+
+  const images = imagesResult.rows;
+  const menuCount = menuCountResult.rows[0]?.count as number | undefined;
+  const dealsCount = dealsCountResult.rows[0]?.count as number | undefined;
+  const hoursCount = hoursCountResult.rows[0]?.count as number | undefined;
+  const branches = branchesResult.rows;
+  const _openingHours = _openingHoursResult.rows;
 
   const MAX_GALLERY_IMAGES = 20;
 
   // Filter out menu images from gallery (they have /menu/ in the URL path)
   const galleryImages = (images || [])
-    .filter((img) => !img.url.includes("/menu/"))
+    .filter((img) => !String(img.url).includes("/menu/"))
     .slice(0, MAX_GALLERY_IMAGES);
 
-  // Extract menu images (separate from gallery)
   const menuImages = (images || [])
-    .filter((img) => img.url.includes("/menu/"))
+    .filter((img) => String(img.url).includes("/menu/"))
     .map((img, index) => ({
-      id: img.id,
-      url: img.url,
-      alt_text: img.alt_text || "Menu image",
+      id: img.id as number,
+      url: String(img.url),
+      alt_text: (img.alt_text as string | null) || "Menu image",
       display_order: index,
     }));
 
@@ -140,12 +134,10 @@ export default async function ListingPage({ params }: ListingPageProps) {
 
   // Set favorite flag
   (listing as unknown as { favorited?: boolean }).favorited = favSet.has(
-    listing.id,
+    listingId,
   );
 
-  // Check if category is restaurant-related via database hierarchy
-  // This properly handles subcategories (e.g., "BBQ" under "Eat & Drink")
-  const isRestaurant = await isRestaurantCategory(listing.category_id);
+  const isRestaurant = await isRestaurantCategory(listing.category_id as number | null);
 
   // Calculate section availability flags based on actual data
   const hasMenu = isRestaurant && (menuCount ?? 0) > 0;
@@ -473,69 +465,48 @@ export default async function ListingPage({ params }: ListingPageProps) {
   );
 }
 
-// Generate static params for ISR (top 20 listings)
 export async function generateStaticParams() {
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-    console.warn("Supabase environment variables missing at build time. Skipping static params generation.");
+  try {
+    const { rows: listings } = await query(
+      `SELECT slug FROM listings
+       WHERE status = 'published'
+       ORDER BY display_order DESC
+       LIMIT 20`,
+    );
+    return listings.map((listing) => ({
+      slug: String(listing.slug),
+    }));
+  } catch {
     return [];
   }
-
-  // Use createClient at build time (no cookies needed)
-  const { createClient } = await import("@supabase/supabase-js");
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-  );
-
-  const { data: listings } = await supabase
-    .from("listings")
-    .select("slug")
-    .eq("status", "published")
-    .order("display_order", { ascending: false })
-    .limit(20);
-
-  return (listings || []).map((listing) => ({
-    slug: listing.slug,
-  }));
 }
 
 // Generate metadata for SEO
 export async function generateMetadata({ params }: ListingPageProps) {
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-    return {
-      title: "Inside Karachi",
-    };
-  }
-
-  // Use createClient at build time (no cookies needed for public data)
-  const { createClient } = await import("@supabase/supabase-js");
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-  );
-
   const { slug } = await params;
 
-  const { data: listing } = await supabase
-    .from("listings_with_details")
-    .select("name, description")
-    .eq("slug", slug)
-    .single();
+  try {
+    const { rows } = await query(
+      `SELECT name, description FROM listings_with_details
+       WHERE slug = $1
+       LIMIT 1`,
+      [slug],
+    );
+    const listing = rows[0];
 
-  if (!listing) {
+    if (!listing) {
+      return { title: "Listing Not Found" };
+    }
+
     return {
-      title: "Listing Not Found",
+      title: `${listing.name} - Inside Karachi`,
+      description:
+        (listing.description as string | null)?.substring(0, 160) ||
+        `Discover ${listing.name} on Inside Karachi`,
     };
+  } catch {
+    return { title: "Inside Karachi" };
   }
-
-  return {
-    title: `${listing.name} - Inside Karachi`,
-    description:
-      listing.description?.substring(0, 160) ||
-      `Discover ${listing.name} on Inside Karachi`,
-  };
 }
 
 // Enable ISR with 1 hour revalidation

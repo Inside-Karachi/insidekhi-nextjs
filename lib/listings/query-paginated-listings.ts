@@ -1,0 +1,312 @@
+import { query } from "@/lib/db";
+import { getNearbyListings } from "@/app/actions/nearby-listings";
+import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
+import {
+  compareSearchRankThenIds,
+  sortFetchedListingsBySearchRelevance,
+} from "@/lib/listings/search-relevance";
+
+export type QueryListingsFilters = {
+  page?: number;
+  limit?: number;
+  categorySlug?: string | null;
+  search?: string | null;
+  sort?: string;
+  minRating?: string | null;
+  dealsOnly?: boolean;
+  bankParam?: string | null;
+  cardParam?: string | null;
+  openNow?: boolean;
+  excludeFeatured?: boolean;
+  lat?: number;
+  lng?: number;
+};
+
+type ListingRow = Record<string, unknown> & { id?: number | null };
+
+const sortRequiresDeals = (sortKey?: string) =>
+  sortKey === "max-discount" || sortKey === "best-deals";
+
+async function resolveCategoryNames(categorySlug?: string | null) {
+  if (!categorySlug || categorySlug === "all") return [] as string[];
+
+  const { rows: catRows } = await query(
+    `SELECT id, name, parent_id FROM categories WHERE slug = $1 LIMIT 1`,
+    [categorySlug],
+  );
+  const cat = catRows[0];
+  if (!cat) return [] as string[];
+
+  if (cat.parent_id === null) {
+    const { rows: subs } = await query(
+      `SELECT name FROM categories WHERE parent_id = $1`,
+      [cat.id],
+    );
+    return [String(cat.name), ...subs.map((s) => String(s.name))];
+  }
+
+  return [String(cat.name)];
+}
+
+async function attachListingImages(listings: ListingRow[]) {
+  const listingIds = listings
+    .map((l) => l.id)
+    .filter((id): id is number => typeof id === "number");
+
+  const imagesMap: Record<number, Record<string, unknown>[]> = {};
+  if (listingIds.length > 0) {
+    const { rows: images } = await query(
+      `SELECT * FROM listing_images
+       WHERE listing_id = ANY($1)
+       ORDER BY display_order ASC`,
+      [listingIds],
+    );
+    for (const img of images) {
+      const listingId = img.listing_id as number;
+      if (!imagesMap[listingId]) imagesMap[listingId] = [];
+      imagesMap[listingId].push(img);
+    }
+  }
+
+  return listings.map((listing) => ({
+    ...listing,
+    images: listing.id ? imagesMap[listing.id] || [] : [],
+  }));
+}
+
+export async function queryPaginatedListings(filters: QueryListingsFilters) {
+  const page = Math.max(1, filters.page ?? 1);
+  const limit = Math.min(50, Math.max(1, filters.limit ?? 9));
+  const offset = (page - 1) * limit;
+  const sort = filters.sort || "featured";
+
+  const whereClauses: string[] = ["status = 'published'"];
+  const queryParams: unknown[] = [];
+
+  if (filters.excludeFeatured) {
+    whereClauses.push("is_featured = false");
+  }
+
+  const categoryNames = await resolveCategoryNames(filters.categorySlug);
+  if (categoryNames.length > 0) {
+    queryParams.push(categoryNames);
+    whereClauses.push(`category_name = ANY($${queryParams.length})`);
+  }
+
+  const searchTerm = filters.search?.trim()
+    ? sanitizeSearchTerm(filters.search)
+    : "";
+  if (searchTerm) {
+    queryParams.push(`%${searchTerm}%`);
+    const idx = queryParams.length;
+    whereClauses.push(
+      `(name ILIKE $${idx} OR description ILIKE $${idx} OR address ILIKE $${idx})`,
+    );
+  }
+
+  if (filters.minRating) {
+    const rating = parseFloat(filters.minRating);
+    if (!Number.isNaN(rating)) {
+      queryParams.push(rating);
+      whereClauses.push(`avg_rating >= $${queryParams.length}`);
+    }
+  }
+
+  if (filters.openNow) {
+    whereClauses.push("is_open_now = true");
+  }
+
+  const needsDeals =
+    filters.dealsOnly ||
+    !!filters.bankParam ||
+    !!filters.cardParam ||
+    sortRequiresDeals(sort);
+
+  const maxDiscountByListingId: Record<number, number> = {};
+
+  if (needsDeals) {
+    const { rows: dealRows } = await query(
+      `SELECT listing_id, discount_value, is_active, bank_id, valid_card_variants, end_date
+       FROM deals`,
+    );
+
+    const nowMs = Date.now();
+    const bankId = filters.bankParam ? parseInt(filters.bankParam, 10) : null;
+    const cardId = filters.cardParam ? parseInt(filters.cardParam, 10) : null;
+    const filteredIds = new Set<number>();
+
+    for (const deal of dealRows) {
+      if (deal.listing_id == null) continue;
+      const lid = deal.listing_id as number;
+      const endMs = deal.end_date
+        ? Date.parse(String(deal.end_date))
+        : Number.POSITIVE_INFINITY;
+      const isActiveNow = Boolean(deal.is_active) && endMs >= nowMs;
+
+      let maxDiscount = 0;
+      if (deal.discount_value) {
+        const match = String(deal.discount_value).match(/(\d+)(?=%)/);
+        if (match) maxDiscount = parseInt(match[1], 10);
+      }
+      maxDiscountByListingId[lid] = Math.max(
+        maxDiscountByListingId[lid] || 0,
+        maxDiscount,
+      );
+
+      const bankMatch =
+        bankId != null && !Number.isNaN(bankId)
+          ? deal.bank_id === bankId
+          : true;
+      const cardMatch =
+        cardId != null && !Number.isNaN(cardId)
+          ? Array.isArray(deal.valid_card_variants) &&
+            deal.valid_card_variants.includes(cardId)
+          : true;
+      const dealsMatch = filters.dealsOnly ? isActiveNow : true;
+
+      if (dealsMatch && bankMatch && cardMatch) {
+        filteredIds.add(lid);
+      }
+    }
+
+    const dealIds = Array.from(filteredIds);
+    if (dealIds.length === 0) {
+      return {
+        listings: [],
+        totalItems: 0,
+        page,
+        limit,
+        totalPages: 0,
+        hasNextPage: false,
+        hasPrevPage: false,
+      };
+    }
+
+    queryParams.push(dealIds);
+    whereClauses.push(`id = ANY($${queryParams.length})`);
+  }
+
+  const whereSql = whereClauses.join(" AND ");
+
+  const getCount = async () => {
+    const { rows } = await query(
+      `SELECT COUNT(*)::integer AS total FROM listings_with_details WHERE ${whereSql}`,
+      queryParams,
+    );
+    return (rows[0]?.total as number) || 0;
+  };
+
+  let orderByClause =
+    "ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC";
+  switch (sort) {
+    case "rating":
+    case "top-rated":
+      orderByClause = "ORDER BY avg_rating DESC NULLS LAST, id ASC";
+      break;
+    case "newest":
+      orderByClause = "ORDER BY created_at DESC, id ASC";
+      break;
+    case "name":
+      orderByClause = "ORDER BY name ASC, id ASC";
+      break;
+  }
+
+  const hasDistanceSort =
+    sort === "distance" &&
+    filters.lat != null &&
+    !Number.isNaN(filters.lat) &&
+    filters.lng != null &&
+    !Number.isNaN(filters.lng);
+
+  let listings: ListingRow[] = [];
+  let totalItems = 0;
+
+  if (hasDistanceSort || sortRequiresDeals(sort)) {
+    const { rows } = await query(
+      `SELECT * FROM listings_with_details WHERE ${whereSql}`,
+      queryParams,
+    );
+
+    let sorted = rows as ListingRow[];
+
+    if (hasDistanceSort) {
+      const nearby = await getNearbyListings({
+        lat: filters.lat!,
+        lng: filters.lng!,
+        radius: 50000,
+        limit: 100,
+      });
+
+      const distanceMap = new Map<number, number>();
+      if (nearby.success) {
+        nearby.data.forEach((item) => {
+          distanceMap.set(item.id, item.distance_meters);
+        });
+      }
+
+      sorted = sorted
+        .filter((row) => row.id != null && distanceMap.has(row.id))
+        .map((row) => ({
+          ...row,
+          distance_meters: row.id != null ? distanceMap.get(row.id) : undefined,
+        }))
+        .sort((a, b) => {
+          const distA =
+            typeof a.distance_meters === "number"
+              ? a.distance_meters
+              : Number.POSITIVE_INFINITY;
+          const distB =
+            typeof b.distance_meters === "number"
+              ? b.distance_meters
+              : Number.POSITIVE_INFINITY;
+          return compareSearchRankThenIds(a, b, filters.search ?? undefined, distA - distB);
+        });
+    } else {
+      sorted = [...sorted].sort((a, b) => {
+        const discountA = a.id != null ? maxDiscountByListingId[a.id] || 0 : 0;
+        const discountB = b.id != null ? maxDiscountByListingId[b.id] || 0 : 0;
+        return compareSearchRankThenIds(
+          a,
+          b,
+          filters.search ?? undefined,
+          discountB - discountA,
+        );
+      });
+    }
+
+    totalItems = sorted.length;
+    listings = sorted.slice(offset, offset + limit);
+  } else {
+    totalItems = await getCount();
+    const limitIdx = queryParams.length + 1;
+    const offsetIdx = queryParams.length + 2;
+    const { rows } = await query(
+      `SELECT * FROM listings_with_details
+       WHERE ${whereSql}
+       ${orderByClause}
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      [...queryParams, limit, offset],
+    );
+    listings = rows as ListingRow[];
+
+    if (searchTerm.length >= 2) {
+      listings = sortFetchedListingsBySearchRelevance(
+        listings as never,
+        searchTerm,
+      ) as ListingRow[];
+    }
+  }
+
+  const enrichedListings = await attachListingImages(listings);
+  const totalPages = Math.ceil(totalItems / limit);
+
+  return {
+    listings: enrichedListings,
+    totalItems,
+    page,
+    limit,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPrevPage: page > 1,
+  };
+}

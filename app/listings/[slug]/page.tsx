@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { PremiumListingsGrid } from "@/components/listings/PremiumListingsGrid";
 import { FeaturedListingsCarousel } from "@/components/listings/FeaturedListingsCarousel";
 import { PremiumListingsHeaderInline as PremiumListingsHeader } from "@/components/listings/PremiumListingsHeaderInline";
@@ -50,7 +50,15 @@ export default async function CategoryListingsPage({
   const category = categories[0];
 
   if (!category) {
-    console.error("[category-listings] Category not found for slug:", slug);
+    // Listing slugs sometimes land here via mistaken /listings/{slug} links.
+    const { rows: listingMatches } = await query(
+      "SELECT id FROM listings WHERE slug = $1 AND status = 'published' LIMIT 1",
+      [slug],
+    );
+    if (listingMatches[0]) {
+      redirect(`/listing/${slug}`);
+    }
+
     notFound();
   }
 

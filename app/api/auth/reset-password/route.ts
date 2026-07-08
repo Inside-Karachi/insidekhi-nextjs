@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { v4 as uuidv4 } from "uuid";
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
     const body = await request.json();
     const { email } = body || {};
 
@@ -31,21 +30,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Send password reset email
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL}/auth/reset-password`,
-    });
+    // Verify email exists in DB
+    const { rows: users } = await query(
+      "SELECT id FROM auth.users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+      [email]
+    );
 
-    if (error) {
-      console.error("Password reset error:", error);
+    if (users.length > 0) {
+      const user = users[0];
+      const recoveryToken = uuidv4();
+      const now = new Date();
+      const tokenSentAt = now.toISOString();
 
-      // Don't reveal if email exists or not for security
-      // Always return success to prevent email enumeration
-      return NextResponse.json({
-        success: true,
-        message:
-          "If an account with that email exists, we've sent password reset instructions.",
-      });
+      // Store recovery token inside auth.users table
+      await query(
+        `UPDATE auth.users 
+         SET recovery_token = $1, recovery_sent_at = $2 
+         WHERE id = $3`,
+        [recoveryToken, tokenSentAt, user.id]
+      );
+
+      // In real prod this would send an email with the link:
+      // `${process.env.NEXT_PUBLIC_SITE_URL}/auth/reset-password?code=${recoveryToken}`
+      console.log(`[PASSWORD RESET LINK]: ${process.env.NEXT_PUBLIC_SITE_URL}/auth/reset-password?code=${recoveryToken}`);
     }
 
     // Log successful password reset request
@@ -60,7 +67,6 @@ export async function POST(request: NextRequest) {
       );
     } catch (logError) {
       console.error("Failed to log password reset request:", logError);
-      // Don't fail the operation if logging fails
     }
 
     return NextResponse.json({
@@ -79,3 +85,4 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+

@@ -1,5 +1,6 @@
-import { createServerClient } from "@supabase/ssr";
 import { NextRequest } from "next/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 interface MaintenanceStatus {
   enabled: boolean;
@@ -18,50 +19,29 @@ export async function checkMaintenanceMode(
   request: NextRequest
 ): Promise<MaintenanceStatus | null> {
   try {
-    // Use service role key to bypass RLS for system_config table
-    // This is safe because we're only reading public configuration
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      {
-        cookies: {
-          get(name: string) {
-            return request.cookies.get(name)?.value;
-          },
-          set() {}, // No-op in middleware
-          remove() {}, // No-op in middleware
-        },
-      }
+    // Fetch maintenance configuration directly from Postgres
+    const { rows: configs } = await query(
+      "SELECT config_key, config_value FROM system_config WHERE config_key IN ($1, $2, $3)",
+      ["maintenance.enabled", "maintenance.message", "maintenance.estimated_end"]
     );
 
-    // Fetch maintenance configuration
-    const { data: configs, error } = await supabase
-      .from("system_config")
-      .select("config_key, config_value")
-      .in("config_key", [
-        "maintenance.enabled",
-        "maintenance.message",
-        "maintenance.estimated_end",
-      ]);
-
-    if (error || !configs) {
-      console.error("[MAINTENANCE CHECK] Error fetching config:", error);
+    if (!configs || configs.length === 0) {
+      console.error("[MAINTENANCE CHECK] No configs fetched from database");
       return null; // Fail open - allow access if we can't check
     }
 
     // Parse configuration
     const enabledConfig = configs.find(
-      (c) => c.config_key === "maintenance.enabled"
+      (c: any) => c.config_key === "maintenance.enabled"
     );
     const messageConfig = configs.find(
-      (c) => c.config_key === "maintenance.message"
+      (c: any) => c.config_key === "maintenance.message"
     );
     const estimatedEndConfig = configs.find(
-      (c) => c.config_key === "maintenance.estimated_end"
+      (c: any) => c.config_key === "maintenance.estimated_end"
     );
 
     // JSONB boolean values can be actual booleans OR strings "true"/"false"
-    // Handle both: true, false, "true", "false"
     const configValue = enabledConfig?.config_value;
     const enabled =
       configValue === true ||
@@ -81,7 +61,7 @@ export async function checkMaintenanceMode(
       return null; // Maintenance mode is disabled
     }
 
-    // Extract JSON values (config_value is JSONB, strings are stored with quotes)
+    // Extract JSON values
     const messageValue = messageConfig?.config_value;
     const estimatedEndValue = estimatedEndConfig?.config_value;
 
@@ -120,52 +100,28 @@ export async function isSuperAdmin(
   knownUserId?: string,
 ): Promise<boolean> {
   try {
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          get(name: string) {
-            return request.cookies.get(name)?.value;
-          },
-          set() {},
-          remove() {},
-        },
-      }
-    );
-
     let userId = knownUserId;
 
     if (!userId) {
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-
-      if (userError || !user) {
+      const session = await getSession(request);
+      if (!session) {
         if (DEBUG_SUPER_ADMIN_CHECK) {
-          console.log(
-            "[SUPER ADMIN CHECK] No authenticated user:",
-            userError?.message,
-          );
+          console.log("[SUPER ADMIN CHECK] No authenticated session");
         }
         return false;
       }
-      userId = user.id;
+      userId = session.userId;
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", userId)
-      .single();
+    const { rows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [userId]
+    );
+    const profile = rows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       if (DEBUG_SUPER_ADMIN_CHECK) {
-        console.log(
-          "[SUPER ADMIN CHECK] Failed to fetch profile:",
-          profileError?.message
-        );
+        console.log("[SUPER ADMIN CHECK] Failed to fetch profile");
       }
       return false;
     }
@@ -198,3 +154,4 @@ const ALWAYS_ACCESSIBLE_PATHS = [
 export function shouldBypassMaintenance(pathname: string): boolean {
   return ALWAYS_ACCESSIBLE_PATHS.some((path) => pathname.startsWith(path));
 }
+

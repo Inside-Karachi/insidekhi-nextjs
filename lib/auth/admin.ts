@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { Database } from "@/types/supabase";
 
 type UserRole = Database["public"]["Enums"]["user_role"];
@@ -62,12 +63,10 @@ export function getAdminAuthErrorStatus(error: unknown): 401 | 403 | null {
  * Throws error if user is not authenticated or doesn't have admin role
  */
 export async function requireAdmin(
-  _request: NextRequest,
+  request: NextRequest,
   knownUser?: MiddlewareAuthUser,
 ): Promise<AdminAuthResult> {
   try {
-    const supabase = await createServerSupabase();
-
     let userId: string;
     let userEmail: string | undefined;
 
@@ -75,25 +74,21 @@ export async function requireAdmin(
       userId = knownUser.id;
       userEmail = knownUser.email;
     } else {
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-
-      if (authError || !user) {
+      const session = await getSession(request);
+      if (!session) {
         throw new Error("Authentication required");
       }
-      userId = user.id;
-      userEmail = user.email;
+      userId = session.userId;
+      userEmail = session.email;
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", userId)
-      .single();
+    const { rows } = await query(
+      "SELECT * FROM profiles WHERE id = $1 LIMIT 1",
+      [userId]
+    );
+    const profile = rows[0] as Profile | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       throw new Error("Profile not found");
     }
 
@@ -142,12 +137,10 @@ export async function requireSuperAdmin(
  * Throws error if user is not authenticated or doesn't have staff/lister role
  */
 export async function requireStaff(
-  _request: NextRequest,
+  request: NextRequest,
   knownUser?: MiddlewareAuthUser,
 ): Promise<AdminAuthResult> {
   try {
-    const supabase = await createServerSupabase();
-
     let userId: string;
     let userEmail: string | undefined;
 
@@ -155,25 +148,21 @@ export async function requireStaff(
       userId = knownUser.id;
       userEmail = knownUser.email;
     } else {
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-
-      if (authError || !user) {
+      const session = await getSession(request);
+      if (!session) {
         throw new Error("Authentication required");
       }
-      userId = user.id;
-      userEmail = user.email;
+      userId = session.userId;
+      userEmail = session.email;
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", userId)
-      .single();
+    const { rows } = await query(
+      "SELECT * FROM profiles WHERE id = $1 LIMIT 1",
+      [userId]
+    );
+    const profile = rows[0] as Profile | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       throw new Error("Profile not found");
     }
 
@@ -256,11 +245,8 @@ export async function canAccessResource(
 
     // Check resource ownership for non-admin users
     if (resourceOwnerId) {
-      const supabase = await createServerSupabase();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (user && user.id === resourceOwnerId) {
+      const session = await getSession(request);
+      if (session && session.userId === resourceOwnerId) {
         return true;
       }
     }

@@ -1,13 +1,14 @@
-import { createServerSupabase } from "@/lib/supabase/server";
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { query } from "@/lib/db";
+import { verifyPassword } from "@/lib/auth/password";
+import { setSession } from "@/lib/auth/session";
 import {
   checkAuthRateLimit,
   createRateLimitResponse,
 } from "@/lib/rate-limiter-distributed";
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   const { email, password } = await request.json();
-  // Attempting login for submitted credentials
 
   // Basic input validation
   if (!email || !password) {
@@ -31,39 +32,60 @@ export async function POST(request: Request) {
     request.headers.get("x-real-ip") ||
     "unknown";
 
-  const supabase = await createServerSupabase();
+  try {
+    // 1. Fetch user credentials and profile
+    const { rows } = await query(
+      `SELECT p.id, p.role, u.email_confirmed_at, u.encrypted_password 
+       FROM public.profiles p 
+       LEFT JOIN auth.users u ON p.id = u.id 
+       WHERE LOWER(u.email) = LOWER($1) LIMIT 1`,
+      [email]
+    );
 
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
+    const dbUser = rows[0];
 
-  // Supabase sign-in attempted
+    if (!dbUser || !dbUser.encrypted_password) {
+      // Log failed login attempt
+      try {
+        const { logFailedLogin } = await import("@/lib/audit");
+        await logFailedLogin(
+          email,
+          ip,
+          request.headers.get("user-agent") || undefined,
+        );
+      } catch (logError) {
+        console.error("Failed to log failed login:", logError);
+      }
 
-  if (error) {
-    console.error("Login failed:", error.message);
-
-    // Log failed login attempt
-    try {
-      const { logFailedLogin } = await import("@/lib/audit");
-      await logFailedLogin(
-        email,
-        ip,
-        request.headers.get("user-agent") || undefined,
+      return NextResponse.json(
+        { error: "Invalid credentials. Please try again." },
+        { status: 401 },
       );
-    } catch (logError) {
-      console.error("Failed to log failed login:", logError);
     }
 
-    // Supabase surfaces unconfirmed accounts via error.code or error.message.
-    // Return a distinct code so the client can guide the user to the resend flow
-    // rather than leaving them with a misleading "wrong credentials" message.
-    const authError = error as { code?: string; message: string };
-    const isUnconfirmed =
-      authError.code === "email_not_confirmed" ||
-      authError.message.toLowerCase().includes("email not confirmed");
+    // 2. Validate password
+    const isPasswordCorrect = await verifyPassword(password, dbUser.encrypted_password);
+    if (!isPasswordCorrect) {
+      try {
+        const { logFailedLogin } = await import("@/lib/audit");
+        await logFailedLogin(
+          email,
+          ip,
+          request.headers.get("user-agent") || undefined,
+        );
+      } catch (logError) {
+        console.error("Failed to log failed login:", logError);
+      }
 
-    if (isUnconfirmed) {
+      return NextResponse.json(
+        { error: "Invalid credentials. Please try again." },
+        { status: 401 },
+      );
+    }
+
+    // 3. Check email confirmation
+    if (!dbUser.email_confirmed_at) {
+
       return NextResponse.json(
         {
           error:
@@ -74,76 +96,59 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json(
-      { error: "Invalid credentials. Please try again." },
-      { status: 401 },
+    // 4. Check if maintenance mode is enabled and if user is super admin
+    const { rows: maintenanceConfigs } = await query(
+      "SELECT config_key, config_value FROM system_config WHERE config_key = $1 LIMIT 1",
+      ["maintenance.enabled"]
     );
-  }
-
-  // Check if maintenance mode is enabled and if user is super admin
-  if (data.user) {
-    // Check maintenance mode
-    const serviceRoleSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
-
-    const { data: maintenanceConfig } = await serviceRoleSupabase
-      .from("system_config")
-      .select("config_value")
-      .eq("config_key", "maintenance.enabled")
-      .single();
-
+    const maintenanceConfig = maintenanceConfigs[0];
     const maintenanceEnabled =
       maintenanceConfig?.config_value === true ||
       maintenanceConfig?.config_value === "true" ||
       (typeof maintenanceConfig?.config_value === "string" &&
         maintenanceConfig.config_value.toLowerCase() === "true");
 
-    if (maintenanceEnabled) {
-      // Check if user is super admin
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", data.user.id)
-        .single();
-
-      if (profile?.role !== "super_admin") {
-        // Sign out the user immediately
-        await supabase.auth.signOut();
-
-        console.log(
-          `[LOGIN BLOCKED] Non-super admin user ${data.user.email} attempted login during maintenance`,
-        );
-
-        return NextResponse.json(
-          {
-            error:
-              "The system is currently under maintenance. Only administrators can access the system at this time. Please try again later.",
-          },
-          { status: 503 },
-        );
-      }
-
+    if (maintenanceEnabled && dbUser.role !== "super_admin") {
       console.log(
-        `[LOGIN ALLOWED] Super admin ${data.user.email} logged in during maintenance`,
+        `[LOGIN BLOCKED] Non-super admin user ${email} attempted login during maintenance`,
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "The system is currently under maintenance. Only administrators can access the system at this time. Please try again later.",
+        },
+        { status: 503 },
       );
     }
+
+    // 5. Successful login: set session cookie and build response
+    const response = NextResponse.json({ message: "Login successful" });
+    await setSession(response, {
+      userId: dbUser.id,
+      email,
+      role: dbUser.role,
+    });
 
     // Log successful login
     try {
       const { logUserLogin } = await import("@/lib/audit");
       await logUserLogin(
-        data.user.id,
-        request.headers.get("x-forwarded-for") ||
-          request.headers.get("x-real-ip") ||
-          "unknown",
+        dbUser.id,
+        ip,
         request.headers.get("user-agent") || undefined,
       );
     } catch (logError) {
       console.error("Failed to log successful login:", logError);
     }
-  }
 
-  // Login successful
-  return NextResponse.json({ message: "Login successful" });
+    return response;
+  } catch (error) {
+    console.error("Login process error:", error);
+    return NextResponse.json(
+      { error: "An error occurred during authentication." },
+      { status: 500 }
+    );
+  }
 }
+

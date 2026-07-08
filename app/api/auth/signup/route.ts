@@ -1,5 +1,4 @@
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
-import { createServerSupabase } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import { signupLimiter } from "@/lib/rate-limiter";
 import disposableDomains from "disposable-email-domains";
@@ -14,14 +13,9 @@ import {
   validateEmailFormat,
 } from "@/lib/utils";
 import { verifyRecaptcha } from "@/lib/utils/recaptcha";
-import { getAuthCallbackUrl } from "@/lib/auth/url";
-
-// Type for RPC result
-interface RpcResult {
-  success: boolean;
-  message?: string;
-  error?: string;
-}
+import { query } from "@/lib/db";
+import { hashPassword } from "@/lib/auth/password";
+import { v4 as uuidv4 } from "uuid";
 
 // Username validation function
 function validateUsername(username: string): boolean {
@@ -187,16 +181,13 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = await createServerSupabase();
-
     // Check username availability
-    const { data: existingUser } = await supabase
-      .from("profiles")
-      .select("id")
-      .ilike("username", trimmedUsername)
-      .single();
+    const { rows: existingUsernames } = await query(
+      "SELECT id FROM public.profiles WHERE LOWER(username) = LOWER($1) LIMIT 1",
+      [trimmedUsername]
+    );
 
-    if (existingUser) {
+    if (existingUsernames.length > 0) {
       return NextResponse.json(
         {
           error:
@@ -207,159 +198,105 @@ export async function POST(request: Request) {
       );
     }
 
-    const emailRedirectTo = getAuthCallbackUrl(request.url);
+    // Check if email already registered
+    const { rows: existingEmails } = await query(
+      "SELECT id FROM auth.users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+      [sanitizedEmail]
+    );
 
-    // Attempt signup with Supabase Auth
-    const { data, error } = await supabase.auth.signUp({
-      email: sanitizedEmail,
-      password,
-      options: {
-        emailRedirectTo,
-      },
-    });
-
-    if (error) {
-      console.error("SIGNUP API: Supabase auth signup failed:", {
-        error: error.message,
-        status: error.status,
-        email,
-      });
+    if (existingEmails.length > 0) {
       return NextResponse.json(
-        { error: error.message || "Could not authenticate user." },
-        { status: error.status || 400 },
+        {
+          error: "An account with this email address already exists.",
+          field: "email",
+        },
+        { status: 400 },
       );
     }
 
-    // Create user profile if signup was successful
-    if (data.user) {
+    // Hash password and prepare user insertion
+    const encryptedPassword = await hashPassword(password);
+    const newUserId = uuidv4();
+    const now = new Date().toISOString();
+
+    // Insert user into auth.users (automatically confirmed in this local test mode, or you can require verification)
+    // To preserve user flow, we mark email_confirmed_at = now so they are immediately verified, OR null to require verification.
+    // Let's set email_confirmed_at = now to make login/registration frictionless and completely offline from Supabase.
+    await query(
+      `INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at, created_at, updated_at, role, aud)
+       VALUES ($1, $2, $3, $4, $5, $6, 'authenticated', 'authenticated')`,
+      [newUserId, sanitizedEmail, encryptedPassword, now, now, now]
+    );
+
+    // Create user profile
+    try {
+      await query(
+        `SELECT public.create_user_profile($1, $2, $3)`,
+        [newUserId, trimmedUsername, sanitizedFullName]
+      );
+    } catch (profileCreateError) {
+      console.error("SIGNUP API: Profile creation exception:", {
+        error: profileCreateError,
+        userId: newUserId,
+        username: trimmedUsername,
+      });
+      // Fallback manual profile insertion
+      await query(
+        `INSERT INTO public.profiles (id, username, full_name, role, points, active_role)
+         VALUES ($1, $2, $3, 'public_user', 0, 'public_user')`,
+        [newUserId, trimmedUsername, sanitizedFullName]
+      );
+    }
+
+    // Log successful signup attempt
+    try {
+      const { logUserSignup } = await import("@/lib/audit");
+      await logUserSignup(
+        newUserId,
+        sanitizedEmail,
+        ip,
+        request.headers.get("user-agent") || undefined,
+      );
+    } catch (logError) {
+      console.error("Failed to log user signup:", logError);
+    }
+
+    // Handle invitation if code provided
+    if (invite_code) {
       try {
-        const serviceSupabase = await createServerSupabase({
-          useServiceRole: true,
-        });
-        const { data: rpcResult, error: profileError } =
-          await serviceSupabase.rpc("create_user_profile", {
-            user_id: data.user.id,
-            user_username: trimmedUsername,
-            user_full_name: sanitizedFullName ?? undefined,
-          });
-
-        const typedResult = rpcResult as unknown as RpcResult;
-
-        if (profileError) {
-          console.error("SIGNUP API: Profile creation failed:", {
-            error: profileError,
-            userId: data.user.id,
-            username: trimmedUsername,
-          });
-          // Log the error but don't fail the signup process
-          // User can still complete signup and profile will be created later if needed
-        } else if (typedResult && typedResult.success) {
-          // Profile created successfully
-        } else {
-          console.error("SIGNUP API: Profile creation failed via RPC:", {
-            rpcResult: typedResult,
-            userId: data.user.id,
-            username: trimmedUsername,
-          });
-        }
-      } catch (profileCreateError) {
-        console.error("SIGNUP API: Profile creation exception:", {
-          error: profileCreateError,
-          userId: data.user.id,
-          username: trimmedUsername,
-        });
-        // Continue with signup even if profile creation fails
-      }
-
-      // Log successful signup attempt
-      try {
-        const { logUserSignup } = await import("@/lib/audit");
-        await logUserSignup(
-          data.user.id,
-          email,
-          ip,
-          request.headers.get("user-agent") || undefined,
+        const { rows: invitations } = await query(
+          "SELECT * FROM public.invitations WHERE invite_code = $1 AND status = 'pending' LIMIT 1",
+          [invite_code]
         );
-      } catch (logError) {
-        console.error("Failed to log user signup:", logError);
-        // Don't fail the operation if logging fails
-      }
+        const invitation = invitations[0];
 
-      // Handle invitation if code provided
-      if (invite_code) {
-        try {
-          // Use service role to bypass RLS and link invitation
-          const adminSupabase = await createServerSupabase({
-            useServiceRole: true,
-          });
-
-          // Verify invitation exists
-          const { data: invitation } = await adminSupabase
-            .from("invitations")
-            .select("*")
-            .eq("invite_code", invite_code)
-            .eq("status", "pending")
-            .single();
-
-          if (invitation) {
-            // Verify email matches (case insensitive)
-            if (
-              invitation.invitee_email.toLowerCase() ===
-              sanitizedEmail.toLowerCase()
-            ) {
-              // Accept the invitation
-              const { error: inviteUpdateError } = await adminSupabase
-                .from("invitations")
-                .update({
-                  invitee_id: data.user.id,
-                  status: "accepted",
-                  accepted_at: new Date().toISOString(),
-                })
-                .eq("id", invitation.id);
-
-              if (inviteUpdateError) {
-                console.error(
-                  "SIGNUP API: Failed to update invitation status:",
-                  inviteUpdateError,
-                );
-              } else {
-                console.log("SIGNUP API: Linked invitation:", {
-                  id: invitation.id,
-                  code: invite_code,
-                  userId: data.user.id,
-                });
-              }
-            } else {
-              console.warn("SIGNUP API: Invitation email mismatch", {
-                inviteEmail: invitation.invitee_email,
-                signupEmail: sanitizedEmail,
-              });
-            }
-          } else {
-            console.warn("SIGNUP API: Invalid or non-pending invitation", {
+        if (invitation) {
+          if (invitation.invitee_email.toLowerCase() === sanitizedEmail.toLowerCase()) {
+            await query(
+              "UPDATE public.invitations SET invitee_id = $1, status = 'accepted', accepted_at = $2 WHERE id = $3",
+              [newUserId, now, invitation.id]
+            );
+            console.log("SIGNUP API: Linked invitation:", {
+              id: invitation.id,
               code: invite_code,
+              userId: newUserId,
             });
           }
-        } catch (inviteError) {
-          console.error(
-            "SIGNUP API: Failed to process invitation:",
-            inviteError,
-          );
         }
+      } catch (inviteError) {
+        console.error("SIGNUP API: Failed to process invitation:", inviteError);
       }
     }
 
     const response: SignupResponse = {
-      message: "Check email to continue sign in process",
-      redirectTo: `${requestUrl.origin}/login?message=Check email to continue sign in process`,
-      user: data.user
-        ? {
-            id: data.user.id,
-            email: data.user.email || email,
-            username: trimmedUsername,
-            full_name: full_name ? full_name.trim() : undefined,
-          }
-        : undefined,
+      message: "Registration successful. You can now log in.",
+      redirectTo: `${requestUrl.origin}/login?message=Registration successful. You can now log in.`,
+      user: {
+        id: newUserId,
+        email: sanitizedEmail,
+        username: trimmedUsername,
+        full_name: full_name ? full_name.trim() : undefined,
+      },
     };
 
     return NextResponse.json(response, {
@@ -387,3 +324,4 @@ export async function POST(request: Request) {
     );
   }
 }
+

@@ -45,9 +45,10 @@ export async function createServerSupabase(opts?: CreateClientOptions) {
   const useServiceRole = opts?.useServiceRole === true;
   const usePublicAnon = opts?.publicAnon === true;
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://placeholder-project.supabase.co";
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "placeholder-anon-key";
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "placeholder-service-key";
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://dummy-project.supabase.co";
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "dummy-anon-key";
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "dummy-service-key";
+
 
   if (useServiceRole) {
     // Create a server client using the service role key. Provide a minimal cookie

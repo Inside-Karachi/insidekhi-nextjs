@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
 import type { LeaderboardCacheEntry } from "@/types/gamification.types";
 
 interface UserGamificationData {
@@ -40,52 +39,16 @@ export function useUserGamification(userId: string | undefined) {
 
     const fetchGamificationData = async () => {
       try {
-        const supabase = createClient();
-
-        // Fetch XP directly from profiles for real-time accuracy
-        const { data: profileData, error: profileError } = await supabase
-          .from("profiles")
-          .select("points")
-          .eq("id", userId)
-          .single();
-
-        if (profileError) {
-          throw new Error(
-            `Failed to fetch user profile: ${profileError.message}`
-          );
+        const response = await fetch("/api/user/gamification");
+        if (!response.ok) {
+          throw new Error("Failed to fetch gamification details");
         }
-
-        const xpTotal = profileData?.points || 0;
-
-        // Get user's current rank from user_ranks
-        const { data: userRankData, error: rankError } = await supabase
-          .from("user_ranks")
-          .select(
-            `
-            id,
-            rank:ranks(
-              name
-            )
-          `
-          )
-          .eq("user_id", userId)
-          .eq("current_rank", true)
-          .maybeSingle();
-
-        let rankName = "Unranked";
-        if (userRankData?.rank) {
-          rankName = (userRankData.rank as { name: string }).name;
-        } else if (!rankError || rankError.code === "PGRST116") {
-          // PGRST116 = no rows found, user is unranked
-          rankName = "Unranked";
-        } else if (rankError) {
-          console.warn("Error fetching user rank:", rankError);
-        }
+        const resData = await response.json();
 
         setData({
           leaderboardEntry: null,
-          xpTotal,
-          rank: rankName,
+          xpTotal: resData.xpTotal,
+          rank: resData.rank,
           rankPosition: 0,
           loading: false,
           error: null,

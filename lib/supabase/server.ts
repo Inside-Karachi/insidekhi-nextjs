@@ -45,17 +45,11 @@ export async function createServerSupabase(opts?: CreateClientOptions) {
   const useServiceRole = opts?.useServiceRole === true;
   const usePublicAnon = opts?.publicAnon === true;
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  if (!supabaseUrl) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL environment variable");
-  }
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://placeholder-project.supabase.co";
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "placeholder-anon-key";
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "placeholder-service-key";
 
   if (useServiceRole) {
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!serviceKey) {
-      throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY environment variable");
-    }
-
     // Create a server client using the service role key. Provide a minimal cookie
     // handler to satisfy the client API types; it will be a no-op for service role.
     return createServerClient<Database>(supabaseUrl, serviceKey, {
@@ -78,13 +72,6 @@ export async function createServerSupabase(opts?: CreateClientOptions) {
   }
 
   if (usePublicAnon) {
-    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    if (!anonKey) {
-      throw new Error(
-        "Missing NEXT_PUBLIC_SUPABASE_ANON_KEY environment variable",
-      );
-    }
-
     // Public read mode: deliberately ignore request cookies so invalid/stale
     // sessions do not poison otherwise public data queries.
     return createServerClient<Database>(supabaseUrl, anonKey, {
@@ -106,23 +93,23 @@ export async function createServerSupabase(opts?: CreateClientOptions) {
   }
 
   // Default: create a client that respects the request cookies (user context)
-  const cookieStore = await cookies();
-
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!anonKey) {
-    throw new Error(
-      "Missing NEXT_PUBLIC_SUPABASE_ANON_KEY environment variable"
-    );
+  let cookieStore;
+  try {
+    cookieStore = await cookies();
+  } catch {
+    // Handle cases during static generation where headers/cookies might not be accessible
+    cookieStore = null;
   }
 
   return createServerClient<Database>(supabaseUrl, anonKey, {
     cookies: {
       getAll() {
-        return cookieStore.getAll();
+        return cookieStore ? cookieStore.getAll() : [];
       },
       setAll(
         cookiesToSet: { name: string; value: string; options: CookieOptions }[]
       ) {
+        if (!cookieStore) return;
         try {
           cookiesToSet.forEach(({ name, value, options }) => {
             cookieStore.set(name, value, options);

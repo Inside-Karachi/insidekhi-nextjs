@@ -1,9 +1,7 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { notFound } from "next/navigation";
 import { PremiumListingsGrid } from "@/components/listings/PremiumListingsGrid";
 import { FeaturedListingsCarousel } from "@/components/listings/FeaturedListingsCarousel";
 import { PremiumListingsHeaderInline as PremiumListingsHeader } from "@/components/listings/PremiumListingsHeaderInline";
-import { Database } from "@/types/supabase";
 import { getNearbyListings } from "@/app/actions/nearby-listings";
 import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
 import { buildGridSearchParams } from "@/lib/utils/listings-filters";
@@ -11,9 +9,8 @@ import {
   compareSearchRankThenIds,
   stableReorderBySearchRank,
 } from "@/lib/listings/search-relevance";
-
-// Use proper Supabase types
-type Listing = Database["public"]["Views"]["listings_with_details"]["Row"];
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 interface CategoryListingsPageProps {
   params: Promise<{
@@ -38,8 +35,6 @@ export default async function CategoryListingsPage({
   params,
   searchParams,
 }: CategoryListingsPageProps) {
-  const publicSupabase = await createServerSupabase({ publicAnon: true });
-  const userSupabase = await createServerSupabase();
   const { slug } = await params;
   const resolvedSearchParams = await searchParams;
 
@@ -47,75 +42,63 @@ export default async function CategoryListingsPage({
     ? sanitizeSearchTerm(resolvedSearchParams.search)
     : "";
 
-  // Fetch the category
-  const { data: category, error: categoryError } = await publicSupabase
-    .from("categories")
-    .select("*")
-    .eq("slug", slug)
-    .single();
+  // 1. Fetch the category
+  const { rows: categories } = await query(
+    "SELECT * FROM categories WHERE slug = $1 LIMIT 1",
+    [slug]
+  );
+  const category = categories[0];
 
-  if (categoryError || !category) {
-    if (categoryError) {
-      console.error("[category-listings] Failed to fetch category:", {
-        slug,
-        code: categoryError.code,
-        message: categoryError.message,
-      });
-    }
+  if (!category) {
+    console.error("[category-listings] Category not found for slug:", slug);
     notFound();
   }
 
-  // Build query for listings
-  let query = publicSupabase
-    .from("listings_with_details")
-    .select("*")
-    .eq("status", "published");
-
-  // Slug page grid intentionally excludes featured items because featured content is shown in carousel.
-  query = query.eq("is_featured", false);
-
-  // Pre-compute category names array for filtering (reused throughout)
+  // Pre-compute category names array for filtering
   let categoryNamesForFilter: string[] = [category.name];
 
-  // Filter by category using category_name from the view
-  // Since listings_with_details view has category_name, not category_id
   if (category.parent_id === null) {
-    // Parent category - get all listings in this category and its subcategories
-    const { data: subcategories } = await publicSupabase
-      .from("categories")
-      .select("name")
-      .eq("parent_id", category.id);
-
+    // Parent category - get all subcategories
+    const { rows: subcategories } = await query(
+      "SELECT name FROM categories WHERE parent_id = $1",
+      [category.id]
+    );
     categoryNamesForFilter = [
       category.name,
-      ...(subcategories?.map((sub) => sub.name) || []),
+      ...subcategories.map((sub) => sub.name),
     ];
-    query = query.in("category_name", categoryNamesForFilter);
-  } else {
-    // Subcategory - get listings only in this specific category
-    query = query.eq("category_name", category.name);
   }
+
+  // Build the WHERE clause dynamically
+  const whereClauses: string[] = ["status = 'published'", "is_featured = false"];
+  const queryParams: any[] = [];
+
+  // Filter by category names
+  queryParams.push(categoryNamesForFilter);
+  whereClauses.push(`category_name = ANY($${queryParams.length})`);
 
   // Apply search filter
   if (resolvedSearchParams.search && searchTermResolved) {
-    query = query.or(
-      `name.ilike.%${searchTermResolved}%,description.ilike.%${searchTermResolved}%,address.ilike.%${searchTermResolved}%`,
-    );
+    queryParams.push(`%${searchTermResolved}%`);
+    const idx = queryParams.length;
+    whereClauses.push(`(name ILIKE $${idx} OR description ILIKE $${idx} OR address ILIKE $${idx})`);
   }
 
   // Apply rating filter
   if (resolvedSearchParams.rating) {
     const rating = parseFloat(resolvedSearchParams.rating);
     if (!Number.isNaN(rating)) {
-      query = query.gte("avg_rating", rating);
+      queryParams.push(rating);
+      whereClauses.push(`avg_rating >= $${queryParams.length}`);
     }
   }
 
-  // Apply open-now filter when explicitly requested
+  // Apply open-now filter
   if (resolvedSearchParams.open_now === "true") {
-    query = query.eq("is_open_now", true);
+    whereClauses.push("is_open_now = true");
   }
 
+  // Apply deals filter
   const sortRequiresDeals = (sortKey: string | undefined): boolean => {
     return sortKey === "max-discount" || sortKey === "best-deals";
   };
@@ -130,20 +113,9 @@ export default async function CategoryListingsPage({
   let dealFilteredIdsForFilter: number[] | null = null;
 
   if (needsDealsFilter) {
-    type DealRow = {
-      listing_id: number | null;
-      discount_value: string | null;
-      is_active: boolean;
-      bank_id: number | null;
-      valid_card_variants: number[] | null;
-      end_date: string | null;
-    };
-
-    const { data: dealRows } = await publicSupabase
-      .from("deals")
-      .select(
-        "listing_id, discount_value, is_active, bank_id, valid_card_variants, end_date",
-      );
+    const { rows: dealRows } = await query(
+      "SELECT listing_id, discount_value, is_active, bank_id, valid_card_variants, end_date FROM deals"
+    );
 
     const nowMs = Date.now();
     const bankId = resolvedSearchParams.bank
@@ -155,7 +127,7 @@ export default async function CategoryListingsPage({
 
     const filteredListingIds = new Set<number>();
 
-    (dealRows as DealRow[] | null)?.forEach((deal) => {
+    dealRows.forEach((deal) => {
       if (deal.listing_id == null) return;
 
       const lid = deal.listing_id;
@@ -193,88 +165,42 @@ export default async function CategoryListingsPage({
 
     dealFilteredIdsForFilter = Array.from(filteredListingIds);
     if (dealFilteredIdsForFilter.length === 0) {
-      query = query.eq("id", -1);
+      whereClauses.push("id = -1");
     } else {
-      query = query.in("id", dealFilteredIdsForFilter);
+      queryParams.push(dealFilteredIdsForFilter);
+      whereClauses.push(`id = ANY($${queryParams.length})`);
     }
   }
 
-  const buildFilteredCountQuery = () => {
-    let countQuery = publicSupabase
-      .from("listings_with_details")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "published")
-      .eq("is_featured", false)
-      .in("category_name", categoryNamesForFilter);
-
-    if (resolvedSearchParams.search && searchTermResolved) {
-      countQuery = countQuery.or(
-        `name.ilike.%${searchTermResolved}%,description.ilike.%${searchTermResolved}%,address.ilike.%${searchTermResolved}%`,
-      );
-    }
-
-    if (resolvedSearchParams.rating) {
-      const rating = parseFloat(resolvedSearchParams.rating);
-      if (!Number.isNaN(rating)) {
-        countQuery = countQuery.gte("avg_rating", rating);
-      }
-    }
-
-    if (resolvedSearchParams.open_now === "true") {
-      countQuery = countQuery.eq("is_open_now", true);
-    }
-
-    if (dealFilteredIdsForFilter) {
-      if (dealFilteredIdsForFilter.length === 0) {
-        countQuery = countQuery.eq("id", -1);
-      } else {
-        countQuery = countQuery.in("id", dealFilteredIdsForFilter);
-      }
-    }
-
-    return countQuery;
+  // Count query helper
+  const getFilteredCount = async () => {
+    const countWhere = [...whereClauses].join(" AND ");
+    const { rows } = await query(
+      `SELECT COUNT(*)::integer AS total FROM listings_with_details WHERE ${countWhere}`,
+      queryParams
+    );
+    return rows[0]?.total || 0;
   };
 
-  // Apply sorting (skip distance - handled after fetch with PostGIS)
+  // Determine Sorting & Pagination
+  let orderByClause = "ORDER BY is_featured DESC, avg_rating DESC, id ASC";
   switch (resolvedSearchParams.sort) {
-    case "distance":
-      // Distance sorting will be applied after fetch using PostGIS
-      break;
     case "rating":
-      query = query
-        .order("avg_rating", { ascending: false })
-        .order("id", { ascending: true });
+      orderByClause = "ORDER BY avg_rating DESC, id ASC";
       break;
     case "newest":
-      query = query
-        .order("created_at", { ascending: false })
-        .order("id", { ascending: true });
+      orderByClause = "ORDER BY created_at DESC, id ASC";
       break;
     case "name":
-      query = query
-        .order("name", { ascending: true })
-        .order("id", { ascending: true });
+      orderByClause = "ORDER BY name ASC, id ASC";
       break;
-    case "max-discount":
-    case "best-deals":
-      // Deals sort is applied after fetch using computed maxDiscountByListingId.
-      break;
-    default:
-      // Default: featured first, then by rating
-      query = query
-        .order("is_featured", { ascending: false })
-        .order("avg_rating", { ascending: false })
-        .order("id", { ascending: true });
   }
 
-  // PERFORMANCE OPTIMIZATION: Only fetch first page + count, not all listings
-  // The PremiumListingsGrid component will handle pagination via API calls
   const INITIAL_PAGE_SIZE = 12;
+  let listings: any[] = [];
+  let totalCount = 0;
 
-  // Special handling for distance sort: fetch nearby listings first
-  let listings: Array<Listing & { distance_meters?: number }>;
-  let totalCount: number | null = null;
-
+  // Fetch listings (Distance sort requires PostGIS flow)
   if (
     resolvedSearchParams.sort === "distance" &&
     resolvedSearchParams.lat &&
@@ -284,7 +210,6 @@ export default async function CategoryListingsPage({
     const lng = parseFloat(resolvedSearchParams.lng);
 
     if (!isNaN(lat) && !isNaN(lng)) {
-      // Fetch nearby listings using PostGIS (already sorted by distance)
       const nearbyResult = await getNearbyListings({
         lat,
         lng,
@@ -294,108 +219,59 @@ export default async function CategoryListingsPage({
 
       if (nearbyResult.success && nearbyResult.data.length > 0) {
         const nearbyIds = nearbyResult.data.map((item) => item.id);
-
-        // Fetch full details for nearby listings only
-        let nearbyListingsQuery = publicSupabase
-          .from("listings_with_details")
-          .select("*")
-          .eq("status", "published")
-          .eq("is_featured", false)
-          .in("category_name", categoryNamesForFilter)
-          .in("id", nearbyIds);
-
-        if (resolvedSearchParams.search && searchTermResolved) {
-          nearbyListingsQuery = nearbyListingsQuery.or(
-            `name.ilike.%${searchTermResolved}%,description.ilike.%${searchTermResolved}%,address.ilike.%${searchTermResolved}%`,
-          );
-        }
-
-        if (resolvedSearchParams.rating) {
-          const rating = parseFloat(resolvedSearchParams.rating);
-          if (!Number.isNaN(rating)) {
-            nearbyListingsQuery = nearbyListingsQuery.gte("avg_rating", rating);
-          }
-        }
-
-        if (resolvedSearchParams.open_now === "true") {
-          nearbyListingsQuery = nearbyListingsQuery.eq("is_open_now", true);
-        }
-
-        if (dealFilteredIdsForFilter) {
-          if (dealFilteredIdsForFilter.length === 0) {
-            nearbyListingsQuery = nearbyListingsQuery.eq("id", -1);
-          } else {
-            nearbyListingsQuery = nearbyListingsQuery.in("id", dealFilteredIdsForFilter);
-          }
-        }
-
-      const { data: nearbyListingsRaw } = await nearbyListingsQuery;
-        const nearbyListings = nearbyListingsRaw as unknown as Listing[] | null;
-
-        // Attach distance_meters to each listing
-        const distanceMap = new Map(
-          nearbyResult.data.map((item) => [item.id, item.distance_meters]),
+        
+        // Fetch detailed listings for nearby IDs
+        const nearbyParams = [...queryParams, nearbyIds];
+        const nearbyWhere = [...whereClauses, `id = ANY($${nearbyParams.length})`].join(" AND ");
+        
+        const { rows: nearbyListings } = await query(
+          `SELECT * FROM listings_with_details WHERE ${nearbyWhere}`,
+          nearbyParams
         );
 
-        listings = (nearbyListings || []).map((listing) => ({
+        const distanceMap = new Map(
+          nearbyResult.data.map((item) => [item.id, item.distance_meters])
+        );
+
+        listings = nearbyListings.map((listing) => ({
           ...listing,
           distance_meters: distanceMap.get(listing.id as number),
         }));
 
-        // Sort by distance (PostGIS already did this, but ensure consistency)
         listings.sort((a, b) => {
           const distA = (a.distance_meters as number | undefined) ?? Infinity;
           const distB = (b.distance_meters as number | undefined) ?? Infinity;
           return compareSearchRankThenIds(
-            a as Record<string, unknown> & { id?: number | null },
-            b as Record<string, unknown> & { id?: number | null },
+            a,
+            b,
             resolvedSearchParams.search,
             distA - distB,
           );
         });
 
-        // Use filtered count query for accurate pagination total
-        const { count: nearbyTotalCount } = await buildFilteredCountQuery();
-        totalCount = nearbyTotalCount;
-      } else {
-        // No nearby listings, fall back to regular fetch
-        listings = [];
-        totalCount = 0;
+        totalCount = await getFilteredCount();
       }
-    } else {
-      // Invalid coordinates, fall back to regular fetch
-      const { data: firstPageListings } = await query.range(
-        0,
-        INITIAL_PAGE_SIZE - 1,
-      );
-      listings = (firstPageListings || []) as unknown as Array<
-        Listing & { distance_meters?: number }
-      >;
-
-      const { count } = await buildFilteredCountQuery();
-      totalCount = count;
     }
   } else {
-    // Regular sort: fetch first page normally
-    const { count } = await buildFilteredCountQuery();
-    totalCount = count;
+    // Normal query with pagination
+    totalCount = await getFilteredCount();
 
-    const { data: firstPageListings } = await query.range(
-      0,
-      INITIAL_PAGE_SIZE - 1,
+    const normalWhere = whereClauses.join(" AND ");
+    const { rows } = await query(
+      `SELECT * FROM listings_with_details WHERE ${normalWhere} ${orderByClause} LIMIT ${INITIAL_PAGE_SIZE}`,
+      queryParams
     );
-    listings = (firstPageListings || []) as unknown as Array<
-      Listing & { distance_meters?: number }
-    >;
+    listings = rows;
   }
 
+  // Handle deals sort and search relevance
   if (sortRequiresDeals(resolvedSearchParams.sort)) {
     listings = [...listings].sort((a, b) => {
       const discountA = a.id != null ? maxDiscountByListingId[a.id] || 0 : 0;
       const discountB = b.id != null ? maxDiscountByListingId[b.id] || 0 : 0;
       return compareSearchRankThenIds(
-        a as Record<string, unknown> & { id?: number | null },
-        b as Record<string, unknown> & { id?: number | null },
+        a,
+        b,
         resolvedSearchParams.search,
         discountB - discountA,
       );
@@ -410,97 +286,75 @@ export default async function CategoryListingsPage({
     listings = stableReorderBySearchRank(listings, resolvedSearchParams.search);
   }
 
-  // Also fetch featured listings separately for the carousel (usually small count)
-  const { data: featuredData } = await publicSupabase
-    .from("listings_with_details")
-    .select("*")
-    .eq("status", "published")
-    .eq("is_featured", true)
-    .in("category_name", categoryNamesForFilter)
-    .order("avg_rating", { ascending: false })
-    .limit(20);
+  // Fetch featured listings separately
+  const { rows: featuredListingsRaw } = await query(
+    `SELECT * FROM listings_with_details 
+     WHERE status = 'published' AND is_featured = true AND category_name = ANY($1) 
+     ORDER BY avg_rating DESC LIMIT 20`,
+    [categoryNamesForFilter]
+  );
 
-  const featuredRaw = featuredData || [];
+  // Fetch images for all listed items
+  const allListingIds = new Array<number>();
+  listings.forEach((l) => l.id && allListingIds.push(l.id));
+  featuredListingsRaw.forEach((l) => l.id && allListingIds.push(l.id));
 
-  // Fetch images only for first page + featured listings (much faster than all 792!)
-  type ListingWithImages = Listing & {
-    images?: Array<{
-      id: number;
-      listing_id: number;
-      url: string;
-      alt_text: string | null;
-      display_order: number | null;
-      is_primary: boolean | null;
-      created_at: string;
-      updated_at: string;
-    }>;
-    distance_meters?: number;
-  };
+  const imagesMap: Record<number, any[]> = {};
 
-  // Combine unique listing IDs from both sets
-  const allListingIds = new Set([
-    ...listings.filter((l) => l.id !== null).map((l) => l.id as number),
-    ...featuredRaw.filter((l) => l.id !== null).map((l) => l.id as number),
-  ]);
-  const listingIds = Array.from(allListingIds);
-
-  const imagesMap: Record<number, ListingWithImages["images"]> = {};
-
-  if (listingIds.length > 0) {
-    const { data: allImages } = await publicSupabase
-      .from("listing_images")
-      .select("*")
-      .in("listing_id", listingIds)
-      .order("display_order", { ascending: true });
-
-    if (Array.isArray(allImages)) {
-      allImages.forEach((img) => {
-        if (!imagesMap[img.listing_id]) {
-          imagesMap[img.listing_id] = [];
-        }
-        imagesMap[img.listing_id]!.push(img);
-      });
-    }
+  if (allListingIds.length > 0) {
+    const { rows: allImages } = await query(
+      "SELECT * FROM listing_images WHERE listing_id = ANY($1) ORDER BY display_order ASC",
+      [allListingIds]
+    );
+    allImages.forEach((img) => {
+      if (!imagesMap[img.listing_id]) {
+        imagesMap[img.listing_id] = [];
+      }
+      imagesMap[img.listing_id].push(img);
+    });
   }
 
-  // Enrich listings with images
-  const enrichedListings = listings
-    .filter((listing) => listing.id !== null)
-    .map((listing) => ({
-      ...listing,
-      images: listing.id ? imagesMap[listing.id] || [] : [],
-    })) as ListingWithImages[];
+  // Enrich listings
+  let gridListings = listings.map((l) => ({
+    ...l,
+    images: imagesMap[l.id] || [],
+    favorited: false,
+  }));
 
-  // Enrich featured listings with images
-  const enrichedFeatured = featuredRaw
-    .filter((listing) => listing.id !== null)
-    .map((listing) => ({
-      ...listing,
-      images: listing.id ? imagesMap[listing.id] || [] : [],
-    })) as ListingWithImages[];
+  let featuredListings = featuredListingsRaw.map((l) => ({
+    ...l,
+    images: imagesMap[l.id] || [],
+    favorited: false,
+  }));
 
-  // Fetch categories for the header
-  const { data: categoriesData } = await publicSupabase
-    .from("categories")
-    .select("id, name, slug, parent_id, icon_name")
-    .eq("is_enabled", true)
-    .eq("show_in_filters", true)
-    .in("category_type", ["listing", "both"])
-    .neq("slug", "events")
-    .order("display_order", { ascending: true, nullsFirst: false })
-    .order("name", { ascending: true })
-    .limit(200);
+  // Hydrate favorites
+  try {
+    const session = await getSessionFromCookies();
+    if (session && allListingIds.length > 0) {
+      const { rows: favRows } = await query(
+        "SELECT listing_id FROM favorite_listings WHERE user_id = $1 AND listing_id = ANY($2)",
+        [session.userId, allListingIds]
+      );
+      const favSet = new Set(favRows.map((f) => f.listing_id));
+      gridListings = gridListings.map((l) => ({ ...l, favorited: favSet.has(l.id) }));
+      featuredListings = featuredListings.map((l) => ({ ...l, favorited: favSet.has(l.id) }));
+    }
+  } catch (err) {
+    console.error("Failed to hydrate favorites for category page", err);
+  }
 
-  // Compute page title and description on server side to avoid hydration issues
-  type Cat = {
-    id: number;
-    name: string;
-    slug: string;
-    parent_id?: number | null;
-  };
+  // Fetch header categories
+  const { rows: categoriesData } = await query(
+    `SELECT id, name, slug, parent_id, icon_name 
+     FROM categories 
+     WHERE is_enabled = true AND show_in_filters = true AND category_type IN ('listing', 'both') AND slug != 'events' 
+     ORDER BY display_order ASC, name ASC LIMIT 200`
+  );
+
+  // Compute SEO title & description
   const getCategoryContent = (
-    currentCategory: Cat | null,
-    categories: Cat[],
+    currentCategory: any,
+    categoriesList: any[],
   ) => {
     if (!currentCategory || currentCategory.slug === "all") {
       return {
@@ -510,11 +364,7 @@ export default async function CategoryListingsPage({
       };
     }
 
-    // Define category-specific content for main categories
-    const categoryContent: Record<
-      string,
-      { title: string; description: string }
-    > = {
+    const categoryContent: Record<string, { title: string; description: string }> = {
       "eat-drink": {
         title: "Best Restaurants in Karachi",
         description:
@@ -562,25 +412,17 @@ export default async function CategoryListingsPage({
       },
     };
 
-    // For subcategories, find the parent category
     let targetCategory = currentCategory;
     if (currentCategory.parent_id) {
-      const parentCategory = categories.find(
-        (cat) => cat.id === currentCategory.parent_id,
-      );
+      const parentCategory = categoriesList.find((cat) => cat.id === currentCategory.parent_id);
       if (parentCategory) {
         targetCategory = parentCategory;
       }
     }
 
-    // Get content for the target category (main category or parent of subcategory)
     const content = categoryContent[targetCategory.slug];
     if (content) {
-      // If it's a subcategory, customize the title to include the subcategory name
-      if (
-        currentCategory.parent_id &&
-        currentCategory.slug !== targetCategory.slug
-      ) {
+      if (currentCategory.parent_id && currentCategory.slug !== targetCategory.slug) {
         return {
           title: `${currentCategory.name} in Karachi`,
           description: content.description,
@@ -589,7 +431,6 @@ export default async function CategoryListingsPage({
       return content;
     }
 
-    // Fallback for any categories not defined above
     return {
       title: `${currentCategory.name} in Karachi`,
       description: `Discover the best ${currentCategory.name.toLowerCase()} options in Karachi. Find exactly what you're looking for.`,
@@ -598,42 +439,9 @@ export default async function CategoryListingsPage({
 
   const { title: pageTitle, description: pageDescription } = getCategoryContent(
     category,
-    categoriesData || [],
+    categoriesData
   );
 
-  // Process grid listings (first page only, featured already excluded at query level)
-  let gridListings = enrichedListings.filter(
-    (l): l is ListingWithImages & { id: number } => l.id !== null,
-  );
-
-  // Process featured listings for carousel (separate query)
-  let featuredListings = enrichedFeatured.filter(
-    (l): l is ListingWithImages & { id: number } => l.id !== null,
-  );
-
-  // Hydrate favorite flags server-side for the current user to avoid client round-trips
-  try {
-    const { getFavoritedListingIdsForUser } =
-      await import("@/lib/utils/favorites-server");
-    // Combine IDs from both sets
-    const allIds = [
-      ...gridListings.map((l) => l.id),
-      ...featuredListings.map((l) => l.id),
-    ];
-    const favSet = await getFavoritedListingIdsForUser(userSupabase, allIds);
-    gridListings = gridListings.map((l) => ({
-      ...l,
-      favorited: favSet.has(l.id),
-    }));
-    featuredListings = featuredListings.map((l) => ({
-      ...l,
-      favorited: favSet.has(l.id),
-    }));
-  } catch (err) {
-    console.error("Failed to hydrate favorites for category page", err);
-  }
-
-  // Conform to PremiumListingsGrid expected searchParams shape
   const gridSearchParams = buildGridSearchParams(
     {
       search: resolvedSearchParams.search,
@@ -662,7 +470,7 @@ export default async function CategoryListingsPage({
             parent_id: null,
             icon_name: "compass",
           },
-          ...(categoriesData || []),
+          ...categoriesData,
         ]}
         currentCategory={category}
         pageTitle={pageTitle}
@@ -670,16 +478,14 @@ export default async function CategoryListingsPage({
       />
 
       <div className="container mx-auto px-6 lg:px-8 py-12 space-y-12">
-        {/* Featured Listings Carousel - Category-specific featured listings */}
         {featuredListings.length > 0 && !resolvedSearchParams.search && (
           <FeaturedListingsCarousel featuredListings={featuredListings} />
         )}
 
-        {/* Main Listings Grid - only first page from server, rest via API */}
         <div>
           <PremiumListingsGrid
             listings={gridListings}
-            totalCount={totalCount || 0}
+            totalCount={totalCount}
             excludeFeaturedFromApi={true}
             searchParams={gridSearchParams}
           />
@@ -691,30 +497,28 @@ export default async function CategoryListingsPage({
 
 // Generate metadata for SEO
 export async function generateMetadata({ params }: CategoryListingsPageProps) {
-  // Use createClient at build time (no cookies needed for public data)
-  const { createClient } = await import("@supabase/supabase-js");
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-  );
-
   const { slug } = await params;
+  try {
+    const { rows } = await query(
+      "SELECT name FROM categories WHERE slug = $1 LIMIT 1",
+      [slug]
+    );
+    const category = rows[0];
 
-  const { data: category } = await supabase
-    .from("categories")
-    .select("name")
-    .eq("slug", slug)
-    .single();
+    if (!category) {
+      return {
+        title: "Category Not Found",
+      };
+    }
 
-  if (!category) {
     return {
-      title: "Category Not Found",
+      title: `${category.name} in Karachi - Inside Karachi`,
+      description: `Discover the best ${category.name.toLowerCase()} in Karachi. Browse listings, read reviews, and find everything you need in Karachi.`,
+    };
+  } catch (error) {
+    console.error("SEO Metadata category error:", error);
+    return {
+      title: "Karachi Directory",
     };
   }
-
-  return {
-    title: `${category.name} in Karachi - Inside Karachi`,
-    description: `Discover the best ${category.name.toLowerCase()} in Karachi. Browse listings, read reviews, and find everything you need in Karachi.`,
-  };
 }

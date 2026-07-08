@@ -1,6 +1,7 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { createServerSupabase } from "@/lib/supabase/server";
 import BusinessListingEditor from "@/components/business-owner/BusinessListingEditor";
+import { requireSessionUser } from "@/lib/auth/require-session";
 
 interface PageProps {
   params: Promise<{
@@ -16,29 +17,15 @@ export default async function EditListingPage({ params }: PageProps) {
     redirect("/dashboard/business/listings");
   }
 
-  const supabase = await createServerSupabase();
-
-  // Check authentication
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  // Get user profile to check role
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role, active_role")
-    .eq("id", user.id)
-    .single();
+  const { user, profile } = await requireSessionUser();
 
   if (!profile) {
     redirect("/dashboard");
   }
 
-  const effectiveRole = profile.active_role || profile.role;
+  const effectiveRole =
+    (profile.active_role as string | null | undefined) ||
+    (profile.role as string | null | undefined);
 
   if (
     effectiveRole !== "business_owner" &&
@@ -47,6 +34,8 @@ export default async function EditListingPage({ params }: PageProps) {
   ) {
     redirect("/dashboard");
   }
+
+  const supabase = await createServerSupabase({ useServiceRole: true });
 
   // Fetch listing with full details
   const { data: listing, error } = await supabase

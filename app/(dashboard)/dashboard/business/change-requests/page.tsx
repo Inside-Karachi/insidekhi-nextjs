@@ -1,7 +1,8 @@
 import { Metadata } from "next";
 import { redirect } from "next/navigation";
-import { createServerSupabase } from "@/lib/supabase/server";
 import { BusinessChangeRequestsPage } from "@/components/business-owner/BusinessChangeRequestsPage";
+import { requireSessionUser } from "@/lib/auth/require-session";
+import type { User } from "@supabase/supabase-js";
 
 export const metadata: Metadata = {
   title: "Change Requests | Business Portal | Inside Karachi",
@@ -11,25 +12,13 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function ChangeRequestsRoute() {
-  const supabase = await createServerSupabase();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", user.id)
-    .single();
+  const { user, profile } = await requireSessionUser();
 
   if (!profile) {
     redirect("/login");
   }
 
-  return <BusinessChangeRequestsPage user={user} profile={profile} />;
+  const layoutUser = { id: user.id, email: user.email } as User;
+
+  return <BusinessChangeRequestsPage user={layoutUser} profile={profile} />;
 }

@@ -1,27 +1,14 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { BusinessListingsPage } from "@/components/business-owner/BusinessListingsPage";
+import { requireSessionUser } from "@/lib/auth/require-session";
+import type { User } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 
 export default async function ListingsManagementPage() {
-  const supabase = await createServerSupabase();
+  const { user, profile } = await requireSessionUser();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", user.id)
-    .single();
-
-  if (profileError || !profile) {
+  if (!profile) {
     redirect("/login");
   }
 
@@ -36,5 +23,7 @@ export default async function ListingsManagementPage() {
     redirect("/dashboard");
   }
 
-  return <BusinessListingsPage user={user} profile={profile} />;
+  const layoutUser = { id: user.id, email: user.email } as User;
+
+  return <BusinessListingsPage user={layoutUser} profile={profile} />;
 }

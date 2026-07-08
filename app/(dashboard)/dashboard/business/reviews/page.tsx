@@ -1,25 +1,12 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { BusinessReviewsPage } from "@/components/business-owner/BusinessReviewsPage";
+import { requireSessionUser } from "@/lib/auth/require-session";
+import type { User } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReviewsPage() {
-  const supabase = await createServerSupabase();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", user.id)
-    .single();
+  const { user, profile } = await requireSessionUser();
 
   if (!profile) {
     redirect("/login");
@@ -35,5 +22,7 @@ export default async function ReviewsPage() {
     redirect("/dashboard");
   }
 
-  return <BusinessReviewsPage user={user} />;
+  const layoutUser = { id: user.id, email: user.email } as User;
+
+  return <BusinessReviewsPage user={layoutUser} />;
 }

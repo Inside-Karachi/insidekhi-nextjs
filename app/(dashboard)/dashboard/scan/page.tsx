@@ -1,6 +1,6 @@
-import { redirect } from "next/navigation";
-import { createServerSupabase } from "@/lib/supabase/server";
 import dynamicImport from "next/dynamic";
+import { createServerSupabase } from "@/lib/supabase/server";
+import { requireSessionUser } from "@/lib/auth/require-session";
 
 const UnifiedScannerClient = dynamicImport(
   () =>
@@ -21,25 +21,16 @@ export const metadata = {
 };
 
 export default async function ScanPage() {
-  const supabase = await createServerSupabase();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login?redirect=/dashboard/scan");
-  }
-
-  // Get user profile and role
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role, active_role")
-    .eq("id", user.id)
-    .single();
+  const { user, profile } = await requireSessionUser({
+    loginPath: "/login?redirect=/dashboard/scan",
+  });
+  const supabase = await createServerSupabase({ useServiceRole: true });
 
   // Respect role switching - use active_role if set
-  const currentRole = profile?.active_role || profile?.role || "public_user";
+  const currentRole =
+    (profile?.active_role as string | undefined) ||
+    (profile?.role as string | undefined) ||
+    "public_user";
   const isAdmin = currentRole === "admin" || currentRole === "super_admin";
   const isOrganizerRole = currentRole === "organizer";
 

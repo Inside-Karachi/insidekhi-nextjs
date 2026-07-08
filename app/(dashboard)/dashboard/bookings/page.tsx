@@ -1,10 +1,10 @@
-import { redirect } from "next/navigation";
 import { createServerSupabase } from "@/lib/supabase/server";
 import {
   BookingsDashboard,
   DashboardBooking,
 } from "@/components/dashboard/BookingsDashboard";
 import { Database } from "@/types/supabase";
+import { requireSessionUser } from "@/lib/auth/require-session";
 
 export const dynamic = "force-dynamic";
 
@@ -44,15 +44,8 @@ type EventsWithDetailsRow = {
 };
 
 export default async function DashboardBookingsPage() {
-  const supabase = await createServerSupabase();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
+  const { user } = await requireSessionUser({ withProfile: false });
+  const supabase = await createServerSupabase({ useServiceRole: true });
 
   const { data: bookingsData, error: bookingsError } = await supabase
     .from("bookings")

@@ -71,51 +71,63 @@ function LoginForm() {
     setIsLoading(true);
     setError(null);
 
-    const response = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
 
-    if (!response.ok) {
-      const data = await response.json();
-      const message = data.error || "An unexpected error occurred.";
-      setError(message);
+      if (!response.ok) {
+        const data = await response.json();
+        const message = data.error || "An unexpected error occurred.";
+        setError(message);
 
-      if (data.code === "email_not_confirmed") {
-        // Pre-fill the resend form with the address the user just typed and
-        // open it immediately so they can act without any extra steps.
-        setResendEmail(email);
-        setShowResendForm(true);
-        toast({
-          variant: "destructive",
-          title: "Email Not Verified",
-          description:
-            "Check your inbox for the confirmation link, or resend it below.",
-        });
-      } else {
-        toast({
-          variant: "destructive",
-          title: "Login Failed",
-          description: message,
-        });
+        if (data.code === "email_not_confirmed") {
+          // Pre-fill the resend form with the address the user just typed and
+          // open it immediately so they can act without any extra steps.
+          setResendEmail(email);
+          setShowResendForm(true);
+          toast({
+            variant: "destructive",
+            title: "Email Not Verified",
+            description:
+              "Check your inbox for the confirmation link, or resend it below.",
+          });
+        } else {
+          toast({
+            variant: "destructive",
+            title: "Login Failed",
+            description: message,
+          });
+        }
+        return;
       }
 
-      setIsLoading(false);
-    } else {
       toast({
         title: "Welcome back!",
         description: "You have been successfully logged in.",
       });
 
-      // Hard redirect (not router.push): the browser GoTrue client won't pick up the
-      // new session cookies until the module reinitializes on a full navigation.
-      const nextUrl = searchParams.get("next");
+      // Prefer next, then returnUrl (middleware uses returnUrl for admin intercepts).
+      const nextUrl =
+        searchParams.get("next") || searchParams.get("returnUrl");
       const destination =
         nextUrl && nextUrl.startsWith("/") && !nextUrl.startsWith("//")
           ? nextUrl
           : "/dashboard";
       window.location.href = destination;
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "An unexpected error occurred.";
+      setError(message);
+      toast({
+        variant: "destructive",
+        title: "Login Failed",
+        description: message,
+      });
+    } finally {
+      setIsLoading(false);
     }
   };
 

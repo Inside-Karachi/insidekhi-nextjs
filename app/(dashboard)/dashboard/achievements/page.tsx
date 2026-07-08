@@ -1,18 +1,13 @@
 import { createServerSupabase } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
 import React from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
+import { requireSessionUser } from "@/lib/auth/require-session";
 
 export default async function AchievementsPage() {
-  const supabase = await createServerSupabase();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) redirect("/login");
+  const { user } = await requireSessionUser({ withProfile: false });
+  const supabase = await createServerSupabase({ useServiceRole: true });
 
   const { data: userBadges, error } = await supabase
     .from("user_badges")

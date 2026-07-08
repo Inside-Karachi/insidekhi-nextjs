@@ -1,9 +1,18 @@
 import crypto from 'crypto';
 
-const SECRET = process.env.RECEIPT_SIGNING_SECRET as string;
-if (!SECRET) {
-  // Fail fast: secret must be provided in environment for production readiness
-  throw new Error('RECEIPT_SIGNING_SECRET is not set. Please set this env var to a secure random value.');
+/**
+ * Read the signing secret at call time, not at import time.
+ *
+ * `next build` imports every route module to collect page data, so a
+ * module-scope throw fails the build even though the secret is only needed to
+ * serve a request. Still fail fast — just at the point of use.
+ */
+function getSecret(): string {
+  const secret = process.env.RECEIPT_SIGNING_SECRET;
+  if (!secret) {
+    throw new Error('RECEIPT_SIGNING_SECRET is not set. Please set this env var to a secure random value.');
+  }
+  return secret;
 }
 
 /**
@@ -16,7 +25,7 @@ export function signReceipt(id: number | string, ttlSeconds = 60 * 60 * 24 * 7) 
   const now = Math.floor(Date.now() / 1000);
   const exp = now + Math.floor(ttlSeconds);
   const payload = `${String(id)}:${exp}`;
-  const hmac = crypto.createHmac('sha256', SECRET);
+  const hmac = crypto.createHmac('sha256', getSecret());
   hmac.update(payload);
   const sig = hmac.digest('hex');
   return `${payload}.${sig}`;
@@ -31,7 +40,7 @@ export function verifyReceipt(token: string) {
   const parts = token.split('.');
   if (parts.length !== 2) return false;
   const [payload, sig] = parts;
-  const expected = crypto.createHmac('sha256', SECRET).update(payload).digest('hex');
+  const expected = crypto.createHmac('sha256', getSecret()).update(payload).digest('hex');
   try {
     const ok = crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(sig, 'hex'));
     if (!ok) return false;

@@ -3,8 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "mkdir -p .next && printf '%s\n' 'No build required for scraper worker' > .next/BUILD_INFO.txt && echo 'No build required for scraper worker'",
-    "vercel-build": "mkdir -p .next && printf '%s\n' 'No build required for scraper worker' > .next/BUILD_INFO.txt && echo 'No build required for scraper worker'",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts"
   },

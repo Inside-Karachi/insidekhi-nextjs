@@ -1,27 +1,26 @@
-import type { User } from "@supabase/supabase-js";
 import { MobileApiError } from "./errors";
-import {
-  createMobilePublicClient,
-  createMobileUserClient,
-  getBearerToken,
-  type MobileSupabase,
-} from "./supabase";
+import { getBearerToken, createMobileUserClient, createMobilePublicClient, type MobileSupabase } from "./supabase";
+import { verifyToken } from "@/lib/auth/jwt";
+
+export type MobileUser = {
+  id: string;
+  email?: string;
+  role: string;
+};
 
 export type MobileAuthContext = {
-  user: User;
-  /** RLS-scoped to `user`. */
+  user: MobileUser;
   supabase: MobileSupabase;
 };
 
 export type MobileOptionalAuthContext = {
-  user: User | null;
-  /** RLS-scoped to `user` when present, otherwise an anon public client. */
+  user: MobileUser | null;
   supabase: MobileSupabase;
 };
 
 /**
- * Requires a valid Bearer access token. Returns the authenticated user and an
- * RLS-scoped client. Throws `not_authenticated` (401) when missing/invalid.
+ * Requires a valid Bearer access token. Returns the authenticated user.
+ * Throws `not_authenticated` (401) when missing/invalid.
  */
 export async function requireMobileUser(
   request: Request,
@@ -35,13 +34,8 @@ export async function requireMobileUser(
     );
   }
 
-  const supabase = createMobileUserClient(token);
-  const {
-    data: { user },
-    error,
-  } = await supabase.auth.getUser(token);
-
-  if (error || !user) {
+  const payload = await verifyToken(token);
+  if (!payload) {
     throw new MobileApiError(
       "not_authenticated",
       "Invalid or expired token.",
@@ -49,13 +43,20 @@ export async function requireMobileUser(
     );
   }
 
-  return { user, supabase };
+  const supabase = createMobileUserClient(token);
+
+  return {
+    user: {
+      id: payload.userId,
+      email: payload.email,
+      role: payload.role,
+    },
+    supabase,
+  };
 }
 
 /**
- * Resolves the user when a valid token is present, otherwise returns a public
- * anon client. Never throws on a missing/invalid token - for endpoints whose
- * behaviour is enriched (but not gated) by being signed in.
+ * Resolves the user when a valid token is present, otherwise returns null.
  */
 export async function getOptionalMobileUser(
   request: Request,
@@ -65,14 +66,21 @@ export async function getOptionalMobileUser(
     return { user: null, supabase: createMobilePublicClient() };
   }
 
-  const supabase = createMobileUserClient(token);
-  const {
-    data: { user },
-  } = await supabase.auth.getUser(token);
-
-  if (!user) {
+  const payload = await verifyToken(token);
+  if (!payload) {
     return { user: null, supabase: createMobilePublicClient() };
   }
 
-  return { user, supabase };
+  const supabase = createMobileUserClient(token);
+
+  return {
+    user: {
+      id: payload.userId,
+      email: payload.email,
+      role: payload.role,
+    },
+    supabase,
+  };
 }
+
+

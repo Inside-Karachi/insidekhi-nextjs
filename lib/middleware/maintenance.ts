@@ -11,12 +11,18 @@ interface MaintenanceStatus {
 const DEBUG_SUPER_ADMIN_CHECK =
   process.env.NEXT_PUBLIC_SUPER_ADMIN_DEBUG === "1";
 
+interface SystemConfigRow {
+  config_key: string;
+  config_value: unknown;
+}
+
+
 /**
  * Check if maintenance mode is enabled
  * Returns maintenance configuration if enabled, null if disabled
  */
 export async function checkMaintenanceMode(
-  request: NextRequest
+  _request?: NextRequest
 ): Promise<MaintenanceStatus | null> {
   try {
     // Fetch maintenance configuration directly from Postgres
@@ -30,16 +36,19 @@ export async function checkMaintenanceMode(
       return null; // Fail open - allow access if we can't check
     }
 
+    const typedConfigs = configs as SystemConfigRow[];
+
     // Parse configuration
-    const enabledConfig = configs.find(
-      (c: any) => c.config_key === "maintenance.enabled"
+    const enabledConfig = typedConfigs.find(
+      (c) => c.config_key === "maintenance.enabled"
     );
-    const messageConfig = configs.find(
-      (c: any) => c.config_key === "maintenance.message"
+    const messageConfig = typedConfigs.find(
+      (c) => c.config_key === "maintenance.message"
     );
-    const estimatedEndConfig = configs.find(
-      (c: any) => c.config_key === "maintenance.estimated_end"
+    const estimatedEndConfig = typedConfigs.find(
+      (c) => c.config_key === "maintenance.estimated_end"
     );
+
 
     // JSONB boolean values can be actual booleans OR strings "true"/"false"
     const configValue = enabledConfig?.config_value;
@@ -69,7 +78,7 @@ export async function checkMaintenanceMode(
     const cleanMessage =
       typeof messageValue === "string"
         ? messageValue.replace(/^"|"$/g, "")
-        : messageValue;
+        : "";
 
     const cleanEstimatedEnd =
       estimatedEndValue &&
@@ -85,6 +94,7 @@ export async function checkMaintenanceMode(
         "We are performing scheduled maintenance. We'll be back shortly!",
       estimatedEnd: cleanEstimatedEnd,
     };
+
   } catch (error) {
     console.error("[MAINTENANCE CHECK] Unexpected error:", error);
     return null; // Fail open - allow access on error

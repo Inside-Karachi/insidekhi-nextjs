@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { getSession } from "@/lib/auth/session";
+import { uploadFile } from "@/lib/storage/spaces";
 import { v4 as uuidv4 } from "uuid";
 
 // POST: Upload image to temp folder
@@ -16,12 +17,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Auth check (lister/admin/super_admin)
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -30,24 +27,19 @@ export async function POST(request: NextRequest) {
     const filename = `${uuidv4()}.${ext}`;
     const path = `temp/${tempSessionId}/${filename}`;
 
-    // Upload to Supabase Storage
+    // Upload to DO Spaces Storage (using custom spaces client)
     const arrayBuffer = await file.arrayBuffer();
-    const { error: uploadError } = await supabase.storage
-      .from("event-images")
-      .upload(path, arrayBuffer, {
-        contentType: file.type,
-        upsert: false,
-      });
-    if (uploadError) {
-      return NextResponse.json({ error: uploadError.message }, { status: 500 });
-    }
+    const uploadResult = await uploadFile(path, Buffer.from(arrayBuffer), {
+      contentType: file.type,
+      isPublic: true,
+      bucket: "event-images"
+    });
 
     // Return image info (simulate EventImage)
-    const imageUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/event-images/${path}`;
     const newImage = {
       id: Date.now(), // temp id, not persisted
       event_id: null,
-      url: imageUrl,
+      url: uploadResult.publicUrl,
       alt_text: null,
       is_primary: false,
       display_order: 0,
@@ -55,9 +47,11 @@ export async function POST(request: NextRequest) {
     };
     return NextResponse.json({ success: true, data: newImage });
   } catch (_err) {
+    console.error("Event temp image upload failed:", _err);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }
     );
   }
 }
+

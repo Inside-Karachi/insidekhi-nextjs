@@ -1,11 +1,8 @@
-/**
- * Centralized listing deletion utilities
- * Handles storage cleanup and CASCADE constraint validation
- */
-
 import { SupabaseClient } from "@supabase/supabase-js";
 
 interface StorageFile {
+
+
   bucket: string;
   path: string;
 }
@@ -131,38 +128,28 @@ async function collectStorageFiles(
   return filesToDelete;
 }
 
+import { deleteFile } from "@/lib/storage/spaces";
+
 /**
  * Delete files from storage buckets
  */
 async function deleteStorageFiles(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   files: StorageFile[],
 ): Promise<void> {
-  // Group by bucket
-  const filesByBucket = files.reduce(
-    (acc, file) => {
-      if (!acc[file.bucket]) acc[file.bucket] = [];
-      acc[file.bucket].push(file.path);
-      return acc;
-    },
-    {} as Record<string, string[]>,
-  );
 
-  for (const [bucket, paths] of Object.entries(filesByBucket)) {
-    if (paths.length === 0) continue;
-
-    console.log(`[DELETE] Removing ${paths.length} files from ${bucket}`);
-
-    const { data, error } = await supabase.storage.from(bucket).remove(paths);
-
-    if (error) {
-      console.error(`[DELETE] Failed to delete from ${bucket}:`, error);
-    } else {
-      const deletedCount = data?.length || 0;
-      console.log(`[DELETE] Deleted ${deletedCount} files from ${bucket}`);
+  for (const file of files) {
+    console.log(`[DELETE] Removing file ${file.path} from bucket ${file.bucket}`);
+    try {
+      // In DigitalOcean Spaces, we target folders as prefixes or distinct custom path structures.
+      // We pass the bucket and path to our custom delete utility.
+      await deleteFile(file.path, file.bucket);
+    } catch (error) {
+      console.error(`[DELETE] Failed to delete file ${file.path} from bucket ${file.bucket}:`, error);
     }
   }
 }
+
 
 /**
  * Delete single listing with all associated data

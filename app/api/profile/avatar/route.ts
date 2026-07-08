@@ -1,22 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { getSession } from "@/lib/auth/session";
+import { uploadFile } from "@/lib/storage/spaces";
+import { query } from "@/lib/db";
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check for cookies on the incoming request (auth uses cookies)
-
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      console.warn(
-        "[avatar] no authenticated user from supabase.auth.getUser()",
-      );
+    const session = await getSession(request);
+    if (!session) {
+      console.warn("[avatar] no authenticated user session");
       return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
     }
-    // Uploading avatar for authenticated user
 
     const form = await request.formData();
     const file = form.get("avatar") as unknown as File | null;
@@ -27,20 +20,10 @@ export async function POST(request: NextRequest) {
 
     // Convert file to buffer with diagnostics
     const blob = file as unknown as Blob;
-    // file metadata may be present; not required
-
     let buffer: Buffer;
     try {
       const arrayBuffer = await blob.arrayBuffer();
-      if (typeof Buffer === "undefined") {
-        console.error("[avatar] Buffer not available in this runtime");
-        return NextResponse.json(
-          { error: "runtime_missing_buffer" },
-          { status: 500 },
-        );
-      }
       buffer = Buffer.from(arrayBuffer);
-      // buffer length available for upload
     } catch (err) {
       console.error("[avatar] error converting file to buffer:", err);
       return NextResponse.json(
@@ -49,10 +32,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const bucket = process.env.SUPABASE_BUCKET || "profiles_avatar";
-    // Some runtimes expose name, use it if available
+    const bucket = "profiles_avatar";
     const originalName = (file as unknown as { name?: string })?.name || "img";
-    const fileName = `${user.id}/avatar-${Date.now()}-${originalName}`;
+    const fileName = `${session.userId}/avatar-${Date.now()}-${originalName}`;
 
     // Determine content type: prefer file.type, otherwise infer from extension
     let contentType = (file as unknown as { type?: string })?.type || "";
@@ -70,20 +52,15 @@ export async function POST(request: NextRequest) {
       };
       contentType = map[ext] || "application/octet-stream";
     }
-    // determined contentType for upload
 
+    let publicUrl: string;
     try {
-      const { error: uploadError } = await supabase.storage
-        .from(bucket)
-        .upload(fileName, buffer, { upsert: true, contentType });
-      if (uploadError) {
-        console.error("[avatar] storage.upload error:", uploadError.message);
-        return NextResponse.json(
-          { error: uploadError.message },
-          { status: 500 },
-        );
-      }
-      // storage.upload successful
+      const uploadResult = await uploadFile(fileName, buffer, {
+        contentType,
+        isPublic: true,
+        bucket,
+      });
+      publicUrl = uploadResult.publicUrl;
     } catch (err) {
       console.error("[avatar] storage.upload exception:", err);
       return NextResponse.json(
@@ -92,50 +69,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create a signed URL (valid 7 days) so frontend can display it safely
-    let publicUrl: string | null = null;
-    try {
-      const { data: signed, error: signedError } = await supabase.storage
-        .from(bucket)
-        .createSignedUrl(fileName, 60 * 60 * 24 * 7);
-      if (signedError) {
-        console.error("[avatar] createSignedUrl error:", signedError.message);
-        return NextResponse.json(
-          { error: signedError.message },
-          { status: 500 },
-        );
-      }
-      // signed URL created
-      publicUrl = signed?.signedUrl || null;
-    } catch (err) {
-      console.error("[avatar] createSignedUrl exception:", err);
-      return NextResponse.json(
-        { error: "signed_url_exception", detail: String(err) },
-        { status: 500 },
-      );
-    }
-
     // Persist avatar_url on profiles so server components can read it
     try {
-      const { error: upsertErr } = await supabase
-        .from("profiles")
-        .update({ avatar_url: publicUrl })
-        .eq("id", user.id);
-      if (upsertErr) {
-        // Return URL but include warning
-        return NextResponse.json({
-          publicUrl,
-          path: fileName,
-          warning: upsertErr.message,
-        });
-      }
+      await query(
+        "UPDATE public.profiles SET avatar_url = $1 WHERE id = $2",
+        [publicUrl, session.userId]
+      );
     } catch (err) {
-      // ignore upsert failure but still return URL
-      console.error("[avatar] upsert exception:", err);
+      console.error("[avatar] profile update exception:", err);
     }
 
     return NextResponse.json({ publicUrl, path: fileName });
-  } catch {
+  } catch (err) {
+    console.error("[avatar] unexpected exception:", err);
     return NextResponse.json({ error: "unexpected_error" }, { status: 500 });
   }
 }
+

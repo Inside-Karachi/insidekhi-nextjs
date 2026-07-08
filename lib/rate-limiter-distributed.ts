@@ -95,15 +95,27 @@ export async function checkAuthRateLimit(
   const ip = getIpAddress(request);
   const identifier = `auth:${ip}`;
 
-  const result = await rateLimiters.auth.limit(identifier);
-
-  return {
-    success: result.success,
-    limit: result.limit,
-    remaining: result.remaining,
-    reset: result.reset,
-    pending: result.pending,
-  };
+  try {
+    if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+      throw new Error("Upstash Redis credentials are not configured.");
+    }
+    const result = await rateLimiters.auth.limit(identifier);
+    return {
+      success: result.success,
+      limit: result.limit,
+      remaining: result.remaining,
+      reset: result.reset,
+      pending: result.pending,
+    };
+  } catch (error) {
+    console.warn("[Rate Limiter] Auth rate limit check failed (falling back to allowed):", error);
+    return {
+      success: true,
+      limit: 5,
+      remaining: 5,
+      reset: Date.now() + 900000,
+    };
+  }
 }
 
 /**
@@ -117,15 +129,27 @@ export async function checkApiRateLimit(
   const ip = getIpAddress(request);
   const identifier = customIdentifier || `api:${ip}`;
 
-  const result = await rateLimiters.api.limit(identifier);
-
-  return {
-    success: result.success,
-    limit: result.limit,
-    remaining: result.remaining,
-    reset: result.reset,
-    pending: result.pending,
-  };
+  try {
+    if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+      throw new Error("Upstash Redis credentials are not configured.");
+    }
+    const result = await rateLimiters.api.limit(identifier);
+    return {
+      success: result.success,
+      limit: result.limit,
+      remaining: result.remaining,
+      reset: result.reset,
+      pending: result.pending,
+    };
+  } catch (error) {
+    console.warn("[Rate Limiter] API rate limit check failed (falling back to allowed):", error);
+    return {
+      success: true,
+      limit: 100,
+      remaining: 100,
+      reset: Date.now() + 60000,
+    };
+  }
 }
 
 /**
@@ -139,15 +163,27 @@ export async function checkFormRateLimit(
   const ip = getIpAddress(request);
   const identifier = email ? `form:${email}` : `form:${ip}`;
 
-  const result = await rateLimiters.forms.limit(identifier);
-
-  return {
-    success: result.success,
-    limit: result.limit,
-    remaining: result.remaining,
-    reset: result.reset,
-    pending: result.pending,
-  };
+  try {
+    if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+      throw new Error("Upstash Redis credentials are not configured.");
+    }
+    const result = await rateLimiters.forms.limit(identifier);
+    return {
+      success: result.success,
+      limit: result.limit,
+      remaining: result.remaining,
+      reset: result.reset,
+      pending: result.pending,
+    };
+  } catch (error) {
+    console.warn("[Rate Limiter] Form rate limit check failed (falling back to allowed):", error);
+    return {
+      success: true,
+      limit: 3,
+      remaining: 3,
+      reset: Date.now() + 3600000,
+    };
+  }
 }
 
 /**
@@ -161,15 +197,27 @@ export async function checkCheckoutRateLimit(
   const ip = getIpAddress(request);
   const identifier = userId ? `checkout:${userId}` : `checkout:${ip}`;
 
-  const result = await rateLimiters.checkout.limit(identifier);
-
-  return {
-    success: result.success,
-    limit: result.limit,
-    remaining: result.remaining,
-    reset: result.reset,
-    pending: result.pending,
-  };
+  try {
+    if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+      throw new Error("Upstash Redis credentials are not configured.");
+    }
+    const result = await rateLimiters.checkout.limit(identifier);
+    return {
+      success: result.success,
+      limit: result.limit,
+      remaining: result.remaining,
+      reset: result.reset,
+      pending: result.pending,
+    };
+  } catch (error) {
+    console.warn("[Rate Limiter] Checkout rate limit check failed (falling back to allowed):", error);
+    return {
+      success: true,
+      limit: 10,
+      remaining: 10,
+      reset: Date.now() + 300000,
+    };
+  }
 }
 
 /**
@@ -181,15 +229,27 @@ export async function checkAdminRateLimit(
 ): Promise<RateLimitResult> {
   const identifier = `admin:${userId}`;
 
-  const result = await rateLimiters.admin.limit(identifier);
-
-  return {
-    success: result.success,
-    limit: result.limit,
-    remaining: result.remaining,
-    reset: result.reset,
-    pending: result.pending,
-  };
+  try {
+    if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+      throw new Error("Upstash Redis credentials are not configured.");
+    }
+    const result = await rateLimiters.admin.limit(identifier);
+    return {
+      success: result.success,
+      limit: result.limit,
+      remaining: result.remaining,
+      reset: result.reset,
+      pending: result.pending,
+    };
+  } catch (error) {
+    console.warn("[Rate Limiter] Admin rate limit check failed (falling back to allowed):", error);
+    return {
+      success: true,
+      limit: 200,
+      remaining: 200,
+      reset: Date.now() + 60000,
+    };
+  }
 }
 
 /**

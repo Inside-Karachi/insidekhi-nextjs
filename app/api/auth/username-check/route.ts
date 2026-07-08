@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   UsernameCheckRequest,
   UsernameCheckResponse,
@@ -46,17 +46,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check availability in database
-    const supabase = await createServerSupabase();
-
-    const { data: existingUser, error } = await supabase
-      .from("profiles")
-      .select("id")
-      .ilike("username", trimmedUsername)
-      .single();
-
-    if (error && error.code !== "PGRST116") {
-      // PGRST116 is "not found" error
+    // Check availability in database using direct PG query
+    let existingUser = null;
+    try {
+      const res = await query(
+        "SELECT id FROM profiles WHERE username ILIKE $1 LIMIT 1",
+        [trimmedUsername]
+      );
+      existingUser = res.rows[0];
+    } catch (error) {
       console.error("Username availability check failed:", error);
       return NextResponse.json(
         {

@@ -1,8 +1,10 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+
+
+
 import * as Sentry from "@sentry/nextjs";
 import type {
   UserRole,
@@ -29,10 +31,9 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserWithRoles | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const { toast } = useToast();
-  const supabaseRef = React.useRef(createClient());
-  const supabase = supabaseRef.current;
 
   const getAvailableRoles = (permanentRole: UserRole): UserRole[] => {
+
     // Staff and business owners can toggle between their role and public_user
     if (
       permanentRole === "lister" ||
@@ -49,30 +50,21 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
 
   const fetchUser = React.useCallback(async () => {
     try {
-      const {
-        data: { user: authUser },
-        error: authError,
-      } = await supabase.auth.getUser();
-
-      if (authError || !authUser) {
+      const response = await fetch("/api/user/me");
+      if (!response.ok) {
         clearSentryUserContext();
         setUser(null);
         return;
       }
 
-      const { data: profile, error: profileError } = await supabase
-        .from("profiles")
-        .select("id, full_name, avatar_url, role, active_role")
-        .eq("id", authUser.id)
-        .single();
-
-      if (profileError || !profile) {
-        console.error("[RoleContext] profile fetch failed:", profileError);
+      const data = await response.json();
+      if (!data.user) {
         clearSentryUserContext();
         setUser(null);
         return;
       }
 
+      const profile = data.user;
       const availableRoles = getAvailableRoles(profile.role);
       const canSwitch = availableRoles.length > 1;
       const activeRole = profile.active_role || profile.role;
@@ -83,7 +75,7 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
 
       setUser({
         id: profile.id,
-        email: authUser.email,
+        email: profile.email,
         role: profile.role,
         active_role: activeRole,
         full_name: profile.full_name || undefined,
@@ -98,7 +90,7 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, [supabase]);
+  }, []);
 
   const switchRole = async (newRole: UserRole): Promise<boolean> => {
     if (!user) return false;
@@ -164,21 +156,13 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     fetchUser();
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        fetchUser();
-      } else {
-        clearSentryUserContext();
-        setUser(null);
-        setIsLoading(false);
-      }
-    });
-
-    return () => subscription.unsubscribe();
-  }, [fetchUser, supabase.auth]);
+    // Periodically fetch user or fetch on focus since we no longer listen to GoTrue web socket hooks
+    const handleFocus = () => fetchUser();
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [fetchUser]);
 
   return (
     <RoleContext.Provider value={{ user, isLoading, switchRole, refreshUser }}>
@@ -186,6 +170,7 @@ export function RoleProvider({ children }: { children: React.ReactNode }) {
     </RoleContext.Provider>
   );
 }
+
 
 export function useRole() {
   const context = useContext(RoleContext);

@@ -37,6 +37,10 @@ const SUPPORTED_SORTS = new Set([
  * sorts in {@link SUPPORTED_SORTS}. Deal/distance-ranked sorts (`distance`,
  * `best-deals`, `max-discount`) and deal filters (`deals`, `bank`, `card`) are
  * not yet implemented and are rejected rather than silently ignored.
+ *
+ * `category` is the stringified integer id from GET /categories (contract
+ * section 1, IDs) - not a slug. An id with no matching category (or a
+ * non-numeric value) is treated as no filter, same as omitting it.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
@@ -48,7 +52,7 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     maxLimit: 50,
   });
 
-  const categorySlug =
+  const categoryParam =
     searchParams.get("sub") ??
     searchParams.get("subCategory") ??
     searchParams.get("category");
@@ -67,27 +71,32 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   const minRating = searchParams.get("rating");
   const excludeFeatured = searchParams.get("exclude_featured") === "true";
 
-  // Resolve a category slug to the set of category names (parent + children).
+  // Resolve a category id (per the mobile contract, `category` is the
+  // stringified integer id returned by GET /categories, not a slug) to the
+  // set of category names covering it and its subcategories.
   let categoryNames: string[] = [];
-  if (categorySlug && categorySlug !== "all") {
-    const { data: category } = await supabase
-      .from("categories")
-      .select("id, name, parent_id")
-      .eq("slug", categorySlug)
-      .single();
+  if (categoryParam && categoryParam !== "all") {
+    const categoryId = Number(categoryParam);
+    if (Number.isInteger(categoryId) && categoryId > 0) {
+      const { data: category } = await supabase
+        .from("categories")
+        .select("id, name, parent_id")
+        .eq("id", categoryId)
+        .single();
 
-    if (category) {
-      if (category.parent_id === null) {
-        const { data: subcategories } = await supabase
-          .from("categories")
-          .select("name")
-          .eq("parent_id", category.id);
-        categoryNames = [
-          category.name,
-          ...(subcategories?.map((s) => s.name) ?? []),
-        ];
-      } else {
-        categoryNames = [category.name];
+      if (category) {
+        if (category.parent_id === null) {
+          const { data: subcategories } = await supabase
+            .from("categories")
+            .select("name")
+            .eq("parent_id", category.id);
+          categoryNames = [
+            category.name,
+            ...(subcategories?.map((s) => s.name) ?? []),
+          ];
+        } else {
+          categoryNames = [category.name];
+        }
       }
     }
   }

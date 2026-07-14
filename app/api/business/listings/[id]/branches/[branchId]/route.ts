@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   verifyListingOwnership,
@@ -48,7 +48,6 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
     const body = await request.json();
     const validation = branchUpdateSchema.safeParse(body);
 
@@ -64,12 +63,12 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     const updateData = validation.data;
 
     // Verify branch belongs to this listing
-    const { data: existingBranch } = await supabase
-      .from("listing_branches")
-      .select("id, listing_id, name, is_primary")
-      .eq("id", branchIdNum)
-      .eq("listing_id", listingId)
-      .single();
+    const { rows: existingBranchRows } = await query(
+      `SELECT id, listing_id, name, is_primary FROM listing_branches
+       WHERE id = $1 AND listing_id = $2`,
+      [branchIdNum, listingId],
+    );
+    const existingBranch = existingBranchRows[0];
 
     if (!existingBranch) {
       return apiError("Branch not found or does not belong to this listing", 404);
@@ -77,26 +76,33 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     // If setting as primary, unset other primary branches
     if (updateData.is_primary) {
-      await supabase
-        .from("listing_branches")
-        .update({ is_primary: false })
-        .eq("listing_id", listingId)
-        .neq("id", branchIdNum);
+      await query(
+        `UPDATE listing_branches SET is_primary = false WHERE listing_id = $1 AND id != $2`,
+        [listingId, branchIdNum],
+      );
     }
 
     // Update the branch
-    const { data: updatedBranch, error: updateError } = await supabase
-      .from("listing_branches")
-      .update({
-        ...updateData,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", branchIdNum)
-      .select()
-      .single();
+    const updateKeys = Object.keys(updateData);
+    const setClauses = updateKeys.map((key, idx) => `"${key}" = $${idx + 1}`);
+    setClauses.push(`updated_at = $${updateKeys.length + 1}`);
+    const values = [
+      ...updateKeys.map((key) => (updateData as Record<string, unknown>)[key]),
+      new Date().toISOString(),
+      branchIdNum,
+    ];
 
-    if (updateError) {
-      throw new Error(`Failed to update branch: ${updateError.message}`);
+    let updatedBranch;
+    try {
+      const { rows } = await query(
+        `UPDATE listing_branches SET ${setClauses.join(", ")} WHERE id = $${values.length} RETURNING *`,
+        values,
+      );
+      updatedBranch = rows[0];
+    } catch (updateError) {
+      throw new Error(
+        `Failed to update branch: ${updateError instanceof Error ? updateError.message : "Unknown error"}`,
+      );
     }
 
     return apiSuccess(updatedBranch, "Branch updated successfully");
@@ -122,25 +128,24 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
-
     // Verify branch belongs to this listing
-    const { data: existingBranch } = await supabase
-      .from("listing_branches")
-      .select("id, listing_id, name, is_primary")
-      .eq("id", branchIdNum)
-      .eq("listing_id", listingId)
-      .single();
+    const { rows: existingBranchRows } = await query(
+      `SELECT id, listing_id, name, is_primary FROM listing_branches
+       WHERE id = $1 AND listing_id = $2`,
+      [branchIdNum, listingId],
+    );
+    const existingBranch = existingBranchRows[0];
 
     if (!existingBranch) {
       return apiError("Branch not found or does not belong to this listing", 404);
     }
 
     // Check if branch has reviews (safety check)
-    const { count: reviewCount } = await supabase
-      .from("reviews")
-      .select("*", { count: "exact", head: true })
-      .eq("branch_id", branchIdNum);
+    const { rows: reviewCountRows } = await query(
+      `SELECT COUNT(*) FROM reviews WHERE branch_id = $1`,
+      [branchIdNum],
+    );
+    const reviewCount = parseInt(reviewCountRows[0].count, 10);
 
     if (reviewCount && reviewCount > 0) {
       return apiError(
@@ -152,10 +157,11 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
     }
 
     // Don't allow deleting the last/only branch
-    const { count: branchCount } = await supabase
-      .from("listing_branches")
-      .select("*", { count: "exact", head: true })
-      .eq("listing_id", listingId);
+    const { rows: branchCountRows } = await query(
+      `SELECT COUNT(*) FROM listing_branches WHERE listing_id = $1`,
+      [listingId],
+    );
+    const branchCount = parseInt(branchCountRows[0].count, 10);
 
     if (branchCount && branchCount <= 1) {
       return apiError(
@@ -166,29 +172,27 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
     }
 
     // Delete the branch
-    const { error: deleteError } = await supabase
-      .from("listing_branches")
-      .delete()
-      .eq("id", branchIdNum);
-
-    if (deleteError) {
-      throw new Error(`Failed to delete branch: ${deleteError.message}`);
+    try {
+      await query(`DELETE FROM listing_branches WHERE id = $1`, [branchIdNum]);
+    } catch (deleteError) {
+      throw new Error(
+        `Failed to delete branch: ${deleteError instanceof Error ? deleteError.message : "Unknown error"}`,
+      );
     }
 
     // If this was primary, set another branch as primary
     if (existingBranch.is_primary) {
-      const { data: firstBranch } = await supabase
-        .from("listing_branches")
-        .select("id")
-        .eq("listing_id", listingId)
-        .limit(1)
-        .single();
+      const { rows: firstBranchRows } = await query(
+        `SELECT id FROM listing_branches WHERE listing_id = $1 LIMIT 1`,
+        [listingId],
+      );
+      const firstBranch = firstBranchRows[0];
 
       if (firstBranch) {
-        await supabase
-          .from("listing_branches")
-          .update({ is_primary: true })
-          .eq("id", firstBranch.id);
+        await query(
+          `UPDATE listing_branches SET is_primary = true WHERE id = $1`,
+          [firstBranch.id],
+        );
       }
     }
 

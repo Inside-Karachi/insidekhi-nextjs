@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   verifyListingOwnership,
@@ -10,8 +10,6 @@ import {
   getChangeRequestType,
 } from "@/lib/business-owner/api-utils";
 import type { ListingUpdatePayload } from "@/types/business-owner.types";
-import type { Database } from "@/types/supabase";
-import type { Json } from "@/types/supabase";
 
 interface RouteParams {
   params: Promise<{
@@ -82,46 +80,53 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
+    // Fetch listing with all related data (joined via separate queries, then stitched)
+    let listing;
+    try {
+      const { rows: listingRows } = await query(
+        `SELECT * FROM listings WHERE id = $1`,
+        [listingId],
+      );
+      const listingRow = listingRows[0];
 
-    // Fetch listing with all related data
-    // Note: Using specific FK constraint name to resolve ambiguous relationship
-    const { data: listing, error } = await supabase
-      .from("listings")
-      .select(
-        `
-        *,
-        category:categories(id, name, icon_name),
-        branches:listing_branches(
-          id,
-          name,
-          address,
-          phone_number,
-          is_primary
+      if (!listingRow) {
+        throw new Error(`Failed to fetch listing: not found`);
+      }
+
+      const [categoryResult, branchesResult, imagesResult] = await Promise.all([
+        listingRow.category_id
+          ? query(
+              `SELECT id, name, icon_name FROM categories WHERE id = $1`,
+              [listingRow.category_id],
+            )
+          : { rows: [] },
+        query(
+          `SELECT id, name, address, phone_number, is_primary
+           FROM listing_branches WHERE listing_id = $1`,
+          [listingId],
         ),
-        images:listing_images!listing_images_listing_id_fkey(
-          id,
-          url,
-          alt_text,
-          is_primary,
-          display_order
-        )
-      `,
-      )
-      .eq("id", listingId)
-      .single();
+        query(
+          `SELECT id, url, alt_text, is_primary, display_order
+           FROM listing_images WHERE listing_id = $1`,
+          [listingId],
+        ),
+      ]);
 
-    if (error) {
+      listing = {
+        ...listingRow,
+        category: categoryResult.rows[0] || null,
+        branches: branchesResult.rows,
+        images: imagesResult.rows,
+      };
+    } catch (error) {
       console.error("[GET /api/business/listings/[id]] Database error:", {
         error,
         listingId,
         userId,
-        message: error.message,
-        details: error.details,
-        hint: error.hint,
-        code: error.code,
       });
-      throw new Error(`Failed to fetch listing: ${error.message}`);
+      throw new Error(
+        `Failed to fetch listing: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     }
 
     return apiSuccess(listing);
@@ -169,21 +174,27 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    const supabase = await createServerSupabase();
+    let profile;
+    try {
+      const { rows: profileRows } = await query(
+        `SELECT role, active_role FROM profiles WHERE id = $1`,
+        [userId],
+      );
+      profile = profileRows[0];
+    } catch (profileError) {
+      logDbError(
+        "[PATCH /api/business/listings/[id]] Profile fetch failed",
+        {
+          message: profileError instanceof Error ? profileError.message : "Unknown error",
+          details: null,
+          hint: null,
+          code: "",
+        },
+        { listingId, userId },
+      );
+    }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role, active_role")
-      .eq("id", userId)
-      .single();
-
-    if (profileError || !profile) {
-      if (profileError) {
-        logDbError("[PATCH /api/business/listings/[id]] Profile fetch failed", profileError, {
-          listingId,
-          userId,
-        });
-      }
+    if (!profile) {
       throw new Error("Profile not found");
     }
 
@@ -208,66 +219,79 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     const { submit_for_approval: _unused, ...restBody } = sanitizedBody;
 
     // Get current listing data
-    const { data: currentListing, error: fetchError } = await supabase
-      .from("listings")
-      .select("*")
-      .eq("id", listingId)
-      .single();
+    let currentListing;
+    try {
+      const { rows: currentListingRows } = await query(
+        `SELECT * FROM listings WHERE id = $1`,
+        [listingId],
+      );
+      currentListing = currentListingRows[0];
+    } catch (fetchError) {
+      logDbError(
+        "[PATCH /api/business/listings/[id]] Listing fetch failed",
+        {
+          message: fetchError instanceof Error ? fetchError.message : "Unknown error",
+          details: null,
+          hint: null,
+          code: "",
+        },
+        { listingId, userId },
+      );
+    }
 
-    if (fetchError || !currentListing) {
-      if (fetchError) {
-        logDbError("[PATCH /api/business/listings/[id]] Listing fetch failed", fetchError, {
-          listingId,
-          userId,
-        });
-      }
+    if (!currentListing) {
       throw new Error("Listing not found");
     }
 
     // Handle draft submission for approval
     if (submit_for_approval && currentListing.status === "draft") {
-      const submitPayload: Record<string, unknown> = {
-        status: "pending_approval",
-        submitted_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+      const submittedAt = new Date().toISOString();
+      const updatedAt = new Date().toISOString();
 
-      let { error: submitError } = await supabase
-        .from("listings")
-        .update(submitPayload)
-        .eq("id", listingId);
+      let submitError: (Error & { code?: string }) | null = null;
+      try {
+        await query(
+          `UPDATE listings SET status = 'pending_approval', submitted_at = $1, updated_at = $2 WHERE id = $3`,
+          [submittedAt, updatedAt, listingId],
+        );
+      } catch (error) {
+        submitError = error as Error & { code?: string };
+      }
 
       // Backward-compatible retry while migration is pending.
-      if (
-        submitError?.code === "PGRST204" &&
-        submitError.message.includes("'submitted_at' column of 'listings'")
-      ) {
+      if (submitError?.code === "42703") {
         console.warn(
           "[PATCH /api/business/listings/[id]] submitted_at missing; retrying without submitted_at",
           { listingId, userId },
         );
 
-        const fallbackPayload = {
-          status:
-            "pending_approval" as Database["public"]["Enums"]["listing_status"],
-          updated_at: new Date().toISOString(),
-        };
-
-        const fallbackResult = await supabase
-          .from("listings")
-          .update(fallbackPayload)
-          .eq("id", listingId);
-
-        submitError = fallbackResult.error;
+        try {
+          await query(
+            `UPDATE listings SET status = 'pending_approval', updated_at = $1 WHERE id = $2`,
+            [updatedAt, listingId],
+          );
+          submitError = null;
+        } catch (fallbackError) {
+          submitError = fallbackError as Error & { code?: string };
+        }
       }
 
       if (submitError) {
-        logDbError("[PATCH /api/business/listings/[id]] Submit for approval failed", submitError, {
-          listingId,
-          userId,
-          currentStatus: currentListing.status,
-          targetStatus: "pending_approval",
-        });
+        logDbError(
+          "[PATCH /api/business/listings/[id]] Submit for approval failed",
+          {
+            message: submitError.message,
+            details: null,
+            hint: null,
+            code: submitError.code || "",
+          },
+          {
+            listingId,
+            userId,
+            currentStatus: currentListing.status,
+            targetStatus: "pending_approval",
+          },
+        );
         throw new Error(`Failed to submit listing: ${submitError.message}`);
       }
 
@@ -276,10 +300,10 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       try {
         const { createNotification } =
           await import("@/lib/notifications/service");
-        const { data: admins } = await supabase
-          .from("profiles")
-          .select("id")
-          .in("role", ["lister", "admin", "super_admin"]);
+        const { rows: admins } = await query(
+          `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+          [["lister", "admin", "super_admin"]],
+        );
 
         adminCount = admins?.length ?? 0;
 
@@ -337,12 +361,12 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     if (needsApproval) {
       // Check if there's already a pending change request for this listing
-      const { data: existingRequest } = await supabase
-        .from("listing_change_requests")
-        .select("id, created_at, change_type")
-        .eq("listing_id", listingId)
-        .eq("status", "pending")
-        .single();
+      const { rows: existingRequestRows } = await query(
+        `SELECT id, created_at, change_type FROM listing_change_requests
+         WHERE listing_id = $1 AND status = 'pending'`,
+        [listingId],
+      );
+      const existingRequest = existingRequestRows[0];
 
       if (existingRequest) {
         return listingPatchError(
@@ -369,44 +393,54 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
           ? "priority"
           : "normal";
 
-      // Properly type the insert data according to Supabase schema
-      const insertData: Database["public"]["Tables"]["listing_change_requests"]["Insert"] =
-        {
-          listing_id: listingId,
-          requested_by: userId,
-          change_type: changeType,
-          current_data: currentListing as Json,
-          proposed_data: restBody as Json,
-          reason:
-            typeof restBody.reason === "string" ? restBody.reason : null,
-          status: "pending",
-          priority,
-        };
+      const reason =
+        typeof restBody.reason === "string" ? restBody.reason : null;
 
-      const { data: changeRequest, error: createError } = await supabase
-        .from("listing_change_requests")
-        .insert(insertData)
-        .select()
-        .single();
-
-      if (createError) {
-        logDbError("[PATCH /api/business/listings/[id]] Change request create failed", createError, {
-          listingId,
-          userId,
-          changeType,
-        });
+      let changeRequest;
+      try {
+        const { rows: changeRequestRows } = await query(
+          `INSERT INTO listing_change_requests
+             (listing_id, requested_by, change_type, current_data, proposed_data, reason, status, priority)
+           VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+           RETURNING *`,
+          [
+            listingId,
+            userId,
+            changeType,
+            JSON.stringify(currentListing),
+            JSON.stringify(restBody),
+            reason,
+            priority,
+          ],
+        );
+        changeRequest = changeRequestRows[0];
+      } catch (createError) {
+        const code =
+          createError && typeof createError === "object" && "code" in createError
+            ? (createError as { code?: string }).code
+            : undefined;
+        logDbError(
+          "[PATCH /api/business/listings/[id]] Change request create failed",
+          {
+            message: createError instanceof Error ? createError.message : "Unknown error",
+            details: null,
+            hint: null,
+            code: code || "",
+          },
+          { listingId, userId, changeType },
+        );
         // Handle unique constraint violation gracefully
-        if (createError.code === "23505") {
+        if (code === "23505") {
           return listingPatchError(
             requestId,
             409,
             "UPDATE_FAILED",
             "A pending change request already exists for this listing",
-            { dbCode: createError.code ?? null },
+            { dbCode: code ?? null },
           );
         }
         throw new Error(
-          `Failed to create change request: ${createError.message}`,
+          `Failed to create change request: ${createError instanceof Error ? createError.message : "Unknown error"}`,
         );
       }
 
@@ -414,10 +448,10 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       try {
         const { createNotification } =
           await import("@/lib/notifications/service");
-        const { data: admins } = await supabase
-          .from("profiles")
-          .select("id")
-          .in("role", ["lister", "admin", "super_admin"]);
+        const { rows: admins } = await query(
+          `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+          [["lister", "admin", "super_admin"]],
+        );
 
         if (admins && admins.length > 0) {
           await Promise.all(
@@ -461,22 +495,69 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     // Minor changes - apply directly (reason not needed for direct updates)
     const { reason: _reason, ...updateData } = sanitizedBody;
 
-    const { data: updatedListing, error: updateError } = await supabase
-      .from("listings")
-      .update({
-        ...updateData,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", listingId)
-      .select()
-      .single();
+    // Column names can never be parameterized, so only a fixed whitelist of
+    // known listing columns may be written here (Section 7 of the migration guide).
+    const ALLOWED_UPDATE_COLUMNS = [
+      "name",
+      "description",
+      "category_id",
+      "address",
+      "phone_number",
+      "email",
+      "website",
+      "facebook_url",
+      "instagram_url",
+      "whatsapp_number",
+      "parking_information",
+      "parking_amenities",
+      "status",
+      "is_featured",
+      "owner_id",
+      "show_member_badge",
+      "display_order",
+      "menu_pdf_url",
+    ];
+    const updateKeys = Object.keys(updateData).filter((key) =>
+      ALLOWED_UPDATE_COLUMNS.includes(key),
+    );
+
+    const setClauses = updateKeys.map(
+      (key, idx) => `"${key}" = $${idx + 1}`,
+    );
+    setClauses.push(`updated_at = $${updateKeys.length + 1}`);
+    const values = [
+      ...updateKeys.map((key) => (updateData as Record<string, unknown>)[key]),
+      new Date().toISOString(),
+    ];
+    values.push(listingId);
+
+    let updatedListing;
+    let updateError: (Error & { code?: string }) | null = null;
+    try {
+      const { rows: updatedRows } = await query(
+        `UPDATE listings SET ${setClauses.join(", ")} WHERE id = $${values.length} RETURNING *`,
+        values,
+      );
+      updatedListing = updatedRows[0];
+    } catch (error) {
+      updateError = error as Error & { code?: string };
+    }
 
     if (updateError) {
-      logDbError("[PATCH /api/business/listings/[id]] Direct listing update failed", updateError, {
-        listingId,
-        userId,
-        updateKeys: Object.keys(updateData),
-      });
+      logDbError(
+        "[PATCH /api/business/listings/[id]] Direct listing update failed",
+        {
+          message: updateError.message,
+          details: null,
+          hint: null,
+          code: updateError.code || "",
+        },
+        {
+          listingId,
+          userId,
+          updateKeys,
+        },
+      );
       const isValidationError =
         updateError.code === "23503" || updateError.code === "22P02";
       return listingPatchError(
@@ -540,8 +621,6 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
-
     const rawBody = await request
       .json()
       .catch(() => ({ reason: "" } as { reason?: string }));
@@ -556,20 +635,27 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    const { data: listing, error: listingError } = await supabase
-      .from("listings")
-      .select("id, name, status, owner_id")
-      .eq("id", listingId)
-      .single();
+    let listing;
+    try {
+      const { rows: listingRows } = await query(
+        `SELECT id, name, status, owner_id FROM listings WHERE id = $1`,
+        [listingId],
+      );
+      listing = listingRows[0];
+    } catch (listingError) {
+      logDbError(
+        "[DELETE /api/business/listings/[id]] Listing fetch failed",
+        {
+          message: listingError instanceof Error ? listingError.message : "Unknown error",
+          details: null,
+          hint: null,
+          code: "",
+        },
+        { listingId, userId },
+      );
+    }
 
-    if (listingError || !listing) {
-      if (listingError) {
-        logDbError(
-          "[DELETE /api/business/listings/[id]] Listing fetch failed",
-          listingError,
-          { listingId, userId },
-        );
-      }
+    if (!listing) {
       return apiError("Listing not found", 404);
     }
 
@@ -581,17 +667,25 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    const { data: pendingRequest, error: pendingRequestError } = await supabase
-      .from("listing_change_requests")
-      .select("id, change_type, created_at")
-      .eq("listing_id", listingId)
-      .eq("status", "pending")
-      .maybeSingle();
-
-    if (pendingRequestError) {
+    let pendingRequest;
+    try {
+      const result = await query(
+        `SELECT id, change_type, created_at
+         FROM listing_change_requests
+         WHERE listing_id = $1 AND status = 'pending'
+         LIMIT 1`,
+        [listingId],
+      );
+      pendingRequest = result.rows[0] || null;
+    } catch (pendingRequestError) {
       logDbError(
         "[DELETE /api/business/listings/[id]] Pending request check failed",
-        pendingRequestError,
+        {
+          message: pendingRequestError instanceof Error ? pendingRequestError.message : "Unknown error",
+          details: null,
+          hint: null,
+          code: "",
+        },
         { listingId, userId },
       );
       throw new Error("Failed to validate pending requests");
@@ -617,23 +711,28 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       requested_at: new Date().toISOString(),
     };
 
-    let changeRequestPayload: Database["public"]["Tables"]["listing_change_requests"]["Insert"] =
-      {
-        listing_id: listingId,
-        requested_by: userId,
-        change_type: "delete_request",
-        current_data: listing as Json,
-        proposed_data: proposedDeleteData as Json,
-        reason: deletionReason,
-        status: "pending",
-        priority: "priority",
-      };
-
-    let { data: createdRequest, error: createRequestError } = await supabase
-      .from("listing_change_requests")
-      .insert(changeRequestPayload)
-      .select("id, status, change_type, created_at")
-      .single();
+    let createdRequest;
+    let createRequestError: (Error & { code?: string }) | null = null;
+    let changeType = "delete_request";
+    try {
+      const { rows } = await query(
+        `INSERT INTO listing_change_requests
+           (listing_id, requested_by, change_type, current_data, proposed_data, reason, status, priority)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', 'priority')
+         RETURNING id, status, change_type, created_at`,
+        [
+          listingId,
+          userId,
+          changeType,
+          JSON.stringify(listing),
+          JSON.stringify(proposedDeleteData),
+          deletionReason,
+        ],
+      );
+      createdRequest = rows[0];
+    } catch (error) {
+      createRequestError = error as Error & { code?: string };
+    }
 
     // Backward compatibility: legacy DB constraint may not allow delete_request yet.
     if (
@@ -645,26 +744,39 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
         { listingId, userId },
       );
 
-      changeRequestPayload = {
-        ...changeRequestPayload,
-        change_type: "major_update",
-      };
-
-      const retryResult = await supabase
-        .from("listing_change_requests")
-        .insert(changeRequestPayload)
-        .select("id, status, change_type, created_at")
-        .single();
-
-      createdRequest = retryResult.data;
-      createRequestError = retryResult.error;
+      changeType = "major_update";
+      try {
+        const { rows } = await query(
+          `INSERT INTO listing_change_requests
+             (listing_id, requested_by, change_type, current_data, proposed_data, reason, status, priority)
+           VALUES ($1, $2, $3, $4, $5, $6, 'pending', 'priority')
+           RETURNING id, status, change_type, created_at`,
+          [
+            listingId,
+            userId,
+            changeType,
+            JSON.stringify(listing),
+            JSON.stringify(proposedDeleteData),
+            deletionReason,
+          ],
+        );
+        createdRequest = rows[0];
+        createRequestError = null;
+      } catch (retryError) {
+        createRequestError = retryError as Error & { code?: string };
+      }
     }
 
     if (createRequestError || !createdRequest) {
       if (createRequestError) {
         logDbError(
           "[DELETE /api/business/listings/[id]] Create delete request failed",
-          createRequestError,
+          {
+            message: createRequestError.message,
+            details: null,
+            hint: null,
+            code: createRequestError.code || "",
+          },
           { listingId, userId },
         );
       }
@@ -676,39 +788,40 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    const submitPayload: Record<string, unknown> = {
-      status: "pending_approval",
-      submitted_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
+    const submittedAt = new Date().toISOString();
+    const updatedAt = new Date().toISOString();
 
-    let { error: submitError } = await supabase
-      .from("listings")
-      .update(submitPayload)
-      .eq("id", listingId);
+    let submitError: (Error & { code?: string }) | null = null;
+    try {
+      await query(
+        `UPDATE listings SET status = 'pending_approval', submitted_at = $1, updated_at = $2 WHERE id = $3`,
+        [submittedAt, updatedAt, listingId],
+      );
+    } catch (error) {
+      submitError = error as Error & { code?: string };
+    }
 
-    if (
-      submitError?.code === "PGRST204" &&
-      submitError.message.includes("'submitted_at' column of 'listings'")
-    ) {
-      const fallbackPayload = {
-        status:
-          "pending_approval" as Database["public"]["Enums"]["listing_status"],
-        updated_at: new Date().toISOString(),
-      };
-
-      const fallbackResult = await supabase
-        .from("listings")
-        .update(fallbackPayload)
-        .eq("id", listingId);
-
-      submitError = fallbackResult.error;
+    if (submitError?.code === "42703") {
+      try {
+        await query(
+          `UPDATE listings SET status = 'pending_approval', updated_at = $1 WHERE id = $2`,
+          [updatedAt, listingId],
+        );
+        submitError = null;
+      } catch (fallbackError) {
+        submitError = fallbackError as Error & { code?: string };
+      }
     }
 
     if (submitError) {
       logDbError(
         "[DELETE /api/business/listings/[id]] Move listing to review queue failed",
-        submitError,
+        {
+          message: submitError.message,
+          details: null,
+          hint: null,
+          code: submitError.code || "",
+        },
         { listingId, userId },
       );
       throw new Error(`Failed to submit deletion request: ${submitError.message}`);
@@ -716,10 +829,10 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     try {
       const { createNotification } = await import("@/lib/notifications/service");
-      const { data: admins } = await supabase
-        .from("profiles")
-        .select("id")
-        .in("role", ["lister", "admin", "super_admin"]);
+      const { rows: admins } = await query(
+        `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+        [["lister", "admin", "super_admin"]],
+      );
 
       if (admins && admins.length > 0) {
         await Promise.all(

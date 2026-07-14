@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   apiSuccess,
@@ -75,7 +75,6 @@ function parseGranularity(value: string | null): Granularity {
 export async function GET(request: NextRequest) {
   try {
     const userId = await verifyBusinessOwner();
-    const supabase = await createServerSupabase();
 
     const { searchParams } = new URL(request.url);
     const listingId = searchParams.get("listingId");
@@ -110,14 +109,16 @@ export async function GET(request: NextRequest) {
     }
 
     // Get user's listings to verify ownership and resolve names for top listings.
-    const { data: userListings, error: listingsError } = await supabase
-      .from("listings")
-      .select("id, name")
-      .eq("owner_id", userId);
-
-    if (listingsError) {
+    let userListings;
+    try {
+      const result = await query(
+        `SELECT id, name FROM listings WHERE owner_id = $1`,
+        [userId],
+      );
+      userListings = result.rows;
+    } catch (listingsError) {
       throw new Error(
-        `Failed to fetch user listings: ${listingsError.message}`,
+        `Failed to fetch user listings: ${listingsError instanceof Error ? listingsError.message : "Unknown error"}`,
       );
     }
 
@@ -153,20 +154,19 @@ export async function GET(request: NextRequest) {
 
     const targetListingIds = parsedListingId ? [parsedListingId] : userListingIds;
 
-    const { data: cacheRowsData, error: cacheError } = await supabase
-      .from("business_owner_analytics_cache")
-      .select(
-        "listing_id, metric_date, total_views, unique_visitors, favorites, contact_clicks, avg_rating, total_reviews",
-      )
-      .eq("owner_id", userId)
-      .in("listing_id", targetListingIds)
-      .gte("metric_date", startDate)
-      .lte("metric_date", endDate)
-      .order("metric_date", { ascending: true });
-
-    if (cacheError) {
+    let cacheRowsData;
+    try {
+      const result = await query(
+        `SELECT listing_id, metric_date, total_views, unique_visitors, favorites, contact_clicks, avg_rating, total_reviews
+         FROM business_owner_analytics_cache
+         WHERE owner_id = $1 AND listing_id = ANY($2::int[]) AND metric_date >= $3 AND metric_date <= $4
+         ORDER BY metric_date ASC`,
+        [userId, targetListingIds, startDate, endDate],
+      );
+      cacheRowsData = result.rows;
+    } catch (cacheError) {
       throw new Error(
-        `Failed to fetch analytics metrics: ${cacheError.message}`,
+        `Failed to fetch analytics metrics: ${cacheError instanceof Error ? cacheError.message : "Unknown error"}`,
       );
     }
 
@@ -249,24 +249,34 @@ export async function GET(request: NextRequest) {
 
     let branches: BusinessOwnerAnalytics["branches"] = [];
     if (targetListingIds.length > 0) {
-      const serviceSupabase = await createServerSupabase({ useServiceRole: true });
+      let branchRowsData;
+      try {
+        const result = await query(
+          `SELECT id, listing_id, name FROM listing_branches WHERE listing_id = ANY($1::int[])`,
+          [targetListingIds],
+        );
+        branchRowsData = result.rows;
+      } catch {
+        branchRowsData = undefined;
+      }
 
-      const { data: branchRowsData, error: branchRowsError } = await serviceSupabase
-        .from("listing_branches")
-        .select("id, listing_id, name")
-        .in("listing_id", targetListingIds);
-
-      if (!branchRowsError && branchRowsData && branchRowsData.length > 0) {
+      if (branchRowsData && branchRowsData.length > 0) {
         const branchRows = branchRowsData as unknown as BranchRow[];
         const branchIds = branchRows.map((branch) => branch.id);
 
-        const { data: reviewRowsData, error: reviewRowsError } = await serviceSupabase
-          .from("reviews")
-          .select("branch_id, rating")
-          .in("branch_id", branchIds)
-          .eq("status", "approved")
-          .gte("created_at", `${startDate}T00:00:00.000Z`)
-          .lte("created_at", `${endDate}T23:59:59.999Z`);
+        let reviewRowsData;
+        let reviewRowsError = false;
+        try {
+          const result = await query(
+            `SELECT branch_id, rating FROM reviews
+             WHERE branch_id = ANY($1::int[]) AND status = 'approved'
+               AND created_at >= $2 AND created_at <= $3`,
+            [branchIds, `${startDate}T00:00:00.000Z`, `${endDate}T23:59:59.999Z`],
+          );
+          reviewRowsData = result.rows;
+        } catch {
+          reviewRowsError = true;
+        }
 
         const reviewRows = reviewRowsError
           ? []

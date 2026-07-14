@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   verifyListingOwnership,
@@ -32,16 +32,14 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
-
     // Get the listing and verify it's in draft status
-    const { data: listing, error: fetchError } = await supabase
-      .from("listings")
-      .select("id, name, status")
-      .eq("id", listingId)
-      .single();
+    const { rows: listingRows } = await query(
+      `SELECT id, name, status FROM listings WHERE id = $1`,
+      [listingId],
+    );
+    const listing = listingRows[0];
 
-    if (fetchError || !listing) {
+    if (!listing) {
       return apiError("Listing not found", 404);
     }
 
@@ -64,25 +62,29 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
     const oneMonthAgo = new Date();
     oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
 
-    const { count: userListingCount } = await supabase
-      .from("listings")
-      .select("*", { count: "exact", head: true })
-      .eq("owner_id", userId)
-      .gte("created_at", oneMonthAgo.toISOString());
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM listings WHERE owner_id = $1 AND created_at >= $2`,
+      [userId, oneMonthAgo.toISOString()],
+    );
+    const userListingCount = parseInt(countRows[0].count, 10);
 
     if (userListingCount && userListingCount >= 3) {
       // Log security event for rate limit
-      await supabase.from("security_events").insert({
-        event_type: "rate_limit_exceeded",
-        severity: "medium",
-        user_id: userId,
-        details: {
-          reason: "User-based listing submission limit exceeded",
-          count: userListingCount,
-          limit: 3,
-          period: "30 days",
-        },
-      });
+      await query(
+        `INSERT INTO security_events (event_type, severity, user_id, details)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          "rate_limit_exceeded",
+          "medium",
+          userId,
+          JSON.stringify({
+            reason: "User-based listing submission limit exceeded",
+            count: userListingCount,
+            limit: 3,
+            period: "30 days",
+          }),
+        ],
+      );
 
       return apiError(
         "Rate limit exceeded. You can submit up to 3 listings per month.",
@@ -97,16 +99,15 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
     }
 
     // Update listing status to pending_approval
-    const { error: updateError } = await supabase
-      .from("listings")
-      .update({
-        status: "pending_approval",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", listingId);
-
-    if (updateError) {
-      throw new Error(`Failed to submit listing: ${updateError.message}`);
+    try {
+      await query(
+        `UPDATE listings SET status = 'pending_approval', updated_at = $1 WHERE id = $2`,
+        [new Date().toISOString(), listingId],
+      );
+    } catch (updateError) {
+      throw new Error(
+        `Failed to submit listing: ${updateError instanceof Error ? updateError.message : "Unknown error"}`,
+      );
     }
 
     // TODO: Notify admins for review (implement when notification system is ready)

@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   apiSuccess,
@@ -35,7 +35,6 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     }
 
     const userId = await verifyBusinessOwner();
-    const supabase = await createServerSupabase();
 
     const body = await request.json();
     const validation = updateReplySchema.safeParse(body);
@@ -50,13 +49,13 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     const { content } = validation.data;
 
     // Get the reply and verify ownership
-    const { data: reply, error: replyError } = await supabase
-      .from("review_comments")
-      .select("id, user_id, created_at, edit_count, status")
-      .eq("id", replyId)
-      .single();
+    const { rows: replyRows } = await query(
+      `SELECT id, user_id, created_at, edit_count, status FROM review_comments WHERE id = $1`,
+      [replyId],
+    );
+    const reply = replyRows[0];
 
-    if (replyError || !reply) {
+    if (!reply) {
       return apiError("Reply not found", 404);
     }
 
@@ -76,20 +75,25 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     }
 
     // Update the reply
-    const { data: updatedReply, error: updateError } = await supabase
-      .from("review_comments")
-      .update({
-        content,
-        edit_count: (reply.edit_count || 0) + 1,
-        last_edited_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", replyId)
-      .select()
-      .single();
-
-    if (updateError) {
-      throw new Error(`Failed to update reply: ${updateError.message}`);
+    let updatedReply;
+    try {
+      const { rows: updatedRows } = await query(
+        `UPDATE review_comments
+         SET content = $1, edit_count = $2, last_edited_at = $3, updated_at = $3
+         WHERE id = $4
+         RETURNING *`,
+        [
+          content,
+          (reply.edit_count || 0) + 1,
+          new Date().toISOString(),
+          replyId,
+        ],
+      );
+      updatedReply = updatedRows[0];
+    } catch (updateError) {
+      throw new Error(
+        `Failed to update reply: ${updateError instanceof Error ? updateError.message : "Unknown error"}`,
+      );
     }
 
     return apiSuccess({
@@ -118,16 +122,15 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
     }
 
     const userId = await verifyBusinessOwner();
-    const supabase = await createServerSupabase();
 
     // Get the reply and verify ownership
-    const { data: reply, error: replyError } = await supabase
-      .from("review_comments")
-      .select("id, user_id, created_at, status")
-      .eq("id", replyId)
-      .single();
+    const { rows: replyRows } = await query(
+      `SELECT id, user_id, created_at, status FROM review_comments WHERE id = $1`,
+      [replyId],
+    );
+    const reply = replyRows[0];
 
-    if (replyError || !reply) {
+    if (!reply) {
       return apiError("Reply not found", 404);
     }
 
@@ -154,13 +157,12 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
     }
 
     // Delete the reply
-    const { error: deleteError } = await supabase
-      .from("review_comments")
-      .delete()
-      .eq("id", replyId);
-
-    if (deleteError) {
-      throw new Error(`Failed to delete reply: ${deleteError.message}`);
+    try {
+      await query(`DELETE FROM review_comments WHERE id = $1`, [replyId]);
+    } catch (deleteError) {
+      throw new Error(
+        `Failed to delete reply: ${deleteError instanceof Error ? deleteError.message : "Unknown error"}`,
+      );
     }
 
     return apiSuccess({ deleted: true }, "Reply deleted successfully");

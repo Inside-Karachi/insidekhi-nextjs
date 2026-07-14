@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   apiSuccess,
@@ -14,16 +14,19 @@ import type { BusinessOwnerDashboardStats } from "@/types/business-owner.types";
 export async function GET(_request: NextRequest) {
   try {
     const userId = await verifyBusinessOwner();
-    const supabase = await createServerSupabase();
 
     // Get listings count by status
-    const { data: listings, error: listingsError } = await supabase
-      .from("listings")
-      .select("status")
-      .eq("owner_id", userId);
-
-    if (listingsError) {
-      throw new Error(`Failed to fetch listings: ${listingsError.message}`);
+    let listings;
+    try {
+      const result = await query(
+        `SELECT status FROM listings WHERE owner_id = $1`,
+        [userId],
+      );
+      listings = result.rows;
+    } catch (listingsError) {
+      throw new Error(
+        `Failed to fetch listings: ${listingsError instanceof Error ? listingsError.message : "Unknown error"}`,
+      );
     }
 
     const total_listings = listings?.length || 0;
@@ -42,14 +45,18 @@ export async function GET(_request: NextRequest) {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    const { data: analytics, error: analyticsError } = await supabase
-      .from("business_owner_analytics_cache")
-      .select("total_views, avg_rating, total_reviews")
-      .eq("owner_id", userId)
-      .gte("metric_date", thirtyDaysAgo.toISOString().split("T")[0]);
-
-    if (analyticsError) {
+    let analytics;
+    try {
+      const result = await query(
+        `SELECT total_views, avg_rating, total_reviews
+         FROM business_owner_analytics_cache
+         WHERE owner_id = $1 AND metric_date >= $2`,
+        [userId, thirtyDaysAgo.toISOString().split("T")[0]],
+      );
+      analytics = result.rows;
+    } catch (analyticsError) {
       console.error("Analytics error:", analyticsError);
+      analytics = undefined;
     }
 
     const total_views_30d =
@@ -88,14 +95,18 @@ export async function GET(_request: NextRequest) {
       ) || 0;
 
     // Get change requests status
-    const { data: changeRequests, error: changeRequestsError } = await supabase
-      .from("listing_change_requests")
-      .select("status, sla_deadline")
-      .eq("requested_by", userId)
-      .eq("status", "pending");
-
-    if (changeRequestsError) {
+    let changeRequests: { status: string; sla_deadline: string | null }[] | undefined =
+      undefined;
+    try {
+      const result = await query(
+        `SELECT status, sla_deadline FROM listing_change_requests
+         WHERE requested_by = $1 AND status = 'pending'`,
+        [userId],
+      );
+      changeRequests = result.rows;
+    } catch (changeRequestsError) {
       console.error("Change requests error:", changeRequestsError);
+      changeRequests = undefined;
     }
 
     const pending_change_requests = changeRequests?.length || 0;

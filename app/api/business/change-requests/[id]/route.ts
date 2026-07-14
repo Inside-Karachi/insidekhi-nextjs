@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { verifyBusinessOwner } from "@/lib/business-owner/api-utils";
 
 // DELETE: Cancel a pending change request
@@ -9,7 +9,6 @@ export async function DELETE(
 ) {
   try {
     const userId = await verifyBusinessOwner();
-    const supabase = await createServerSupabase();
     const { id } = await context.params;
     const requestId = parseInt(id, 10);
 
@@ -24,14 +23,13 @@ export async function DELETE(
     }
 
     // Verify ownership and that request is still pending
-    const { data: request, error: fetchError } = await supabase
-      .from("listing_change_requests")
-      .select("*")
-      .eq("id", requestId)
-      .eq("requested_by", userId)
-      .single();
+    const { rows: requestRows } = await query(
+      `SELECT * FROM listing_change_requests WHERE id = $1 AND requested_by = $2`,
+      [requestId, userId],
+    );
+    const request = requestRows[0];
 
-    if (fetchError || !request) {
+    if (!request) {
       return NextResponse.json(
         {
           success: false,
@@ -53,12 +51,11 @@ export async function DELETE(
     }
 
     // Delete the request (or you could update status to 'cancelled' if you add that status)
-    const { error: deleteError } = await supabase
-      .from("listing_change_requests")
-      .delete()
-      .eq("id", requestId);
-
-    if (deleteError) {
+    try {
+      await query(`DELETE FROM listing_change_requests WHERE id = $1`, [
+        requestId,
+      ]);
+    } catch (deleteError) {
       console.error("Error deleting change request:", deleteError);
       return NextResponse.json(
         {

@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { deleteFile } from "@/lib/storage/spaces";
 import {
   verifyBusinessOwner,
   verifyListingOwnership,
@@ -34,17 +35,15 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
-
     // Verify image belongs to this listing
-    const { data: image, error: fetchError } = await supabase
-      .from("listing_images")
-      .select("id, listing_id, url, is_primary")
-      .eq("id", imageIdNum)
-      .eq("listing_id", listingId)
-      .single();
+    const { rows: imageRows } = await query(
+      `SELECT id, listing_id, url, is_primary FROM listing_images
+       WHERE id = $1 AND listing_id = $2`,
+      [imageIdNum, listingId],
+    );
+    const image = imageRows[0];
 
-    if (fetchError || !image) {
+    if (!image) {
       return apiError("Image not found or does not belong to this listing", 404);
     }
 
@@ -56,40 +55,34 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
     const storagePath = urlParts[1];
 
     // Delete from storage
-    const { error: storageError } = await supabase.storage
-      .from("listing-images")
-      .remove([storagePath]);
-
-    if (storageError) {
+    try {
+      await deleteFile(storagePath, "listing-images");
+    } catch (storageError) {
       console.error("Storage deletion error:", storageError);
       // Continue with database deletion even if storage fails
     }
 
     // Delete from database
-    const { error: dbError } = await supabase
-      .from("listing_images")
-      .delete()
-      .eq("id", imageIdNum);
-
-    if (dbError) {
-      throw new Error(`Failed to delete image: ${dbError.message}`);
+    try {
+      await query(`DELETE FROM listing_images WHERE id = $1`, [imageIdNum]);
+    } catch (dbError) {
+      throw new Error(
+        `Failed to delete image: ${dbError instanceof Error ? dbError.message : "Unknown error"}`,
+      );
     }
 
     // If this was the primary image, set another as primary
     if (image.is_primary) {
-      const { data: firstImage } = await supabase
-        .from("listing_images")
-        .select("id")
-        .eq("listing_id", listingId)
-        .order("display_order", { ascending: true })
-        .limit(1)
-        .single();
+      const { rows: firstImageRows } = await query(
+        `SELECT id FROM listing_images WHERE listing_id = $1 ORDER BY display_order ASC LIMIT 1`,
+        [listingId],
+      );
+      const firstImage = firstImageRows[0];
 
       if (firstImage) {
-        await supabase
-          .from("listing_images")
-          .update({ is_primary: true })
-          .eq("id", firstImage.id);
+        await query(`UPDATE listing_images SET is_primary = true WHERE id = $1`, [
+          firstImage.id,
+        ]);
       }
     }
 

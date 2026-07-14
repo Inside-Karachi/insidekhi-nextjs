@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   apiSuccess,
@@ -13,7 +13,6 @@ export const dynamic = "force-dynamic";
 export async function GET(request: NextRequest) {
   try {
     const userId = await verifyBusinessOwner();
-    const supabase = await createServerSupabase();
 
     const { searchParams } = new URL(request.url);
     const listingId = searchParams.get("listingId");
@@ -24,13 +23,17 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get("limit") || "20"), 50);
 
     // Get user's listings
-    const { data: userListings, error: listingsError } = await supabase
-      .from("listings")
-      .select("id")
-      .eq("owner_id", userId);
-
-    if (listingsError) {
-      throw new Error(`Failed to fetch listings: ${listingsError.message}`);
+    let userListings;
+    try {
+      const result = await query(
+        `SELECT id FROM listings WHERE owner_id = $1`,
+        [userId],
+      );
+      userListings = result.rows;
+    } catch (listingsError) {
+      throw new Error(
+        `Failed to fetch listings: ${listingsError instanceof Error ? listingsError.message : "Unknown error"}`,
+      );
     }
 
     const userListingIds = userListings?.map((l) => l.id) || [];
@@ -49,80 +52,114 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Build query
-    let query = supabase
-      .from("reviews")
-      .select(
-        `
-        id,
-        listing_id,
-        branch_id,
-        rating,
-        comment,
-        created_at,
-        user_id,
-        profiles!reviews_user_id_fkey (
-          full_name,
-          avatar_url
-        ),
-        listings!reviews_listing_id_fkey (
-          name
-        ),
-        listing_branches (
-          branch_name
-        ),
-        review_comments!review_comments_review_id_fkey (
-          id,
-          content,
-          created_at,
-          edit_count,
-          last_edited_at
-        )
-      `,
-        { count: "exact" },
-      )
-      .in("listing_id", userListingIds)
-      .eq("status", "approved")
-      .order("created_at", { ascending: false });
-
-    // Apply filters
+    // Build filters
+    const whereParams: unknown[] = [userListingIds];
+    let whereSql = "listing_id = ANY($1::int[]) AND status = 'approved'";
     if (listingId) {
-      query = query.eq("listing_id", parseInt(listingId));
+      whereParams.push(parseInt(listingId));
+      whereSql += ` AND listing_id = $${whereParams.length}`;
     }
     if (branchId) {
-      query = query.eq("branch_id", parseInt(branchId));
+      whereParams.push(parseInt(branchId));
+      whereSql += ` AND branch_id = $${whereParams.length}`;
     }
     if (rating) {
-      query = query.eq("rating", parseInt(rating));
+      whereParams.push(parseInt(rating));
+      whereSql += ` AND rating = $${whereParams.length}`;
     }
 
-    // Pagination
     const offset = (page - 1) * limit;
-    query = query.range(offset, offset + limit - 1);
 
-    const { data: reviews, error: reviewsError, count } = await query;
+    let reviews, count;
+    try {
+      const countResult = await query(
+        `SELECT COUNT(*) FROM reviews WHERE ${whereSql}`,
+        whereParams,
+      );
+      count = parseInt(countResult.rows[0].count, 10);
 
-    if (reviewsError) {
-      throw new Error(`Failed to fetch reviews: ${reviewsError.message}`);
+      const listParams = [...whereParams, limit, offset];
+      const reviewsResult = await query(
+        `SELECT id, listing_id, branch_id, rating, comment, created_at, user_id
+         FROM reviews
+         WHERE ${whereSql}
+         ORDER BY created_at DESC
+         LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+        listParams,
+      );
+      reviews = reviewsResult.rows;
+    } catch (reviewsError) {
+      throw new Error(
+        `Failed to fetch reviews: ${reviewsError instanceof Error ? reviewsError.message : "Unknown error"}`,
+      );
+    }
+
+    // Fetch related data in bulk, then stitch together
+    const reviewIds = reviews.map((r) => r.id);
+    const userIds = [...new Set(reviews.map((r) => r.user_id))];
+    const listingIds = [...new Set(reviews.map((r) => r.listing_id))];
+    const branchIds = [
+      ...new Set(reviews.map((r) => r.branch_id).filter((id) => id != null)),
+    ];
+
+    const [profilesResult, listingsResult, branchesResult, commentsResult] =
+      await Promise.all([
+        userIds.length > 0
+          ? query(
+              `SELECT id, full_name, avatar_url FROM profiles WHERE id = ANY($1::uuid[])`,
+              [userIds],
+            )
+          : { rows: [] },
+        listingIds.length > 0
+          ? query(`SELECT id, name FROM listings WHERE id = ANY($1::int[])`, [
+              listingIds,
+            ])
+          : { rows: [] },
+        branchIds.length > 0
+          ? query(
+              `SELECT id, branch_name FROM listing_branches WHERE id = ANY($1::int[])`,
+              [branchIds],
+            )
+          : { rows: [] },
+        reviewIds.length > 0
+          ? query(
+              `SELECT id, review_id, content, created_at, edit_count, last_edited_at
+               FROM review_comments WHERE review_id = ANY($1::int[])`,
+              [reviewIds],
+            )
+          : { rows: [] },
+      ]);
+
+    const profileById = new Map(profilesResult.rows.map((p) => [p.id, p]));
+    const listingNameById = new Map(
+      listingsResult.rows.map((l) => [l.id, l.name]),
+    );
+    const branchNameById = new Map(
+      branchesResult.rows.map((b) => [b.id, b.branch_name]),
+    );
+    const commentsByReviewId = new Map<number, typeof commentsResult.rows>();
+    for (const comment of commentsResult.rows) {
+      const existing = commentsByReviewId.get(comment.review_id) || [];
+      existing.push(comment);
+      commentsByReviewId.set(comment.review_id, existing);
     }
 
     // Filter for needs reply if requested
-    let filteredReviews = reviews || [];
+    let filteredReviews = reviews;
     if (needsReply) {
-      filteredReviews = filteredReviews.filter(
-        (r) => !r.review_comments || r.review_comments.length === 0,
-      );
+      filteredReviews = filteredReviews.filter((r) => {
+        const comments = commentsByReviewId.get(r.id);
+        return !comments || comments.length === 0;
+      });
     }
 
     const total = needsReply ? filteredReviews.length : count || 0;
     const totalPages = Math.ceil(total / limit);
 
     const formattedReviews: BusinessReview[] = filteredReviews.map((review) => {
+      const reviewComments = commentsByReviewId.get(review.id);
       const replyComment =
-        Array.isArray(review.review_comments) &&
-        review.review_comments.length > 0
-          ? review.review_comments[0]
-          : null;
+        reviewComments && reviewComments.length > 0 ? reviewComments[0] : null;
 
       const canEdit = replyComment
         ? (replyComment.edit_count || 0) < 3 &&
@@ -130,29 +167,22 @@ export async function GET(request: NextRequest) {
             24 * 60 * 60 * 1000
         : false;
 
+      const profile = profileById.get(review.user_id);
+
       return {
         id: review.id,
         listing_id: review.listing_id,
-        listing_name: Array.isArray(review.listings)
-          ? review.listings[0]?.name || ""
-          : (review.listings as { name: string })?.name || "",
+        listing_name: listingNameById.get(review.listing_id) || "",
         branch_id: review.branch_id,
         branch_name:
-          Array.isArray(review.listing_branches) &&
-          review.listing_branches.length > 0
-            ? review.listing_branches[0].branch_name
+          review.branch_id != null
+            ? branchNameById.get(review.branch_id) || null
             : null,
         rating: review.rating,
         comment: review.comment,
         created_at: review.created_at,
-        reviewer_name: Array.isArray(review.profiles)
-          ? review.profiles[0]?.full_name || "Anonymous"
-          : (review.profiles as { full_name: string | null })?.full_name ||
-            "Anonymous",
-        reviewer_avatar: Array.isArray(review.profiles)
-          ? review.profiles[0]?.avatar_url || null
-          : (review.profiles as { avatar_url: string | null })?.avatar_url ||
-            null,
+        reviewer_name: profile?.full_name || "Anonymous",
+        reviewer_avatar: profile?.avatar_url || null,
         reply: replyComment
           ? {
               id: replyComment.id,

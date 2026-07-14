@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   verifyListingOwnership,
@@ -46,7 +46,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
     const body = await request.json();
     const validation = branchSchema.safeParse(body);
 
@@ -63,29 +62,35 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     // If setting as primary, first unset any existing primary
     if (branchData.is_primary) {
-      await supabase
-        .from("listing_branches")
-        .update({ is_primary: false })
-        .eq("listing_id", listingId);
+      await query(
+        `UPDATE listing_branches SET is_primary = false WHERE listing_id = $1`,
+        [listingId],
+      );
     }
 
     // Create the branch
-    const { data: newBranch, error: insertError } = await supabase
-      .from("listing_branches")
-      .insert({
-        listing_id: listingId,
-        name: branchData.name,
-        address: branchData.address,
-        phone_number: branchData.phone_number || null,
-        latitude: branchData.latitude,
-        longitude: branchData.longitude,
-        is_primary: branchData.is_primary || false,
-      })
-      .select()
-      .single();
-
-    if (insertError) {
-      throw new Error(`Failed to create branch: ${insertError.message}`);
+    let newBranch;
+    try {
+      const { rows } = await query(
+        `INSERT INTO listing_branches
+           (listing_id, name, address, phone_number, latitude, longitude, is_primary)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [
+          listingId,
+          branchData.name,
+          branchData.address,
+          branchData.phone_number || null,
+          branchData.latitude,
+          branchData.longitude,
+          branchData.is_primary || false,
+        ],
+      );
+      newBranch = rows[0];
+    } catch (insertError) {
+      throw new Error(
+        `Failed to create branch: ${insertError instanceof Error ? insertError.message : "Unknown error"}`,
+      );
     }
 
     return apiSuccess(
@@ -115,17 +120,19 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
-
-    const { data: branches, error } = await supabase
-      .from("listing_branches")
-      .select("*")
-      .eq("listing_id", listingId)
-      .order("is_primary", { ascending: false })
-      .order("name", { ascending: true });
-
-    if (error) {
-      throw new Error(`Failed to fetch branches: ${error.message}`);
+    let branches;
+    try {
+      const result = await query(
+        `SELECT * FROM listing_branches
+         WHERE listing_id = $1
+         ORDER BY is_primary DESC, name ASC`,
+        [listingId],
+      );
+      branches = result.rows;
+    } catch (error) {
+      throw new Error(
+        `Failed to fetch branches: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     }
 
     return apiSuccess({ branches: branches || [] });

@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   apiSuccess,
@@ -24,7 +24,6 @@ export async function GET(request: NextRequest) {
     // Verify authorization
     const userId = await verifyBusinessOwner();
 
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
 
     // Parse filters
@@ -34,46 +33,31 @@ export async function GET(request: NextRequest) {
     // Calculate offset
     const offset = (page - 1) * limit;
 
-    // Build query directly instead of using RPC (avoids role vs active_role mismatch)
-    let query = supabase
-      .from("listings")
-      .select(
-        `
-        id,
-        name,
-        slug,
-        status,
-        category_id,
-        created_at
-      `,
-        { count: "exact" },
-      )
-      .eq("owner_id", userId)
-      .order("created_at", { ascending: false });
-
-    // Apply status filter if provided
+    // Build WHERE clause: always filter by owner, optionally by status
+    const whereParams: unknown[] = [userId];
+    let whereSql = "owner_id = $1";
     if (status) {
-      query = query.eq(
-        "status",
-        status as
-          | "draft"
-          | "published"
-          | "pending_approval"
-          | "archived"
-          | "rejected",
-      );
+      whereParams.push(status);
+      whereSql += ` AND status = $${whereParams.length}`;
     }
 
-    // Apply pagination
-    query = query.range(offset, offset + limit - 1);
+    const countResult = await query(
+      `SELECT COUNT(*) FROM listings WHERE ${whereSql}`,
+      whereParams,
+    );
+    const count = parseInt(countResult.rows[0].count, 10);
 
-    const { data: listings, error, count } = await query;
+    const listingsParams = [...whereParams, limit, offset];
+    const { rows: listings } = await query(
+      `SELECT id, name, slug, status, category_id, created_at
+       FROM listings
+       WHERE ${whereSql}
+       ORDER BY created_at DESC
+       LIMIT $${listingsParams.length - 1} OFFSET $${listingsParams.length}`,
+      listingsParams,
+    );
 
-    if (error) {
-      throw new Error(`Failed to fetch listings: ${error.message}`);
-    }
-
-    const listingIds = (listings || []).map((listing) => listing.id);
+    const listingIds = listings.map((listing) => listing.id);
 
     const isDeletionRequest = (request: {
       change_type: string;
@@ -100,28 +84,20 @@ export async function GET(request: NextRequest) {
     };
 
     // Fetch pending deletion requests in one query for owner UX context.
-    const { data: pendingDeletionRequests } =
+    const pendingDeletionRequests =
       listingIds.length > 0
-        ? await supabase
-            .from("listing_change_requests")
-            .select(
-              "id, listing_id, reason, created_at, change_type, proposed_data",
+        ? (
+            await query(
+              `SELECT id, listing_id, reason, created_at, change_type, proposed_data
+               FROM listing_change_requests
+               WHERE status = 'pending' AND listing_id = ANY($1::int[])`,
+              [listingIds],
             )
-            .eq("status", "pending")
-            .in("listing_id", listingIds)
-        : {
-            data: [] as Array<{
-              id: number;
-              listing_id: number;
-              reason: string | null;
-              created_at: string;
-              change_type: string;
-              proposed_data: unknown;
-            }>,
-          };
+          ).rows
+        : [];
 
     const pendingDeletionByListingId = new Map(
-      (pendingDeletionRequests || [])
+      pendingDeletionRequests
         .filter(isDeletionRequest)
         .map((request) => [
           request.listing_id,
@@ -135,39 +111,40 @@ export async function GET(request: NextRequest) {
 
     // Get branches, images, and review stats for each listing
     const enrichedListings = await Promise.all(
-      (listings || []).map(async (listing) => {
+      listings.map(async (listing) => {
         const [branchesResult, imagesResult, reviewsResult] = await Promise.all(
           [
-            supabase
-              .from("listing_branches")
-              .select("id", { count: "exact", head: true })
-              .eq("listing_id", listing.id),
-            supabase
-              .from("listing_images")
-              .select("id", { count: "exact", head: true })
-              .eq("listing_id", listing.id),
-            supabase
-              .from("reviews")
-              .select("rating", { count: "exact" })
-              .eq("listing_id", listing.id)
-              .eq("status", "approved"),
+            query(
+              `SELECT COUNT(*) FROM listing_branches WHERE listing_id = $1`,
+              [listing.id],
+            ),
+            query(
+              `SELECT COUNT(*) FROM listing_images WHERE listing_id = $1`,
+              [listing.id],
+            ),
+            query(
+              `SELECT rating FROM reviews WHERE listing_id = $1 AND status = 'approved'`,
+              [listing.id],
+            ),
           ],
         );
 
+        const reviews = reviewsResult.rows;
+
         // Calculate average rating
         const avgRating =
-          reviewsResult.data && reviewsResult.data.length > 0
-            ? reviewsResult.data.reduce((acc, r) => acc + (r.rating || 0), 0) /
-              reviewsResult.data.length
+          reviews.length > 0
+            ? reviews.reduce((acc, r) => acc + (r.rating || 0), 0) /
+              reviews.length
             : 0;
 
         return {
           ...listing,
           total_views: 0, // TODO: Implement view tracking
           avg_rating: avgRating,
-          total_reviews: reviewsResult.count || 0,
-          branches_count: branchesResult.count || 0,
-          images_count: imagesResult.count || 0,
+          total_reviews: reviews.length,
+          branches_count: parseInt(branchesResult.rows[0].count, 10),
+          images_count: parseInt(imagesResult.rows[0].count, 10),
           deletion_request: pendingDeletionByListingId.get(listing.id) || null,
         };
       }),
@@ -278,8 +255,6 @@ export async function POST(request: NextRequest) {
     // Verify authorization
     const userId = await verifyBusinessOwner();
 
-    const supabase = await createServerSupabase();
-
     // Parse and validate request body
     const rawBody = await request.json();
 
@@ -309,11 +284,11 @@ export async function POST(request: NextRequest) {
     const baseSlug = generateSlug(validatedData.name);
 
     // Check if slug already exists and make it unique if needed
-    const { data: existingListing } = await supabase
-      .from("listings")
-      .select("slug")
-      .eq("slug", baseSlug)
-      .single();
+    const { rows: existingListingRows } = await query(
+      `SELECT slug FROM listings WHERE slug = $1`,
+      [baseSlug],
+    );
+    const existingListing = existingListingRows[0];
 
     // If slug exists, append timestamp to ensure uniqueness
     const slug = existingListing
@@ -321,34 +296,41 @@ export async function POST(request: NextRequest) {
       : baseSlug;
 
     // Create listing with status='draft' and owner_id=userId
-    const { data: newListing, error: insertError } = await supabase
-      .from("listings")
-      .insert({
-        name: validatedData.name,
-        slug: slug,
-        description: validatedData.description || null,
-        category_id: validatedData.category_id,
-        address: validatedData.address || null,
-        phone_number: validatedData.phone_number || null,
-        email: validatedData.email || null,
-        website: validatedData.website || null,
-        facebook_url: validatedData.facebook_url || null,
-        instagram_url: validatedData.instagram_url || null,
-        whatsapp_number: validatedData.whatsapp_number || null,
-        parking_information: validatedData.parking_information || null,
-        parking_amenities: validatedData.parking_amenities || [],
-        owner_id: userId,
-        status: "draft", // Default status for business owner creations
-        is_featured: false,
-        display_order: 0,
-      })
-      .select("id, slug, status, name")
-      .single();
-
-    if (insertError) {
+    let newListing;
+    try {
+      const { rows: insertedRows } = await query(
+        `INSERT INTO listings (
+           name, slug, description, category_id, address, phone_number,
+           email, website, facebook_url, instagram_url, whatsapp_number,
+           parking_information, parking_amenities, owner_id, status,
+           is_featured, display_order
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+           'draft', false, 0
+         )
+         RETURNING id, slug, status, name`,
+        [
+          validatedData.name,
+          slug,
+          validatedData.description || null,
+          validatedData.category_id,
+          validatedData.address || null,
+          validatedData.phone_number || null,
+          validatedData.email || null,
+          validatedData.website || null,
+          validatedData.facebook_url || null,
+          validatedData.instagram_url || null,
+          validatedData.whatsapp_number || null,
+          validatedData.parking_information || null,
+          validatedData.parking_amenities || [],
+          userId,
+        ],
+      );
+      newListing = insertedRows[0];
+    } catch (insertError) {
       console.error("Insert error:", insertError);
       return apiError(
-        `Failed to create listing: ${insertError.message}`,
+        `Failed to create listing: ${insertError instanceof Error ? insertError.message : "Unknown error"}`,
         500,
         "INSERT_ERROR",
       );

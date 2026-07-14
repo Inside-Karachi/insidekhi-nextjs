@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { uploadFile, deleteFile } from "@/lib/storage/spaces";
 import {
   verifyBusinessOwner,
   verifyListingOwnership,
@@ -40,8 +41,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
-
     // Parse multipart form data
     const formData = await request.formData();
     const files = formData.getAll("images") as File[];
@@ -55,10 +54,11 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     }
 
     // Check current image count
-    const { count: currentImageCount } = await supabase
-      .from("listing_images")
-      .select("*", { count: "exact", head: true })
-      .eq("listing_id", listingId);
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM listing_images WHERE listing_id = $1`,
+      [listingId],
+    );
+    const currentImageCount = parseInt(countRows[0].count, 10);
 
     if (currentImageCount && currentImageCount >= MAX_IMAGES_PER_LISTING) {
       return apiError(
@@ -162,40 +162,38 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
           .substring(0, 50);
         const filename = `listings/${listingId}/${timestamp}-${randomSuffix}-${sanitizedName}`;
 
-        // Upload to Supabase Storage
-        const { data: uploadData, error: uploadError } = await supabase.storage
-          .from("listing-images")
-          .upload(filename, processedBuffer, {
+        // Upload to DigitalOcean Spaces
+        let uploadData;
+        try {
+          uploadData = await uploadFile(filename, processedBuffer, {
+            bucket: "listing-images",
             contentType: "image/jpeg",
-            upsert: false,
           });
-
-        if (uploadError) {
-          errors.push(`File ${i + 1}: Upload failed - ${uploadError.message}`);
+        } catch (uploadError) {
+          errors.push(
+            `File ${i + 1}: Upload failed - ${uploadError instanceof Error ? uploadError.message : "Unknown error"}`,
+          );
           continue;
         }
 
-        // Get public URL
-        const {
-          data: { publicUrl },
-        } = supabase.storage.from("listing-images").getPublicUrl(uploadData.path);
+        const publicUrl = uploadData.publicUrl;
 
         // Create database record
-        const { data: imageRecord, error: dbError } = await supabase
-          .from("listing_images")
-          .insert({
-            listing_id: listingId,
-            url: publicUrl,
-            is_primary: false,
-            display_order: (currentImageCount || 0) + uploadedImages.length,
-          })
-          .select()
-          .single();
-
-        if (dbError) {
+        let imageRecord;
+        try {
+          const { rows } = await query(
+            `INSERT INTO listing_images (listing_id, url, is_primary, display_order)
+             VALUES ($1, $2, false, $3)
+             RETURNING *`,
+            [listingId, publicUrl, currentImageCount + uploadedImages.length],
+          );
+          imageRecord = rows[0];
+        } catch (dbError) {
           // Clean up uploaded file if database insert fails
-          await supabase.storage.from("listing-images").remove([uploadData.path]);
-          errors.push(`File ${i + 1}: Database error - ${dbError.message}`);
+          await deleteFile(uploadData.path, "listing-images");
+          errors.push(
+            `File ${i + 1}: Database error - ${dbError instanceof Error ? dbError.message : "Unknown error"}`,
+          );
           continue;
         }
 
@@ -251,16 +249,17 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     const userId = await verifyBusinessOwner();
     await verifyListingOwnership(userId, listingId);
 
-    const supabase = await createServerSupabase();
-
-    const { data: images, error } = await supabase
-      .from("listing_images")
-      .select("*")
-      .eq("listing_id", listingId)
-      .order("display_order", { ascending: true });
-
-    if (error) {
-      throw new Error(`Failed to fetch images: ${error.message}`);
+    let images;
+    try {
+      const result = await query(
+        `SELECT * FROM listing_images WHERE listing_id = $1 ORDER BY display_order ASC`,
+        [listingId],
+      );
+      images = result.rows;
+    } catch (error) {
+      throw new Error(
+        `Failed to fetch images: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     }
 
     return apiSuccess({ images: images || [] });

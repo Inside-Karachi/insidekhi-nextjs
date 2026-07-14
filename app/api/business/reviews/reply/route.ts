@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   verifyBusinessOwner,
   apiSuccess,
@@ -18,7 +18,6 @@ const replySchema = z.object({
 export async function POST(request: NextRequest) {
   try {
     const userId = await verifyBusinessOwner();
-    const supabase = await createServerSupabase();
 
     const body = await request.json();
     const validation = replySchema.safeParse(body);
@@ -33,51 +32,47 @@ export async function POST(request: NextRequest) {
     const { reviewId, content } = validation.data;
 
     // Get the review and verify ownership
-    const { data: review, error: reviewError } = await supabase
-      .from("reviews")
-      .select("id, listing_id, listings!reviews_listing_id_fkey(owner_id)")
-      .eq("id", reviewId)
-      .single();
+    const { rows: reviewRows } = await query(
+      `SELECT r.id, r.listing_id, l.owner_id
+       FROM reviews r
+       JOIN listings l ON l.id = r.listing_id
+       WHERE r.id = $1`,
+      [reviewId],
+    );
+    const review = reviewRows[0];
 
-    if (reviewError || !review) {
+    if (!review) {
       return apiError("Review not found", 404);
     }
 
-    const listing = Array.isArray(review.listings)
-      ? review.listings[0]
-      : (review.listings as { owner_id: string } | null);
-
-    if (!listing || listing.owner_id !== userId) {
+    if (review.owner_id !== userId) {
       return apiError("You do not own this listing", 403);
     }
 
     // Check if already replied
-    const { data: existingReply } = await supabase
-      .from("review_comments")
-      .select("id")
-      .eq("review_id", reviewId)
-      .eq("user_id", userId)
-      .single();
+    const { rows: existingReplyRows } = await query(
+      `SELECT id FROM review_comments WHERE review_id = $1 AND user_id = $2`,
+      [reviewId, userId],
+    );
 
-    if (existingReply) {
+    if (existingReplyRows.length > 0) {
       return apiError("You have already replied to this review", 400);
     }
 
     // Create the reply with pending status for admin moderation
-    const { data: comment, error: commentError } = await supabase
-      .from("review_comments")
-      .insert({
-        review_id: reviewId,
-        user_id: userId,
-        content,
-        status: "pending",
-        edit_count: 0,
-      })
-      .select()
-      .single();
-
-    if (commentError) {
-      throw new Error(`Failed to create reply: ${commentError.message}`);
+    let comment;
+    try {
+      const { rows: insertedRows } = await query(
+        `INSERT INTO review_comments (review_id, user_id, content, status, edit_count)
+         VALUES ($1, $2, $3, 'pending', 0)
+         RETURNING *`,
+        [reviewId, userId, content],
+      );
+      comment = insertedRows[0];
+    } catch (commentError) {
+      throw new Error(
+        `Failed to create reply: ${commentError instanceof Error ? commentError.message : "Unknown error"}`,
+      );
     }
 
     // TODO: Notify admins for moderation (implement when notification system is ready)

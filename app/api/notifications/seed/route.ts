@@ -142,7 +142,7 @@ export async function POST(request: NextRequest) {
       // Dedupe check (virtually always a miss since the key includes a
       // fresh timestamp, but kept for parity with the original behavior).
       const { rows: existingRows } = await client.query(
-        `SELECT id FROM notifications WHERE recipient_id = $1 AND dedupe_key = $2`,
+        `SELECT id FROM notifications WHERE recipient_id = $1 AND dedupe_key = $2 ORDER BY id ASC LIMIT 1`,
         [session.userId, dedupeKey]
       );
       if (existingRows.length > 0) {

@@ -134,37 +134,48 @@ export async function GET(request: NextRequest) {
 
     const whereSql = whereClauses.join(" AND ");
 
-    const { rows } = await query(
-      `SELECT n.id, n.title, n.body, n.category_slug, n.priority, n.metadata,
-         to_json(n.triggered_at) #>> '{}' AS triggered_at,
-         to_json(n.read_at) #>> '{}' AS read_at,
-         to_json(n.archived_at) #>> '{}' AS archived_at,
-         to_json(n.expires_at) #>> '{}' AS expires_at,
-         n.cta_label, n.cta_url,
-         cat.label AS category_label,
-         COALESCE((
-           SELECT json_agg(
-             json_build_object(
-               'id', nc.id,
-               'channel', nc.channel,
-               'status', nc.status,
-               'sentAt', to_json(nc.sent_at) #>> '{}',
-               'deliverAfter', to_json(nc.deliver_after) #>> '{}',
-               'lastAttemptedAt', to_json(nc.last_attempted_at) #>> '{}',
-               'error', nc.error
-             ) ORDER BY nc.id ASC
-           )
-           FROM notification_channels nc
-           WHERE nc.notification_id = n.id
-             AND ($${channelParamIdx}::text IS NULL OR nc.channel::text = $${channelParamIdx}::text)
-         ), '[]'::json) AS channels
-       FROM notifications n
-       LEFT JOIN notification_categories cat ON cat.slug = n.category_slug
-       WHERE ${whereSql}
-       ORDER BY n.triggered_at DESC
-       LIMIT $${limitIdx}`,
-      params
-    );
+    const excludeDemo = process.env.NODE_ENV === "production";
+    const unreadSql = excludeDemo
+      ? `SELECT COUNT(*) FROM notifications WHERE recipient_id = $1 AND read_at IS NULL AND archived_at IS NULL AND (metadata->>'demo' IS NULL OR metadata->>'demo' != 'true')`
+      : `SELECT COUNT(*) FROM notifications WHERE recipient_id = $1 AND read_at IS NULL AND archived_at IS NULL`;
+
+    // The feed query and the unread count are independent reads - run them
+    // concurrently instead of round-tripping to the pool one at a time.
+    const [{ rows }, { rows: unreadRows }] = await Promise.all([
+      query(
+        `SELECT n.id, n.title, n.body, n.category_slug, n.priority, n.metadata,
+           to_json(n.triggered_at) #>> '{}' AS triggered_at,
+           to_json(n.read_at) #>> '{}' AS read_at,
+           to_json(n.archived_at) #>> '{}' AS archived_at,
+           to_json(n.expires_at) #>> '{}' AS expires_at,
+           n.cta_label, n.cta_url,
+           cat.label AS category_label,
+           COALESCE((
+             SELECT json_agg(
+               json_build_object(
+                 'id', nc.id,
+                 'channel', nc.channel,
+                 'status', nc.status,
+                 'sentAt', to_json(nc.sent_at) #>> '{}',
+                 'deliverAfter', to_json(nc.deliver_after) #>> '{}',
+                 'lastAttemptedAt', to_json(nc.last_attempted_at) #>> '{}',
+                 'error', nc.error
+               ) ORDER BY nc.id ASC
+             )
+             FROM notification_channels nc
+             WHERE nc.notification_id = n.id
+               AND ($${channelParamIdx}::text IS NULL OR nc.channel::text = $${channelParamIdx}::text)
+           ), '[]'::json) AS channels
+         FROM notifications n
+         LEFT JOIN notification_categories cat ON cat.slug = n.category_slug
+         WHERE ${whereSql}
+         ORDER BY n.triggered_at DESC
+         LIMIT $${limitIdx}`,
+        params
+      ),
+      query(unreadSql, [session.userId]),
+    ]);
+    const unreadCount = parseInt(unreadRows[0].count, 10);
 
     const hasMore = rows.length > limit;
     const sliced = hasMore ? rows.slice(0, limit) : rows;
@@ -198,13 +209,6 @@ export async function GET(request: NextRequest) {
     const nextCursor = hasMore
       ? (sliced[sliced.length - 1]?.triggered_at as string | undefined) ?? null
       : null;
-
-    const excludeDemo = process.env.NODE_ENV === "production";
-    const unreadSql = excludeDemo
-      ? `SELECT COUNT(*) FROM notifications WHERE recipient_id = $1 AND read_at IS NULL AND archived_at IS NULL AND (metadata->>'demo' IS NULL OR metadata->>'demo' != 'true')`
-      : `SELECT COUNT(*) FROM notifications WHERE recipient_id = $1 AND read_at IS NULL AND archived_at IS NULL`;
-    const { rows: unreadRows } = await query(unreadSql, [session.userId]);
-    const unreadCount = parseInt(unreadRows[0].count, 10);
 
     return NextResponse.json({
       notifications: filteredNotifications,

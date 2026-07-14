@@ -1,6 +1,7 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { Store } from "lucide-react";
+import { requireSessionUser } from "@/lib/auth/require-session";
+import { query } from "@/lib/db";
 import { ListingScraperDashboard } from "@/components/admin/listing-scraper/ListingScraperDashboard";
 
 export const metadata = {
@@ -9,25 +10,9 @@ export const metadata = {
 };
 
 export default async function ListingScraperPage() {
-  const supabase = await createServerSupabase();
+  const { profile } = await requireSessionUser();
 
-  // Get current user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  // Get user profile with role
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profileError || !profile) {
+  if (!profile) {
     redirect("/login");
   }
 
@@ -37,43 +22,37 @@ export default async function ListingScraperPage() {
   }
 
   // Fetch listing stats
-  const { count: totalListings } = await supabase
-    .from("listings")
-    .select("*", { count: "exact", head: true })
-    .not("peekaboo_id", "is", null);
-
-  const { count: draftListings } = await supabase
-    .from("listings")
-    .select("*", { count: "exact", head: true })
-    .eq("status", "draft")
-    .not("peekaboo_id", "is", null);
-
-  const { count: publishedListings } = await supabase
-    .from("listings")
-    .select("*", { count: "exact", head: true })
-    .eq("status", "published")
-    .not("peekaboo_id", "is", null);
-
-  // Fetch branches stats
-  const { count: totalBranches } = await supabase
-    .from("listing_branches")
-    .select("*", { count: "exact", head: true });
-
-  // Fetch recent synced listings
-  const { data: recentListings } = await supabase
-    .from("listings")
-    .select(
-      "id, name, status, created_at, updated_at, custom_attributes, category_id, peekaboo_id",
-    )
-    .not("peekaboo_id", "is", null)
-    .order("updated_at", { ascending: false })
-    .limit(10);
+  const [
+    { rows: totalListingsRows },
+    { rows: draftListingsRows },
+    { rows: publishedListingsRows },
+    { rows: totalBranchesRows },
+    { rows: recentListings },
+  ] = await Promise.all([
+    query(
+      `SELECT COUNT(*) FROM listings WHERE peekaboo_id IS NOT NULL`,
+    ),
+    query(
+      `SELECT COUNT(*) FROM listings WHERE status = 'draft' AND peekaboo_id IS NOT NULL`,
+    ),
+    query(
+      `SELECT COUNT(*) FROM listings WHERE status = 'published' AND peekaboo_id IS NOT NULL`,
+    ),
+    query(`SELECT COUNT(*) FROM listing_branches`),
+    query(
+      `SELECT id, name, status, created_at, updated_at, custom_attributes, category_id, peekaboo_id
+       FROM listings
+       WHERE peekaboo_id IS NOT NULL
+       ORDER BY updated_at DESC
+       LIMIT 10`,
+    ),
+  ]);
 
   const initialStats = {
-    totalListings: totalListings || 0,
-    draftListings: draftListings || 0,
-    publishedListings: publishedListings || 0,
-    totalBranches: totalBranches || 0,
+    totalListings: parseInt(totalListingsRows[0].count, 10) || 0,
+    draftListings: parseInt(draftListingsRows[0].count, 10) || 0,
+    publishedListings: parseInt(publishedListingsRows[0].count, 10) || 0,
+    totalBranches: parseInt(totalBranchesRows[0].count, 10) || 0,
   };
 
   return (

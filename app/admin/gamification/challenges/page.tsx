@@ -1,31 +1,17 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { requireSessionUser } from "@/lib/auth/require-session";
 import { ChallengesManagement } from "@/components/admin/gamification/ChallengesManagement";
 import { Target } from "lucide-react";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
 
 export default async function ChallengesManagementPage() {
-  const supabase = await createServerSupabase();
+  const { profile } = await requireSessionUser();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
+  if (!profile) {
     redirect("/login");
   }
 
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profileError || !profile) {
-    redirect("/login");
-  }
-
-  if (!isGamificationOperatorRole(profile.role)) {
+  if (!isGamificationOperatorRole(profile.role as Parameters<typeof isGamificationOperatorRole>[0])) {
     redirect("/admin");
   }
 

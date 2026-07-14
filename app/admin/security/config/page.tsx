@@ -1,27 +1,13 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import { requireSessionUser } from "@/lib/auth/require-session";
 import { SystemConfigManagement } from "@/components/admin/SystemConfigManagement";
 import { ArrowLeft } from "lucide-react";
 
 export default async function SystemConfigPage() {
-  const supabase = await createServerSupabase();
+  const { profile } = await requireSessionUser();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profileError || !profile) {
+  if (!profile) {
     redirect("/login");
   }
 

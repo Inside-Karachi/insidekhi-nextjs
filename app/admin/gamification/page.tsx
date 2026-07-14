@@ -1,5 +1,5 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { requireSessionUser } from "@/lib/auth/require-session";
 import { GamificationDashboard } from "@/components/admin/gamification/GamificationDashboard";
 import {
   canManageGamificationSettings,
@@ -7,35 +7,19 @@ import {
 } from "@/lib/auth/gamification-permissions";
 
 export default async function GamificationPage() {
-  const supabase = await createServerSupabase();
+  const { profile } = await requireSessionUser();
 
-  // Get current user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  // Get user profile with role
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profileError || !profile) {
+  if (!profile) {
     redirect("/login");
   }
 
   // Operators can access the dashboard; only super_admin can access settings tools.
-  const isOperator = isGamificationOperatorRole(profile.role);
+  const isOperator = isGamificationOperatorRole(profile.role as Parameters<typeof isGamificationOperatorRole>[0]);
   if (!isOperator) {
     redirect("/admin");
   }
 
-  const canManageSettings = canManageGamificationSettings(profile.role);
+  const canManageSettings = canManageGamificationSettings(profile.role as Parameters<typeof canManageGamificationSettings>[0]);
 
   return (
     <div className="space-y-8">

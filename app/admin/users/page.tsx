@@ -1,27 +1,12 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { requireSessionUser } from "@/lib/auth/require-session";
+import { query } from "@/lib/db";
 import { UserManagementPage } from "@/components/admin/UserManagementPage";
 
 export default async function AdminUsersPage() {
-  const supabase = await createServerSupabase();
+  const { profile } = await requireSessionUser();
 
-  // Get current user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  // Get user profile with role
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profileError || !profile) {
+  if (!profile) {
     redirect("/login");
   }
 
@@ -31,11 +16,11 @@ export default async function AdminUsersPage() {
   }
 
   // Fetch admin role visibility config from system_config
-  const { data: visibleRolesConfig } = await supabase
-    .from("system_config")
-    .select("config_value")
-    .eq("config_key", "admin.visible_roles")
-    .single();
+  const { rows: visibleRolesRows } = await query(
+    `SELECT config_value FROM system_config WHERE config_key = $1`,
+    ["admin.visible_roles"],
+  );
+  const visibleRolesConfig = visibleRolesRows[0];
 
   const adminVisibleRoles: string[] = Array.isArray(
     visibleRolesConfig?.config_value,

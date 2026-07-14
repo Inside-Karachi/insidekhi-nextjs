@@ -1,55 +1,11 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { requireSessionUser } from "@/lib/auth/require-session";
 import { ListingsManagementPage } from "@/components/admin/ListingsManagementPage";
 
-async function getDashboardStats() {
-  const supabase = await createServerSupabase();
-
-  try {
-    const response = await fetch(
-      `${
-        process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"
-      }/api/admin/dashboard`,
-      {
-        headers: {
-          Authorization: `Bearer ${
-            (await supabase.auth.getSession()).data.session?.access_token
-          }`,
-        },
-      },
-    );
-
-    if (response.ok) {
-      const data = await response.json();
-      return data.data?.statistics || null;
-    }
-  } catch (error) {
-    console.error("Failed to fetch dashboard stats:", error);
-  }
-
-  return null;
-}
-
 export default async function AdminListingsPage() {
-  const supabase = await createServerSupabase();
+  const { profile } = await requireSessionUser();
 
-  // Get current user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  // Get user profile with role
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profileError || !profile) {
+  if (!profile) {
     redirect("/login");
   }
 
@@ -61,9 +17,6 @@ export default async function AdminListingsPage() {
   ) {
     redirect("/dashboard");
   }
-
-  // Get real dashboard statistics
-  await getDashboardStats();
 
   return (
     <div className="space-y-8">

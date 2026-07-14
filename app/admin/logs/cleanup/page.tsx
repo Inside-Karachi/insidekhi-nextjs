@@ -1,46 +1,43 @@
 import { redirect } from "next/navigation";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { requireSessionUser } from "@/lib/auth/require-session";
+import { query } from "@/lib/db";
 import { CleanupLogsClient } from "@/components/admin/CleanupLogsClient";
 
 export default async function CleanupLogsPage() {
-  const supabase = await createServerSupabase();
+  const { profile } = await requireSessionUser();
 
-  // Check authentication
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
+  if (!profile) {
     redirect("/login");
   }
 
   // Check super admin role
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profile?.role !== "super_admin") {
+  if (profile.role !== "super_admin") {
     redirect("/admin");
   }
 
-  // Fetch cleanup logs (using service role to bypass RLS)
-  const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-  const { data: logs, error } = await adminSupabase
-    .from("form_reply_cleanup_logs" as never)
-    .select(
-      `
-      *,
-      deleted_by_profile:profiles!executed_by(full_name, email)
-    `
-    )
-    .order("executed_at", { ascending: false })
-    .limit(100);
-
-  if (error) {
+  // Fetch cleanup logs
+  let logs;
+  try {
+    const result = await query(
+      `SELECT l.*, p.full_name AS deleted_by_full_name, p.email AS deleted_by_email
+       FROM form_reply_cleanup_logs l
+       LEFT JOIN profiles p ON p.id = l.executed_by
+       ORDER BY l.executed_at DESC
+       LIMIT 100`,
+    );
+    logs = result.rows.map((row) => {
+      const { deleted_by_full_name, deleted_by_email, ...rest } = row;
+      return {
+        ...rest,
+        deleted_by_profile: {
+          full_name: deleted_by_full_name,
+          email: deleted_by_email,
+        },
+      };
+    });
+  } catch (error) {
     console.error("Failed to fetch cleanup logs:", error);
+    logs = [];
   }
 
   return (
@@ -54,7 +51,7 @@ export default async function CleanupLogsPage() {
 
       <CleanupLogsClient
         initialLogs={(logs as never) || []}
-        userRole={profile?.role || "user"}
+        userRole={profile.role || "user"}
       />
     </div>
   );

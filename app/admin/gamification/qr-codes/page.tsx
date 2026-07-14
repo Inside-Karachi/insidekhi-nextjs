@@ -1,5 +1,5 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { requireSessionUser } from "@/lib/auth/require-session";
 import { AdminQRGenerator } from "@/components/admin/gamification/AdminQRGenerator";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
 
@@ -7,30 +7,14 @@ import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions"
 export const dynamic = "force-dynamic";
 
 export default async function QRCodesPage() {
-  const supabase = await createServerSupabase();
+  const { profile } = await requireSessionUser();
 
-  // Get current user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
-  // Get user profile with role
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profileError || !profile) {
+  if (!profile) {
     redirect("/login");
   }
 
   // Check admin access
-  if (!isGamificationOperatorRole(profile.role)) {
+  if (!isGamificationOperatorRole(profile.role as Parameters<typeof isGamificationOperatorRole>[0])) {
     redirect("/admin");
   }
 

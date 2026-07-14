@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getUnreadCount, markNotificationRead } from "@/lib/notifications";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 interface MarkNotificationPayload {
   archive?: boolean;
@@ -12,13 +12,8 @@ export async function PATCH(
   props: { params: Promise<{ notificationId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -41,13 +36,35 @@ export async function PATCH(
         );
       }
     }
+    const archive = payload.archive ?? false;
 
-    await markNotificationRead(supabase, {
-      notificationId,
-      archive: payload.archive ?? false,
-    });
+    // The old mark_notification_read() RPC authorized itself via Supabase's
+    // auth.uid() session GUC, which a direct pg connection never sets - so
+    // the recipient_id filter below is what actually enforces ownership
+    // here. Both "not found" and "not yours" collapse to the same zero-row
+    // update, matching the old RPC's behavior of erroring either way (both
+    // ended up surfacing as the same 500 response below).
+    const { rows } = await query(
+      `UPDATE notifications
+       SET read_at = COALESCE(read_at, timezone('utc', now())),
+           archived_at = CASE WHEN $1 THEN COALESCE(archived_at, timezone('utc', now())) ELSE archived_at END,
+           updated_at = timezone('utc', now())
+       WHERE id = $2 AND recipient_id = $3
+       RETURNING id`,
+      [archive, notificationId, session.userId]
+    );
 
-    const { unreadCount } = await getUnreadCount(supabase, user.id);
+    if (rows.length === 0) {
+      throw new Error(
+        `Notification ${notificationId} not found or not authorized`
+      );
+    }
+
+    const { rows: unreadRows } = await query(
+      `SELECT COUNT(*) FROM notifications WHERE recipient_id = $1 AND read_at IS NULL AND archived_at IS NULL`,
+      [session.userId]
+    );
+    const unreadCount = parseInt(unreadRows[0].count, 10);
 
     return NextResponse.json({ success: true, unreadCount });
   } catch (error) {

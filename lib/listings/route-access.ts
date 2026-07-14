@@ -1,4 +1,6 @@
 import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 const STAFF_ROLES = new Set(["admin", "super_admin", "lister"]);
 
@@ -21,31 +23,31 @@ export interface ListingRouteAccessContext {
 }
 
 export async function getListingRouteAccessContext(): Promise<ListingRouteAccessContext> {
-  const supabase = await createServerSupabase();
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser();
+  const session = await getSessionFromCookies();
 
-  if (authError || !user) {
+  if (!session) {
     throw new ListingRouteAccessError("Unauthorized", 401);
   }
 
-  const adminSupabase = await createServerSupabase({ useServiceRole: true });
-  const { data: profile, error: profileError } = await adminSupabase
-    .from("profiles")
-    .select("role, active_role")
-    .eq("id", user.id)
-    .single();
+  const { rows } = await query(
+    `SELECT role, active_role FROM profiles WHERE id = $1`,
+    [session.userId],
+  );
+  const profile = rows[0];
 
-  if (profileError || !profile) {
+  if (!profile) {
     throw new ListingRouteAccessError("Profile not found", 404);
   }
 
   const effectiveRole = profile.active_role || profile.role;
 
+  // supabase/adminSupabase are kept for callers not yet migrated off Supabase;
+  // new callers should use `@/lib/db`'s query() directly instead.
+  const supabase = await createServerSupabase();
+  const adminSupabase = await createServerSupabase({ useServiceRole: true });
+
   return {
-    userId: user.id,
+    userId: session.userId,
     effectiveRole,
     isStaff: STAFF_ROLES.has(effectiveRole),
     supabase,
@@ -68,13 +70,13 @@ export async function assertListingRouteAccess(options: {
     throw new ListingRouteAccessError("Access denied", 403);
   }
 
-  const { data: listing, error: listingError } = await context.adminSupabase
-    .from("listings")
-    .select("owner_id, created_by")
-    .eq("id", listingId)
-    .single();
+  const { rows } = await query(
+    `SELECT owner_id, created_by FROM listings WHERE id = $1`,
+    [listingId],
+  );
+  const listing = rows[0];
 
-  if (listingError || !listing) {
+  if (!listing) {
     throw new ListingRouteAccessError("Listing not found", 404);
   }
 

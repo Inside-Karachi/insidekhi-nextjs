@@ -1,151 +1,114 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 /**
  * GET /api/dashboard/sidebar-stats
  * Returns role-based statistics for the sidebar
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    // Get current user
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Get user profile and role
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
     const role = profile?.role;
 
     // Admin or Super Admin: Get system-wide stats
     if (role === "admin" || role === "super_admin") {
-      const adminSupabase = await createServerSupabase({
-        useServiceRole: true,
-      });
-
-      const [
-        { count: usersCount },
-        { count: eventsCount },
-        { count: listingsCount },
-      ] = await Promise.all([
-        adminSupabase
-          .from("profiles")
-          .select("*", { count: "exact", head: true }),
-        adminSupabase
-          .from("events")
-          .select("*", { count: "exact", head: true }),
-        adminSupabase
-          .from("listings")
-          .select("*", { count: "exact", head: true }),
+      const [usersResult, eventsResult, listingsResult] = await Promise.all([
+        query(`SELECT COUNT(*) FROM profiles`),
+        query(`SELECT COUNT(*) FROM events`),
+        query(`SELECT COUNT(*) FROM listings`),
       ]);
 
       return NextResponse.json({
         success: true,
         role: role,
         stats: {
-          users: usersCount || 0,
-          events: eventsCount || 0,
-          listings: listingsCount || 0,
+          users: parseInt(usersResult.rows[0].count, 10) || 0,
+          events: parseInt(eventsResult.rows[0].count, 10) || 0,
+          listings: parseInt(listingsResult.rows[0].count, 10) || 0,
         },
       });
     }
 
     // Lister: Get content stats
     if (role === "lister") {
-      const [
-        { count: listingsCount },
-        { count: eventsCount },
-        { count: reviewsCount },
-      ] = await Promise.all([
-        supabase.from("listings").select("*", { count: "exact", head: true }),
-        supabase.from("events").select("*", { count: "exact", head: true }),
-        supabase.from("reviews").select("*", { count: "exact", head: true }),
+      const [listingsResult, eventsResult, reviewsResult] = await Promise.all([
+        query(`SELECT COUNT(*) FROM listings`),
+        query(`SELECT COUNT(*) FROM events`),
+        query(`SELECT COUNT(*) FROM reviews`),
       ]);
 
       return NextResponse.json({
         success: true,
         role: role,
         stats: {
-          listings: listingsCount || 0,
-          events: eventsCount || 0,
-          reviews: reviewsCount || 0,
+          listings: parseInt(listingsResult.rows[0].count, 10) || 0,
+          events: parseInt(eventsResult.rows[0].count, 10) || 0,
+          reviews: parseInt(reviewsResult.rows[0].count, 10) || 0,
         },
       });
     }
 
     // Organizer: Get organizer-specific stats
     if (role === "organizer") {
-      const [
-        { count: eventsCount },
-        { count: bookingsCount },
-        { count: ticketsCount },
-      ] = await Promise.all([
-        supabase
-          .from("events")
-          .select("*", { count: "exact", head: true })
-          .eq("organizer_id", user.id),
-        supabase
-          .from("bookings")
-          .select("*", { count: "exact", head: true })
-          .eq("user_id", user.id),
-        supabase
-          .from("ticket_passes")
-          .select("*, booking:bookings!inner(user_id)", {
-            count: "exact",
-            head: true,
-          })
-          .eq("bookings.user_id", user.id),
+      const [eventsResult, bookingsResult, ticketsResult] = await Promise.all([
+        query(`SELECT COUNT(*) FROM events WHERE organizer_id = $1`, [
+          session.userId,
+        ]),
+        query(`SELECT COUNT(*) FROM bookings WHERE user_id = $1`, [
+          session.userId,
+        ]),
+        query(
+          `SELECT COUNT(*) FROM ticket_passes tp
+           JOIN bookings b ON b.id = tp.booking_id
+           WHERE b.user_id = $1`,
+          [session.userId],
+        ),
       ]);
 
       return NextResponse.json({
         success: true,
         role: role,
         stats: {
-          events: eventsCount || 0,
-          bookings: bookingsCount || 0,
-          tickets: ticketsCount || 0,
+          events: parseInt(eventsResult.rows[0].count, 10) || 0,
+          bookings: parseInt(bookingsResult.rows[0].count, 10) || 0,
+          tickets: parseInt(ticketsResult.rows[0].count, 10) || 0,
         },
       });
     }
 
     // Regular User: Get personal stats
-    const [
-      { count: reviewsCount },
-      { count: bookingsCount },
-      { count: favoritesCount },
-    ] = await Promise.all([
-      supabase
-        .from("reviews")
-        .select("*", { count: "exact", head: true })
-        .eq("user_id", user.id),
-      supabase
-        .from("bookings")
-        .select("*", { count: "exact", head: true })
-        .eq("user_id", user.id),
-      supabase
-        .from("favorite_listings")
-        .select("*", { count: "exact", head: true })
-        .eq("user_id", user.id),
+    const [reviewsResult, bookingsResult, favoritesResult] = await Promise.all([
+      query(`SELECT COUNT(*) FROM reviews WHERE user_id = $1`, [
+        session.userId,
+      ]),
+      query(`SELECT COUNT(*) FROM bookings WHERE user_id = $1`, [
+        session.userId,
+      ]),
+      query(`SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1`, [
+        session.userId,
+      ]),
     ]);
 
     return NextResponse.json({
       success: true,
       role: role || "user",
       stats: {
-        reviews: reviewsCount || 0,
-        bookings: bookingsCount || 0,
-        favorites: favoritesCount || 0,
+        reviews: parseInt(reviewsResult.rows[0].count, 10) || 0,
+        bookings: parseInt(bookingsResult.rows[0].count, 10) || 0,
+        favorites: parseInt(favoritesResult.rows[0].count, 10) || 0,
       },
     });
   } catch (error) {

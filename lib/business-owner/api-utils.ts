@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import type { ApiResponse } from "@/types/business-owner.types";
 
 /**
@@ -8,25 +9,20 @@ import type { ApiResponse } from "@/types/business-owner.types";
  * Respects active_role for role switching functionality
  */
 export async function verifyBusinessOwner(): Promise<string> {
-  const supabase = await createServerSupabase();
+  const session = await getSessionFromCookies();
 
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser();
-
-  if (authError || !user) {
+  if (!session) {
     throw new Error("Unauthorized: Authentication required");
   }
 
   // Check user's role and active_role for role switching support
-  const { data: profile, error: profileError } = await supabase
-    .from("profiles")
-    .select("role, active_role")
-    .eq("id", user.id)
-    .single();
+  const { rows } = await query(
+    `SELECT role, active_role FROM profiles WHERE id = $1`,
+    [session.userId],
+  );
+  const profile = rows[0];
 
-  if (profileError || !profile) {
+  if (!profile) {
     throw new Error("Unauthorized: Profile not found");
   }
 
@@ -43,7 +39,7 @@ export async function verifyBusinessOwner(): Promise<string> {
     throw new Error("Forbidden: Business owner access requires business_owner role");
   }
 
-  return user.id;
+  return session.userId;
 }
 
 /**
@@ -55,15 +51,13 @@ export async function verifyListingOwnership(
   userId: string,
   listingId: number,
 ): Promise<boolean> {
-  const supabase = await createServerSupabase();
+  const { rows } = await query(
+    `SELECT owner_id, created_by FROM listings WHERE id = $1`,
+    [listingId],
+  );
+  const listing = rows[0];
 
-  const { data: listing, error } = await supabase
-    .from("listings")
-    .select("owner_id, created_by")
-    .eq("id", listingId)
-    .single();
-
-  if (error || !listing) {
+  if (!listing) {
     throw new Error("Listing not found");
   }
 
@@ -246,15 +240,13 @@ export async function getSystemConfig(
   key: string,
   defaultValue: string,
 ): Promise<string> {
-  const supabase = await createServerSupabase();
+  const { rows } = await query(
+    `SELECT config_value FROM system_config WHERE config_key = $1`,
+    [key],
+  );
+  const data = rows[0];
 
-  const { data, error } = await supabase
-    .from("system_config")
-    .select("config_value")
-    .eq("config_key", key)
-    .single();
-
-  if (error || !data || !data.config_value) {
+  if (!data || !data.config_value) {
     return defaultValue;
   }
 

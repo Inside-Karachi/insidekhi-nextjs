@@ -122,11 +122,12 @@ async function fetchBranchesWithOpeningHours(
         );
         if (hoursRes.ok) {
           const hoursData = (await hoursRes.json()) as {
-            opening_hours?: OpeningHour[];
+            success?: boolean;
+            data?: unknown;
           };
           return {
             ...branch,
-            opening_hours: hoursData.opening_hours || [],
+            opening_hours: mapListingOpeningHoursFromApi(hoursData.data),
           };
         }
       } catch {

@@ -35,6 +35,11 @@ async function sendMetricToAPI(
   value: number,
   page?: string,
 ) {
+  // Skip sending in development - the analytics backend isn't available locally.
+  if (process.env.NODE_ENV === "development") {
+    return;
+  }
+
   try {
     await fetch("/api/analytics/performance", {
       method: "POST",
@@ -50,11 +55,8 @@ async function sendMetricToAPI(
       // Fire and forget - don't wait for response
       keepalive: true,
     });
-  } catch (error) {
+  } catch {
     // Silently fail - don't disrupt user experience
-    if (process.env.NODE_ENV === "development") {
-      console.error("Failed to send performance metric:", error);
-    }
   }
 }
 
@@ -153,6 +155,15 @@ export function trackWebVitals() {
 export function monitorAPIResponse(url: string, startTime: number) {
   const duration = Date.now() - startTime;
 
+  // Log slow requests in development
+  if (process.env.NODE_ENV === "development") {
+    if (duration > 500) {
+      console.warn(`Slow API request: ${url} took ${duration}ms`);
+    }
+    // Skip sending in development - the analytics backend isn't available locally.
+    return;
+  }
+
   // Send API latency metric (bypassing type check for special metric type)
   fetch("/api/analytics/performance", {
     method: "POST",
@@ -169,11 +180,6 @@ export function monitorAPIResponse(url: string, startTime: number) {
   }).catch(() => {
     // Silently fail - don't disrupt user experience
   });
-
-  // Log slow requests in development
-  if (process.env.NODE_ENV === "development" && duration > 500) {
-    console.warn(`Slow API request: ${url} took ${duration}ms`);
-  }
 }
 
 /**

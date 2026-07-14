@@ -1,8 +1,7 @@
-import { SupabaseClient } from "@supabase/supabase-js";
+import { query } from "@/lib/db";
+import { deleteFile } from "@/lib/storage/spaces";
 
 interface StorageFile {
-
-
   bucket: string;
   path: string;
 }
@@ -37,29 +36,30 @@ function extractStoragePath(url: string, bucketName: string): string | null {
  * Returns array of listing IDs that have blocking constraints
  */
 async function checkRestrictConstraints(
-  supabase: SupabaseClient,
   listingIds: number[],
 ): Promise<{ blockedIds: number[]; errors: string[] }> {
   const blockedIds: number[] = [];
   const errors: string[] = [];
 
   // Check listing_change_requests (has RESTRICT constraint)
-  const { data: changeRequests, error } = await supabase
-    .from("listing_change_requests")
-    .select("listing_id, status")
-    .in("listing_id", listingIds);
+  try {
+    const { rows: changeRequests } = await query(
+      `SELECT listing_id, status FROM listing_change_requests WHERE listing_id = ANY($1::int[])`,
+      [listingIds],
+    );
 
-  if (error) {
+    if (changeRequests.length > 0) {
+      const uniqueBlockedIds = [
+        ...new Set(changeRequests.map((cr) => cr.listing_id)),
+      ];
+      blockedIds.push(...uniqueBlockedIds);
+      errors.push(
+        `Cannot delete ${uniqueBlockedIds.length} listing(s) with active change requests. Delete change requests first.`,
+      );
+    }
+  } catch (error) {
     console.error("Error checking change requests:", error);
     errors.push("Failed to validate change requests");
-  } else if (changeRequests && changeRequests.length > 0) {
-    const uniqueBlockedIds = [
-      ...new Set(changeRequests.map((cr) => cr.listing_id)),
-    ];
-    blockedIds.push(...uniqueBlockedIds);
-    errors.push(
-      `Cannot delete ${uniqueBlockedIds.length} listing(s) with active change requests. Delete change requests first.`,
-    );
   }
 
   return { blockedIds, errors };
@@ -69,7 +69,6 @@ async function checkRestrictConstraints(
  * Collect all storage files to delete for given listings
  */
 async function collectStorageFiles(
-  supabase: SupabaseClient,
   listingIds: number[],
 ): Promise<StorageFile[]> {
   const filesToDelete: StorageFile[] = [];
@@ -77,50 +76,47 @@ async function collectStorageFiles(
   // 1. Listing images - CASCADE + trigger will handle table deletion
   // We don't need to manually delete from bucket (trigger does it)
   // But we fetch for logging purposes
-  const { data: listingImages } = await supabase
-    .from("listing_images")
-    .select("url, listing_id")
-    .in("listing_id", listingIds);
+  const { rows: listingImages } = await query(
+    `SELECT url, listing_id FROM listing_images WHERE listing_id = ANY($1::int[])`,
+    [listingIds],
+  );
 
-  if (listingImages && listingImages.length > 0) {
+  if (listingImages.length > 0) {
     console.log(
       `[DELETE] Found ${listingImages.length} listing images (trigger will handle cleanup)`,
     );
   }
 
   // 2. Menu PDFs - NOT handled by trigger
-  const { data: listings } = await supabase
-    .from("listings")
-    .select("id, menu_pdf_url")
-    .in("id", listingIds)
-    .not("menu_pdf_url", "is", null);
+  const { rows: listings } = await query(
+    `SELECT id, menu_pdf_url FROM listings WHERE id = ANY($1::int[]) AND menu_pdf_url IS NOT NULL`,
+    [listingIds],
+  );
 
-  if (listings) {
-    for (const listing of listings) {
-      if (listing.menu_pdf_url) {
-        const path = extractStoragePath(listing.menu_pdf_url, "menu-pdfs");
-        if (path) {
-          filesToDelete.push({ bucket: "menu-pdfs", path });
-        }
+  for (const listing of listings) {
+    if (listing.menu_pdf_url) {
+      const path = extractStoragePath(listing.menu_pdf_url, "menu-pdfs");
+      if (path) {
+        filesToDelete.push({ bucket: "menu-pdfs", path });
       }
     }
   }
 
   // 3. Menu item images - NOT handled by trigger
   // menu_items -> menu_sections -> listings (CASCADE chain)
-  const { data: menuItems } = await supabase
-    .from("menu_items")
-    .select("id, image_url, section:menu_sections!inner(listing_id)")
-    .in("section.listing_id", listingIds)
-    .not("image_url", "is", null);
+  const { rows: menuItems } = await query(
+    `SELECT mi.id, mi.image_url
+     FROM menu_items mi
+     JOIN menu_sections ms ON ms.id = mi.section_id
+     WHERE ms.listing_id = ANY($1::int[]) AND mi.image_url IS NOT NULL`,
+    [listingIds],
+  );
 
-  if (menuItems) {
-    for (const item of menuItems) {
-      if (item.image_url) {
-        const path = extractStoragePath(item.image_url, "menu-item-images");
-        if (path) {
-          filesToDelete.push({ bucket: "menu-item-images", path });
-        }
+  for (const item of menuItems) {
+    if (item.image_url) {
+      const path = extractStoragePath(item.image_url, "menu-item-images");
+      if (path) {
+        filesToDelete.push({ bucket: "menu-item-images", path });
       }
     }
   }
@@ -128,16 +124,10 @@ async function collectStorageFiles(
   return filesToDelete;
 }
 
-import { deleteFile } from "@/lib/storage/spaces";
-
 /**
  * Delete files from storage buckets
  */
-async function deleteStorageFiles(
-  _supabase: unknown,
-  files: StorageFile[],
-): Promise<void> {
-
+async function deleteStorageFiles(files: StorageFile[]): Promise<void> {
   for (const file of files) {
     console.log(`[DELETE] Removing file ${file.path} from bucket ${file.bucket}`);
     try {
@@ -150,19 +140,13 @@ async function deleteStorageFiles(
   }
 }
 
-
 /**
  * Delete single listing with all associated data
  */
-export async function deleteListing(
-  supabase: SupabaseClient,
-  listingId: number,
-): Promise<DeletionResult> {
+export async function deleteListing(listingId: number): Promise<DeletionResult> {
   try {
     // Check RESTRICT constraints
-    const { blockedIds, errors } = await checkRestrictConstraints(supabase, [
-      listingId,
-    ]);
+    const { blockedIds, errors } = await checkRestrictConstraints([listingId]);
 
     if (blockedIds.length > 0) {
       return {
@@ -173,21 +157,18 @@ export async function deleteListing(
     }
 
     // Collect storage files (excluding listing_images - trigger handles those)
-    const filesToDelete = await collectStorageFiles(supabase, [listingId]);
+    const filesToDelete = await collectStorageFiles([listingId]);
 
     // Delete storage files
     if (filesToDelete.length > 0) {
-      await deleteStorageFiles(supabase, filesToDelete);
+      await deleteStorageFiles(filesToDelete);
     }
 
     // Delete listing - CASCADE will handle related tables
     // listing_images trigger will handle storage cleanup
-    const { error: deleteError } = await supabase
-      .from("listings")
-      .delete()
-      .eq("id", listingId);
-
-    if (deleteError) {
+    try {
+      await query(`DELETE FROM listings WHERE id = $1`, [listingId]);
+    } catch (deleteError) {
       console.error("[DELETE] Failed to delete listing:", deleteError);
       return {
         success: false,
@@ -214,7 +195,6 @@ export async function deleteListing(
  * Bulk delete listings with all associated data
  */
 export async function deleteListingsBulk(
-  supabase: SupabaseClient,
   listingIds: number[],
 ): Promise<DeletionResult> {
   try {
@@ -223,10 +203,7 @@ export async function deleteListingsBulk(
     }
 
     // Check RESTRICT constraints
-    const { blockedIds, errors } = await checkRestrictConstraints(
-      supabase,
-      listingIds,
-    );
+    const { blockedIds, errors } = await checkRestrictConstraints(listingIds);
 
     if (blockedIds.length > 0) {
       // Filter out blocked IDs
@@ -251,20 +228,17 @@ export async function deleteListingsBulk(
     }
 
     // Collect storage files (excluding listing_images)
-    const filesToDelete = await collectStorageFiles(supabase, listingIds);
+    const filesToDelete = await collectStorageFiles(listingIds);
 
     // Delete storage files
     if (filesToDelete.length > 0) {
-      await deleteStorageFiles(supabase, filesToDelete);
+      await deleteStorageFiles(filesToDelete);
     }
 
     // Delete listings - CASCADE handles tables, trigger handles listing_images
-    const { error: deleteError } = await supabase
-      .from("listings")
-      .delete()
-      .in("id", listingIds);
-
-    if (deleteError) {
+    try {
+      await query(`DELETE FROM listings WHERE id = ANY($1::int[])`, [listingIds]);
+    } catch (deleteError) {
       console.error("[DELETE] Failed to delete listings:", deleteError);
       return {
         success: false,

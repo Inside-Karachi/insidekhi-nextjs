@@ -1,12 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 // Ensure this API route always returns fresh data
 export const dynamic = "force-dynamic";
 
-const EVENT_CARD_COLUMNS =
-  "event_id, event_name, event_slug, event_description, start_time, end_time, " +
-  "event_status, created_at, updated_at, category_id, max_capacity, is_featured, " +
+// to_json(...) #>> '{}' reproduces the old Supabase/PostgREST timestamptz JSON
+// format exactly (full microsecond precision, "+00:00" offset) - node-pg's
+// default parser would otherwise hand back a JS Date, which serializes with
+// only millisecond precision and a "Z" suffix, silently changing the response.
+const WEB_EVENT_CARD_COLUMNS =
+  "event_id, event_name, event_slug, event_description, " +
+  "to_json(start_time) #>> '{}' AS start_time, to_json(end_time) #>> '{}' AS end_time, " +
+  "event_status, to_json(created_at) #>> '{}' AS created_at, to_json(updated_at) #>> '{}' AS updated_at, " +
+  "category_id, max_capacity, is_featured, " +
   "featured_rank, is_commission_based, commission_rate, require_guest_details, " +
   "organizer_id, organizer_name, organizer_avatar, location_name, address, " +
   "latitude, longitude";
@@ -21,6 +28,26 @@ export async function GET(request: NextRequest) {
     const date = searchParams.get("date");
     const status = searchParams.get("status") || "published";
     const featured = searchParams.get("featured") === "true";
+
+    // The old Supabase-backed route relied entirely on Postgres RLS to keep
+    // non-published events hidden from anonymous callers (the events_select
+    // policy allows any status once auth.role() = 'authenticated', but
+    // restricts anonymous requests to status = 'published'). Direct pg access
+    // bypasses RLS, so that gate has to be re-applied here explicitly.
+    const session = await getSession(request);
+    if (!session && status !== "published") {
+      return NextResponse.json({
+        events: [],
+        pagination: {
+          page,
+          limit,
+          total: 0,
+          totalPages: 0,
+          hasNext: false,
+          hasPrev: false,
+        },
+      });
+    }
 
     // Show events that haven't ended yet (ongoing + upcoming)
     const whereClauses: string[] = [];
@@ -72,7 +99,7 @@ export async function GET(request: NextRequest) {
       // event_id is a unique tie-breaker already, so it fully determines order
       // ahead of featured_rank - matches the original query's effective output.
       const { rows } = await query(
-        `SELECT ${EVENT_CARD_COLUMNS} FROM events_with_details
+        `SELECT ${WEB_EVENT_CARD_COLUMNS} FROM events_with_details
          ${whereSql}
          ORDER BY start_time ASC, event_id ASC
          LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,

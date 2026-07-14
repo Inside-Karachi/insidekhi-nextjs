@@ -3,6 +3,8 @@ import {
   assertListingRouteAccess,
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
+import { query } from "@/lib/db";
+import { uploadFile, deleteFile } from "@/lib/storage/spaces";
 
 export async function GET(
   request: NextRequest,
@@ -18,20 +20,20 @@ export async function GET(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     // Fetch images for this listing
-    const { data: images, error: fetchError } = await adminSupabase
-      .from("listing_images")
-      .select("*")
-      .eq("listing_id", listingId)
-      .order("display_order", { ascending: true });
-
-    if (fetchError) {
+    let images;
+    try {
+      const result = await query(
+        `SELECT * FROM listing_images WHERE listing_id = $1 ORDER BY display_order ASC`,
+        [listingId],
+      );
+      images = result.rows;
+    } catch (fetchError) {
       console.error("Error fetching images:", fetchError);
       return NextResponse.json(
         { error: "Failed to fetch images" },
@@ -66,11 +68,10 @@ export async function POST(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     // Parse multipart/form-data
     const formData = await request.formData();
@@ -95,17 +96,20 @@ export async function POST(
       );
     }
     // Check current image count
-    const { count: imageCount, error: countError } = await adminSupabase
-      .from("listing_images")
-      .select("*", { count: "exact", head: true })
-      .eq("listing_id", listingId);
-    if (countError) {
+    let imageCount;
+    try {
+      const { rows } = await query(
+        `SELECT COUNT(*) FROM listing_images WHERE listing_id = $1`,
+        [listingId],
+      );
+      imageCount = parseInt(rows[0].count, 10);
+    } catch {
       return NextResponse.json(
         { error: "Failed to check image count" },
         { status: 500 },
       );
     }
-    if ((imageCount || 0) >= 20) {
+    if (imageCount >= 20) {
       return NextResponse.json(
         { error: "Maximum 20 images allowed per listing" },
         { status: 400 },
@@ -114,67 +118,54 @@ export async function POST(
     // Generate unique filename with folder structure
     const fileExt = file.name.split(".").pop();
     const fileName = `${listingId}/${listingId}-${Date.now()}.${fileExt}`;
-    // Upload to Supabase Storage
-    const { error: uploadError } = await adminSupabase.storage
-      .from("listing-images")
-      .upload(fileName, file, {
-        cacheControl: "3600",
-        upsert: false,
+    // Upload to DigitalOcean Spaces
+    let publicUrl;
+    try {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const uploadResult = await uploadFile(fileName, buffer, {
+        bucket: "listing-images",
+        contentType: file.type,
       });
-    if (uploadError) {
+      publicUrl = uploadResult.publicUrl;
+    } catch {
       return NextResponse.json(
         { error: "Failed to upload image" },
         { status: 500 },
       );
     }
-    // Get public URL
-    const { data: publicUrlData } = adminSupabase.storage
-      .from("listing-images")
-      .getPublicUrl(fileName);
 
     // Get next display order
-    const { data: maxOrder } = await adminSupabase
-      .from("listing_images")
-      .select("display_order")
-      .eq("listing_id", listingId)
-      .order("display_order", { ascending: false })
-      .limit(1)
-      .single();
-    const nextOrder = (maxOrder?.display_order || 0) + 1;
+    const { rows: maxOrderRows } = await query(
+      `SELECT display_order FROM listing_images WHERE listing_id = $1
+       ORDER BY display_order DESC LIMIT 1`,
+      [listingId],
+    );
+    const nextOrder = (maxOrderRows[0]?.display_order || 0) + 1;
 
     // Check if this listing has any primary image already
-    const { data: primaryImage } = await adminSupabase
-      .from("listing_images")
-      .select("id")
-      .eq("listing_id", listingId)
-      .eq("is_primary", true)
-      .limit(1)
-      .single();
+    const { rows: primaryImageRows } = await query(
+      `SELECT id FROM listing_images WHERE listing_id = $1 AND is_primary = true LIMIT 1`,
+      [listingId],
+    );
+    const primaryImage = primaryImageRows[0];
 
     // Save to database
-    const { data: imageData, error: dbError } = await adminSupabase
-      .from("listing_images")
-      .insert({
-        listing_id: listingId,
-        url: publicUrlData.publicUrl,
-        alt_text: file.name,
-        display_order: nextOrder,
-        is_primary: !primaryImage, // Only set as primary if no other primary exists
-      })
-      .select()
-      .single();
-    if (dbError) {
-      console.error("Database insert error details:", {
-        code: dbError.code,
-        message: dbError.message,
-        details: dbError.details,
-        hint: dbError.hint,
-      });
-      await adminSupabase.storage.from("listing-images").remove([fileName]);
+    let imageData;
+    try {
+      const { rows } = await query(
+        `INSERT INTO listing_images (listing_id, url, alt_text, display_order, is_primary)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [listingId, publicUrl, file.name, nextOrder, !primaryImage],
+      );
+      imageData = rows[0];
+    } catch (dbError) {
+      console.error("Database insert error details:", dbError);
+      await deleteFile(fileName, "listing-images");
       return NextResponse.json(
         {
           error: "Failed to save image data",
-          details: dbError.message || "Database error occurred",
+          details: dbError instanceof Error ? dbError.message : "Database error occurred",
         },
         { status: 500 },
       );

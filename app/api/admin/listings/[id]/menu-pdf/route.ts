@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { uploadFile, deleteFile } from "@/lib/storage/spaces";
 import {
   assertListingRouteAccess,
   toListingAccessResponse,
@@ -19,11 +20,10 @@ export async function POST(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     const form = await request.formData();
     const file = form.get("pdf") as unknown as File | null;
@@ -56,11 +56,11 @@ export async function POST(
     const buffer = Buffer.from(arrayBuffer);
 
     // Check if there's an existing PDF and delete it before uploading new one
-    const { data: existingListing } = await adminSupabase
-      .from("listings")
-      .select("menu_pdf_url")
-      .eq("id", listingId)
-      .single();
+    const { rows: existingListingRows } = await query(
+      `SELECT menu_pdf_url FROM listings WHERE id = $1`,
+      [listingId],
+    );
+    const existingListing = existingListingRows[0];
 
     if (existingListing?.menu_pdf_url) {
       try {
@@ -68,9 +68,7 @@ export async function POST(
         const urlParts = existingListing.menu_pdf_url.split("/");
         const existingFileName = urlParts.slice(-2).join("/"); // Get listingId/filename part
 
-        await adminSupabase.storage
-          .from("listing-pdfs")
-          .remove([existingFileName]);
+        await deleteFile(existingFileName, "listing-pdfs");
         console.log("[menu-pdf] deleted existing file:", existingFileName);
       } catch (deleteError) {
         // Log but don't fail the operation
@@ -81,48 +79,39 @@ export async function POST(
     // Generate consistent filename (no timestamp to avoid duplicates)
     const fileName = `${listingId}/menu-${listingId}.pdf`;
 
-    // Upload to Supabase Storage
-    const { error: uploadError } = await adminSupabase.storage
-      .from("listing-pdfs")
-      .upload(fileName, buffer, {
+    // Upload to DigitalOcean Spaces
+    let publicUrl;
+    try {
+      const uploadResult = await uploadFile(fileName, buffer, {
+        bucket: "listing-pdfs",
         contentType: "application/pdf",
-        upsert: true,
       });
-
-    if (uploadError) {
-      console.error("[menu-pdf] storage.upload error:", uploadError.message);
+      publicUrl = uploadResult.publicUrl;
+    } catch (uploadError) {
+      console.error(
+        "[menu-pdf] storage.upload error:",
+        uploadError instanceof Error ? uploadError.message : uploadError,
+      );
       return NextResponse.json(
         { error: "Failed to upload PDF" },
         { status: 500 },
       );
     }
 
-    // Get public URL
-    const { data: urlData } = adminSupabase.storage
-      .from("listing-pdfs")
-      .getPublicUrl(fileName);
-
-    if (!urlData.publicUrl) {
-      return NextResponse.json(
-        { error: "Failed to get PDF URL" },
-        { status: 500 },
-      );
-    }
-
     // Update listing with PDF URL
-    const { error: updateError } = await adminSupabase
-      .from("listings")
-      .update({ menu_pdf_url: urlData.publicUrl })
-      .eq("id", listingId);
-
-    if (updateError) {
-      console.error("[menu-pdf] database update error:", updateError.message);
-      // Try to clean up uploaded file using service role
+    try {
+      await query(`UPDATE listings SET menu_pdf_url = $1 WHERE id = $2`, [
+        publicUrl,
+        listingId,
+      ]);
+    } catch (updateError) {
+      console.error(
+        "[menu-pdf] database update error:",
+        updateError instanceof Error ? updateError.message : updateError,
+      );
+      // Try to clean up uploaded file
       try {
-        const serviceRoleClient = await createServerSupabase({
-          useServiceRole: true,
-        });
-        await serviceRoleClient.storage.from("listing-pdfs").remove([fileName]);
+        await deleteFile(fileName, "listing-pdfs");
         console.log(
           "[menu-pdf] cleaned up uploaded file after db error:",
           fileName,
@@ -142,7 +131,7 @@ export async function POST(
     return NextResponse.json({
       success: true,
       data: {
-        pdf_url: urlData.publicUrl,
+        pdf_url: publicUrl,
         file_name: fileName,
       },
     });
@@ -172,31 +161,32 @@ export async function DELETE(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     // Get current PDF URL to extract filename
-    const { data: listing, error: fetchError } = await adminSupabase
-      .from("listings")
-      .select("menu_pdf_url")
-      .eq("id", listingId)
-      .single();
+    const { rows: listingRows } = await query(
+      `SELECT menu_pdf_url FROM listings WHERE id = $1`,
+      [listingId],
+    );
+    const listing = listingRows[0];
 
-    if (fetchError || !listing) {
+    if (!listing) {
       return NextResponse.json({ error: "Listing not found" }, { status: 404 });
     }
 
     // Update listing to remove PDF URL
-    const { error: updateError } = await adminSupabase
-      .from("listings")
-      .update({ menu_pdf_url: null })
-      .eq("id", listingId);
-
-    if (updateError) {
-      console.error("[menu-pdf] database update error:", updateError.message);
+    try {
+      await query(`UPDATE listings SET menu_pdf_url = NULL WHERE id = $1`, [
+        listingId,
+      ]);
+    } catch (updateError) {
+      console.error(
+        "[menu-pdf] database update error:",
+        updateError instanceof Error ? updateError.message : updateError,
+      );
       return NextResponse.json(
         { error: "Failed to remove PDF" },
         { status: 500 },
@@ -219,13 +209,7 @@ export async function DELETE(
         ) {
           const fileName = pathParts.slice(listingPdfsIndex + 1).join("/");
           console.log("[menu-pdf] attempting to delete file:", fileName);
-          // Use service role client for storage deletion
-          const serviceRoleClient = await createServerSupabase({
-            useServiceRole: true,
-          });
-          await serviceRoleClient.storage
-            .from("listing-pdfs")
-            .remove([fileName]);
+          await deleteFile(fileName, "listing-pdfs");
           console.log("[menu-pdf] successfully deleted file:", fileName);
         } else {
           console.warn(

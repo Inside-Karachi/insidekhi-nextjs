@@ -3,6 +3,7 @@ import {
   assertListingRouteAccess,
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
+import { query } from "@/lib/db";
 
 /**
  * Opening Hours Input Type
@@ -33,42 +34,40 @@ export async function GET(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     // Check if requesting hours for a specific branch
     const { searchParams } = new URL(request.url);
     const branchIdParam = searchParams.get("branch_id");
 
-    // Build query with optional branch filter
-    let query = supabase
-      .from("opening_hours")
-      .select("*")
-      .eq("listing_id", listingId);
+    const whereParams: unknown[] = [listingId];
+    let whereSql = "listing_id = $1";
 
-    // Filter by branch_id if provided (for multi-location listings)
     if (branchIdParam) {
       const branchId = parseInt(branchIdParam);
       if (!isNaN(branchId)) {
-        query = query.eq("branch_id", branchId);
+        whereParams.push(branchId);
+        whereSql += ` AND branch_id = $${whereParams.length}`;
       }
     }
 
-    const { data: hours, error } = await query.order("day_of_week", {
-      ascending: true,
-    });
-
-    if (hours && hours.length > 0) {
-    }
-    if (error) {
+    let hours;
+    try {
+      const result = await query(
+        `SELECT * FROM opening_hours WHERE ${whereSql} ORDER BY day_of_week ASC`,
+        whereParams,
+      );
+      hours = result.rows;
+    } catch {
       return NextResponse.json(
         { error: "Failed to fetch opening hours" },
         { status: 500 },
       );
     }
+
     return NextResponse.json({ success: true, data: hours });
   } catch (_error) {
     if (_error instanceof Error && _error.name === "ListingRouteAccessError") {
@@ -96,11 +95,10 @@ export async function PATCH(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     const body = await request.json();
 
@@ -137,13 +135,14 @@ export async function PATCH(
     );
 
     // Check listing status to determine validation requirements
-    const { data: listing, error: listingError } = await supabase
-      .from("listings")
-      .select("status")
-      .eq("id", listingId)
-      .single();
-
-    if (listingError) {
+    let listing;
+    try {
+      const { rows } = await query(
+        `SELECT status FROM listings WHERE id = $1`,
+        [listingId],
+      );
+      listing = rows[0];
+    } catch (listingError) {
       console.error(
         "PATCH /opening-hours: Failed to fetch listing",
         listingError,
@@ -174,7 +173,7 @@ export async function PATCH(
 
       // If the listing is published, we should require both open and close times
       // only when at least one of them is provided, and the day is not marked closed.
-      if (listing.status === "published" && row.isClosed !== true) {
+      if (listing?.status === "published" && row.isClosed !== true) {
         const openEmpty = !row.openTime;
         const closeEmpty = !row.closeTime;
 
@@ -194,44 +193,23 @@ export async function PATCH(
         }
       }
     }
+
     // Delete existing opening hours for this listing
     // CRITICAL: Only delete hours for the branch being edited to avoid data loss!
-    // First, log what we're about to delete
-    let deleteQuery = supabase
-      .from("opening_hours")
-      .select("*")
-      .eq("listing_id", listingId);
+    const deleteParams: unknown[] = [listingId];
+    let deleteWhereSql = "listing_id = $1";
 
-    // If editing a specific branch, only fetch hours for that branch
     if (isEditingSingleBranch && branchIdToUpdate !== null) {
-      deleteQuery = deleteQuery.eq("branch_id", branchIdToUpdate);
+      deleteParams.push(branchIdToUpdate);
+      deleteWhereSql += ` AND branch_id = $${deleteParams.length}`;
     } else if (allLegacy) {
       // Legacy mode: Only delete hours with branch_id = null
-      deleteQuery = deleteQuery.is("branch_id", null);
-    } else {
+      deleteWhereSql += " AND branch_id IS NULL";
     }
 
-    const { data: existingHours } = await deleteQuery;
-    if (existingHours && existingHours.length > 0) {
-    }
-
-    // Execute deletion with same filter
-    let deleteExecQuery = supabase
-      .from("opening_hours")
-      .delete()
-      .eq("listing_id", listingId);
-
-    // Apply branch filter if editing single branch to preserve other branches' hours
-    if (isEditingSingleBranch && branchIdToUpdate !== null) {
-      deleteExecQuery = deleteExecQuery.eq("branch_id", branchIdToUpdate);
-    } else if (allLegacy) {
-      // Legacy mode: Only delete hours with branch_id = null
-      deleteExecQuery = deleteExecQuery.is("branch_id", null);
-    }
-
-    const { error: deleteError } = await deleteExecQuery;
-
-    if (deleteError) {
+    try {
+      await query(`DELETE FROM opening_hours WHERE ${deleteWhereSql}`, deleteParams);
+    } catch (deleteError) {
       console.error("[OPENING HOURS API] Delete failed:", deleteError);
       console.error(
         "PATCH /opening-hours: Failed to delete existing rows",
@@ -242,6 +220,7 @@ export async function PATCH(
         { status: 500 },
       );
     }
+
     // Insert new opening hours
     // Data is already in correct database format (0=Sunday) from frontend
     const insertRows = body.opening_hours.map((row: OpeningHoursInput) => ({
@@ -253,37 +232,55 @@ export async function PATCH(
       branch_id: row.branch_id ?? null, // Preserve branch association (critical for multi-location)
     }));
 
-    const { data: insertedData, error: insertError } = await supabase
-      .from("opening_hours")
-      .insert(insertRows)
-      .select();
+    let insertedData;
+    try {
+      const valueRows: string[] = [];
+      const insertParams: unknown[] = [];
+      insertRows.forEach(
+        (row: {
+          listing_id: number;
+          day_of_week: number;
+          open_time: string | null;
+          close_time: string | null;
+          is_closed: boolean;
+          branch_id: number | null;
+        }) => {
+          insertParams.push(
+            row.listing_id,
+            row.day_of_week,
+            row.open_time,
+            row.close_time,
+            row.is_closed,
+            row.branch_id,
+          );
+          const base = insertParams.length - 6;
+          valueRows.push(
+            `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`,
+          );
+        },
+      );
 
-    if (insertError) {
+      if (valueRows.length > 0) {
+        const { rows } = await query(
+          `INSERT INTO opening_hours (listing_id, day_of_week, open_time, close_time, is_closed, branch_id)
+           VALUES ${valueRows.join(", ")}
+           RETURNING *`,
+          insertParams,
+        );
+        insertedData = rows;
+      } else {
+        insertedData = [];
+      }
+    } catch (insertError) {
       console.error(
         "PATCH /opening-hours: Failed to insert rows",
         insertError,
         insertRows,
       );
-      console.error("[OPENING HOURS API] Insert error details:", {
-        message: insertError.message,
-        code: insertError.code,
-        details: insertError.details,
-        hint: insertError.hint,
-      });
       return NextResponse.json(
         { error: "Failed to update opening hours" },
         { status: 500 },
       );
-    }
-    if (insertedData && insertedData.length > 0) {
-    }
-
-    // Verify what's actually in the database now
-    const { data: verifyHours } = await supabase
-      .from("opening_hours")
-      .select("*")
-      .eq("listing_id", listingId);
-    if (verifyHours && verifyHours.length > 0) {
     }
 
     return NextResponse.json({

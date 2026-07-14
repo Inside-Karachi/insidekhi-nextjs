@@ -1,35 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  createServerSupabase,
-  getSupabaseClientForRole,
-} from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { deleteListingsBulk } from "@/lib/utils/listing-deletion";
 
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    // Use a regular client for profile lookup
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role, full_name")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+    const { rows: profileRows } = await query(
+      `SELECT role, full_name FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
     if (!["admin", "super_admin", "lister"].includes(profile.role)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
-    // Use correct client for DB operations
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
 
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get("page") || "1");
@@ -40,50 +30,49 @@ export async function GET(request: NextRequest) {
 
     const offset = (page - 1) * limit;
 
-    let query = adminSupabase
-      .from("listings")
-      .select(
-        "*, creator:profiles!listings_created_by_fkey(id,full_name), category:categories(id,name)",
-        {
-          count: "exact",
-        },
-      );
+    const whereParams: unknown[] = [];
+    const whereClauses: string[] = [];
 
-    // Apply search filter first (search across name and description)
     if (search) {
-      // Important: Use parentheses to group the OR condition
-      query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
+      whereParams.push(`%${search}%`);
+      whereClauses.push(
+        `(name ILIKE $${whereParams.length} OR description ILIKE $${whereParams.length})`,
+      );
     }
 
-    // Apply other filters (these use AND logic with search if search exists)
     if (status && status !== "all") {
-      query = query.eq(
-        "status",
-        status as
-          | "draft"
-          | "published"
-          | "archived"
-          | "pending_approval"
-          | "rejected",
-      );
+      whereParams.push(status);
+      whereClauses.push(`status = $${whereParams.length}`);
     }
 
     if (categoryId && categoryId !== "all") {
       const categoryIdNum = parseInt(categoryId);
       if (!isNaN(categoryIdNum)) {
-        query = query.eq("category_id", categoryIdNum);
+        whereParams.push(categoryIdNum);
+        whereClauses.push(`category_id = $${whereParams.length}`);
       }
     }
 
-    // Apply pagination
-    query = query.range(offset, offset + limit - 1);
+    const whereSql =
+      whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
-    // Order by creation date (newest first)
-    query = query.order("created_at", { ascending: false });
+    let listings, count;
+    try {
+      const countResult = await query(
+        `SELECT COUNT(*) FROM listings ${whereSql}`,
+        whereParams,
+      );
+      count = parseInt(countResult.rows[0].count, 10);
 
-    const { data: listings, error, count } = await query;
-
-    if (error) {
+      const listParams = [...whereParams, limit, offset];
+      const listingsResult = await query(
+        `SELECT * FROM listings ${whereSql}
+         ORDER BY created_at DESC
+         LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+        listParams,
+      );
+      listings = listingsResult.rows;
+    } catch (error) {
       console.error("Error fetching listings:", error);
       return NextResponse.json(
         { error: "Failed to fetch listings" },
@@ -91,79 +80,58 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get accurate stats counts using database count queries
-    const [
-      { count: totalCount },
-      { count: publishedCount },
-      { count: draftCount },
-      { count: featuredCount },
-      { count: archivedCount },
-    ] = await Promise.all([
-      // Total listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true }),
+    const creatorIds = [
+      ...new Set(listings.map((l) => l.created_by).filter((id) => id != null)),
+    ];
+    const categoryIds = [
+      ...new Set(listings.map((l) => l.category_id).filter((id) => id != null)),
+    ];
 
-      // Published listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "published"),
-
-      // Draft listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "draft"),
-
-      // Featured listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .eq("is_featured", true),
-
-      // Archived listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "archived"),
+    const [creatorsResult, categoriesResult] = await Promise.all([
+      creatorIds.length > 0
+        ? query(`SELECT id, full_name FROM profiles WHERE id = ANY($1::uuid[])`, [
+            creatorIds,
+          ])
+        : { rows: [] },
+      categoryIds.length > 0
+        ? query(`SELECT id, name FROM categories WHERE id = ANY($1::int[])`, [
+            categoryIds,
+          ])
+        : { rows: [] },
     ]);
 
+    const creatorById = new Map(creatorsResult.rows.map((c) => [c.id, c]));
+    const categoryById = new Map(categoriesResult.rows.map((c) => [c.id, c]));
+
+    // Get accurate stats counts using database count queries
+    const [totalResult, publishedResult, draftResult, featuredResult, archivedResult] =
+      await Promise.all([
+        query(`SELECT COUNT(*) FROM listings`),
+        query(`SELECT COUNT(*) FROM listings WHERE status = 'published'`),
+        query(`SELECT COUNT(*) FROM listings WHERE status = 'draft'`),
+        query(`SELECT COUNT(*) FROM listings WHERE is_featured = true`),
+        query(`SELECT COUNT(*) FROM listings WHERE status = 'archived'`),
+      ]);
+
     const stats = {
-      total: totalCount || 0,
-      published: publishedCount || 0,
-      draft: draftCount || 0,
-      featured: featuredCount || 0,
-      archived: archivedCount || 0,
+      total: parseInt(totalResult.rows[0].count, 10) || 0,
+      published: parseInt(publishedResult.rows[0].count, 10) || 0,
+      draft: parseInt(draftResult.rows[0].count, 10) || 0,
+      featured: parseInt(featuredResult.rows[0].count, 10) || 0,
+      archived: parseInt(archivedResult.rows[0].count, 10) || 0,
     };
 
     return NextResponse.json({
       success: true,
       data: {
-        listings: (listings || []).map((l) => {
-          let creator_full_name = null;
-          if (
-            l.creator &&
-            typeof l.creator === "object" &&
-            "full_name" in l.creator
-          ) {
-            creator_full_name =
-              (l.creator as { full_name?: string }).full_name || null;
-          }
-
-          let category_name = null;
-          if (
-            l.category &&
-            typeof l.category === "object" &&
-            "name" in l.category
-          ) {
-            category_name = (l.category as { name?: string }).name || null;
-          }
+        listings: listings.map((l) => {
+          const creator = creatorById.get(l.created_by);
+          const category = categoryById.get(l.category_id);
 
           return {
             ...l,
-            creator_full_name,
-            category_name,
+            creator_full_name: creator?.full_name || null,
+            category_name: category?.name || null,
           };
         }),
         pagination: {
@@ -174,8 +142,8 @@ export async function GET(request: NextRequest) {
         },
         stats,
         currentUser: {
-          id: user.id,
-          full_name: profile.full_name || user.email || "Staff",
+          id: session.userId,
+          full_name: profile.full_name || session.email || "Staff",
           role: profile.role,
         },
       },
@@ -191,29 +159,21 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    // Use a regular client for profile lookup
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
     if (!["admin", "super_admin", "lister"].includes(profile.role)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
-    // Use correct client for DB operations
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
 
     const body = await request.json();
     const {
@@ -260,36 +220,46 @@ export async function POST(request: NextRequest) {
       .replace(/^-|-$/g, "");
 
     // Insert new listing
-    const { data: listing, error } = await adminSupabase
-      .from("listings")
-      .insert({
-        name: name.trim(),
-        slug,
-        description: description?.trim() || null,
-        address: address?.trim() || null,
-        phone_number: phone_number?.trim() || null,
-        email: email?.trim() || null,
-        website: website?.trim() || null,
-        category_id: parseInt(category_id),
-        latitude: latitude ? parseFloat(latitude) : null,
-        longitude: longitude ? parseFloat(longitude) : null,
-        is_featured: is_featured || false,
-        status: status || "draft",
-        owner_id: owner_id || null,
-        created_by: user.id,
-        facebook_url: facebook_url?.trim() || null,
-        instagram_url: instagram_url?.trim() || null,
-        whatsapp_number: whatsapp_number?.trim() || null,
-        youtube_url: youtube_url?.trim() || null,
-        google_maps_url: google_maps_url?.trim() || null,
-        place_id: place_id?.trim() || null,
-        parking_information: body.parking_information?.trim() || null,
-        parking_amenities: body.parking_amenities || null,
-      })
-      .select()
-      .single();
-
-    if (error) {
+    let listing;
+    try {
+      const { rows } = await query(
+        `INSERT INTO listings (
+           name, slug, description, address, phone_number, email, website,
+           category_id, latitude, longitude, is_featured, status, owner_id,
+           created_by, facebook_url, instagram_url, whatsapp_number,
+           youtube_url, google_maps_url, place_id, parking_information, parking_amenities
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+           $16, $17, $18, $19, $20, $21, $22
+         )
+         RETURNING *`,
+        [
+          name.trim(),
+          slug,
+          description?.trim() || null,
+          address?.trim() || null,
+          phone_number?.trim() || null,
+          email?.trim() || null,
+          website?.trim() || null,
+          parseInt(category_id),
+          latitude ? parseFloat(latitude) : null,
+          longitude ? parseFloat(longitude) : null,
+          is_featured || false,
+          status || "draft",
+          owner_id || null,
+          session.userId,
+          facebook_url?.trim() || null,
+          instagram_url?.trim() || null,
+          whatsapp_number?.trim() || null,
+          youtube_url?.trim() || null,
+          google_maps_url?.trim() || null,
+          place_id?.trim() || null,
+          body.parking_information?.trim() || null,
+          body.parking_amenities || null,
+        ],
+      );
+      listing = rows[0];
+    } catch (error) {
       console.error("Error creating listing:", error);
       return NextResponse.json(
         { error: "Failed to create listing" },
@@ -301,7 +271,7 @@ export async function POST(request: NextRequest) {
     try {
       const { logListingCreation } = await import("@/lib/audit");
       await logListingCreation(
-        user.id,
+        session.userId,
         listing.id.toString(),
         listing,
         request.headers.get("x-forwarded-for") ||
@@ -329,23 +299,18 @@ export async function POST(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
 
@@ -357,7 +322,6 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
     const body = await request.json();
     const { ids, status } = body;
 
@@ -384,12 +348,14 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const { data: existingListings, error: fetchError } = await adminSupabase
-      .from("listings")
-      .select("*")
-      .in("id", validIds);
-
-    if (fetchError) {
+    let existingListings;
+    try {
+      const result = await query(
+        `SELECT * FROM listings WHERE id = ANY($1::int[])`,
+        [validIds],
+      );
+      existingListings = result.rows;
+    } catch (fetchError) {
       console.error("Error fetching listings for bulk status update:", fetchError);
       return NextResponse.json(
         { error: "Failed to fetch listings for update" },
@@ -404,13 +370,14 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const { data: updatedListings, error: updateError } = await adminSupabase
-      .from("listings")
-      .update({ status })
-      .in("id", validIds)
-      .select("id, status");
-
-    if (updateError) {
+    let updatedListings;
+    try {
+      const result = await query(
+        `UPDATE listings SET status = $1 WHERE id = ANY($2::int[]) RETURNING id, status`,
+        [status, validIds],
+      );
+      updatedListings = result.rows;
+    } catch (updateError) {
       console.error("Error bulk updating listing status:", updateError);
       return NextResponse.json(
         { error: "Failed to update listing status" },
@@ -422,7 +389,7 @@ export async function PATCH(request: NextRequest) {
       const { logListingUpdate } = await import("@/lib/audit");
       for (const listing of existingListings) {
         await logListingUpdate(
-          user.id,
+          session.userId,
           listing.id.toString(),
           listing,
           {
@@ -456,29 +423,21 @@ export async function PATCH(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    // Use a regular client for profile lookup
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
     if (!["admin", "super_admin", "lister"].includes(profile.role)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
-    // Use correct client for DB operations
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
 
     const body = await request.json();
     const { ids } = body;
@@ -500,12 +459,14 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Get listing data before deletion for logging
-    const { data: listingsToDelete, error: fetchError } = await adminSupabase
-      .from("listings")
-      .select("*")
-      .in("id", validIds);
-
-    if (fetchError) {
+    let listingsToDelete;
+    try {
+      const result = await query(
+        `SELECT * FROM listings WHERE id = ANY($1::int[])`,
+        [validIds],
+      );
+      listingsToDelete = result.rows;
+    } catch (fetchError) {
       console.error("Error fetching listings for deletion:", fetchError);
       return NextResponse.json(
         { error: "Failed to fetch listings for deletion" },
@@ -513,16 +474,8 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Use service role for storage operations
-    const serviceRoleClient = await createServerSupabase({
-      useServiceRole: true,
-    });
-
     // Use centralized deletion utility
-    const deletionResult = await deleteListingsBulk(
-      serviceRoleClient,
-      validIds,
-    );
+    const deletionResult = await deleteListingsBulk(validIds);
 
     if (!deletionResult.success) {
       // Check if partial success (some deleted, some blocked)
@@ -552,7 +505,7 @@ export async function DELETE(request: NextRequest) {
       for (const listing of listingsToDelete || []) {
         if (successfullyDeletedIds.includes(listing.id)) {
           await logListingDeletion(
-            user.id,
+            session.userId,
             listing.id.toString(),
             listing,
             request.headers.get("x-forwarded-for") ||

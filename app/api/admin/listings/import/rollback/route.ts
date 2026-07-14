@@ -1,39 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check if user is admin
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (
-      profileError ||
-      (profile?.role !== "admin" && profile?.role !== "super_admin")
-    ) {
+    if (!profile || (profile.role !== "admin" && profile.role !== "super_admin")) {
       return NextResponse.json(
         { error: "Admin access required" },
         { status: 403 }
       );
     }
-
-    const adminSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
 
     const { importId } = await request.json();
 
@@ -45,21 +33,21 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if the import belongs to the user or if user is admin
-    const { data: importHistory, error: historyError } = await supabase
-      .from("import_history")
-      .select("*")
-      .eq("id", importId)
-      .single();
+    const { rows: importHistoryRows } = await query(
+      `SELECT * FROM import_history WHERE id = $1`,
+      [importId],
+    );
+    const importHistory = importHistoryRows[0];
 
-    if (historyError || !importHistory) {
+    if (!importHistory) {
       return NextResponse.json({ error: "Import not found" }, { status: 404 });
     }
 
     // Check ownership or admin access
     if (
-      importHistory.user_id !== user.id &&
-      profile?.role !== "admin" &&
-      profile?.role !== "super_admin"
+      importHistory.user_id !== session.userId &&
+      profile.role !== "admin" &&
+      profile.role !== "super_admin"
     ) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
@@ -78,28 +66,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: rollbackResult, error: rollbackError } =
-      await adminSupabase.rpc("rollback_import", {
-        import_id_param: importId,
-      });
-
-    if (rollbackError) {
-      console.error("Rollback error:", rollbackError);
-      return NextResponse.json(
-        {
-          error: "Rollback failed",
-          details: rollbackError.message,
-        },
-        { status: 500 }
-      );
-    }
-
-    // Type the rollback result properly
-    const result = rollbackResult as {
+    let result: {
       success: boolean;
       message: string;
       records_rolled_back: number;
     };
+    try {
+      const { rows: rpcRows } = await query(
+        `SELECT rollback_import($1::integer) AS result`,
+        [importId],
+      );
+      result = rpcRows[0]?.result;
+    } catch (rollbackError) {
+      console.error("Rollback error:", rollbackError);
+      return NextResponse.json(
+        {
+          error: "Rollback failed",
+          details:
+            rollbackError instanceof Error
+              ? rollbackError.message
+              : "Unknown error",
+        },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({
       success: result.success,
@@ -121,28 +111,19 @@ export async function POST(request: NextRequest) {
 // GET endpoint to retrieve import history
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check if user is admin
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (
-      profileError ||
-      (profile?.role !== "admin" && profile?.role !== "super_admin")
-    ) {
+    if (!profile || (profile.role !== "admin" && profile.role !== "super_admin")) {
       return NextResponse.json(
         { error: "Admin access required" },
         { status: 403 }
@@ -159,47 +140,52 @@ export async function GET(request: NextRequest) {
       Number.isFinite(parsedOffset) && parsedOffset > 0 ? parsedOffset : 0;
     const status = searchParams.get("status");
 
-    let query = supabase
-      .from("import_history")
-      .select(
-        `
-        *,
-        profiles:user_id (
-          username,
-          full_name,
-          role
-        )
-      `,
-        { count: "exact" }
-      )
-      .order("started_at", { ascending: false });
-
-    // Filter by status if provided
-    if (status) {
-      query = query.eq("status", status);
-    }
-
     // Regular users can only see their own imports, admins can see all
-    if (profile?.role !== "admin" && profile?.role !== "super_admin") {
-      query = query.eq("user_id", user.id);
+    const isAdmin = profile.role === "admin" || profile.role === "super_admin";
+
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (status) {
+      params.push(status);
+      conditions.push(`ih.status = $${params.length}`);
+    }
+    if (!isAdmin) {
+      params.push(session.userId);
+      conditions.push(`ih.user_id = $${params.length}`);
     }
 
-    const {
-      data: imports,
-      error,
-      count,
-    } = await query.range(offset, offset + limit - 1);
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
 
-    if (error) {
-      console.error("Error fetching import history:", error);
-      return NextResponse.json(
-        { error: "Failed to fetch import history" },
-        { status: 500 }
-      );
-    }
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM import_history ih ${whereClause}`,
+      params,
+    );
+    const total = parseInt(countRows[0].count, 10);
 
-    const history = imports || [];
-    const total = typeof count === "number" ? count : history.length;
+    const dataParams = [...params, limit, offset];
+    const { rows: imports } = await query(
+      `SELECT ih.*, p.username, p.full_name, p.role AS profile_role
+       FROM import_history ih
+       LEFT JOIN profiles p ON p.id = ih.user_id
+       ${whereClause}
+       ORDER BY ih.started_at DESC
+       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+      dataParams,
+    );
+
+    const history = imports.map((row) => {
+      const { username, full_name, profile_role, ...rest } = row;
+      return {
+        ...rest,
+        profiles: username !== null || full_name !== null || profile_role !== null
+          ? { username, full_name, role: profile_role }
+          : null,
+      };
+    });
+
     const currentPage = Math.floor(offset / limit);
     const hasMore = offset + limit < total;
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 const STALE_SECONDS = 90;
 
@@ -10,26 +10,31 @@ function staleThresholdIso() {
 
 /** Best-effort cleanup; called after writes only - not on every GET (reduces DB write load). */
 async function cleanupStaleSessions() {
-  const supabase = await createServerSupabase({ useServiceRole: true });
-  await supabase
-    .from("listing_edit_sessions")
-    .delete()
-    .lt("last_heartbeat_at", staleThresholdIso());
+  await query(
+    `DELETE FROM listing_edit_sessions WHERE last_heartbeat_at < $1`,
+    [staleThresholdIso()],
+  );
 }
 
 export async function GET(request: NextRequest) {
   try {
     await requireAdmin(request);
 
-    const supabase = await createServerSupabase({ useServiceRole: true });
-    const { data, error } = await supabase
-      .from("listing_edit_sessions")
-      .select("listing_id,user_id,full_name,last_heartbeat_at")
-      .gte("last_heartbeat_at", staleThresholdIso())
-      .order("last_heartbeat_at", { ascending: false });
-
-    if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    let data;
+    try {
+      const result = await query(
+        `SELECT listing_id, user_id, full_name, last_heartbeat_at
+         FROM listing_edit_sessions
+         WHERE last_heartbeat_at >= $1
+         ORDER BY last_heartbeat_at DESC`,
+        [staleThresholdIso()],
+      );
+      data = result.rows;
+    } catch (error) {
+      return NextResponse.json(
+        { success: false, error: error instanceof Error ? error.message : "Unknown error" },
+        { status: 500 },
+      );
     }
 
     return NextResponse.json({ success: true, data: { sessions: data || [] } });
@@ -66,34 +71,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
     if (action === "stop") {
-      const { error } = await supabase
-        .from("listing_edit_sessions")
-        .delete()
-        .eq("listing_id", listingId)
-        .eq("user_id", user.id);
-      if (error) {
-        return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      try {
+        await query(
+          `DELETE FROM listing_edit_sessions WHERE listing_id = $1 AND user_id = $2`,
+          [listingId, user.id],
+        );
+      } catch (error) {
+        return NextResponse.json(
+          { success: false, error: error instanceof Error ? error.message : "Unknown error" },
+          { status: 500 },
+        );
       }
       void cleanupStaleSessions();
       return NextResponse.json({ success: true });
     }
 
-    const payload = {
-      listing_id: listingId,
-      user_id: user.id,
-      full_name: profile.full_name || user.email || "Staff",
-      last_heartbeat_at: new Date().toISOString(),
-    };
+    const fullName = profile.full_name || user.email || "Staff";
+    const lastHeartbeatAt = new Date().toISOString();
 
-    const { error } = await supabase
-      .from("listing_edit_sessions")
-      .upsert(payload, { onConflict: "listing_id,user_id" });
-
-    if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    try {
+      await query(
+        `INSERT INTO listing_edit_sessions (listing_id, user_id, full_name, last_heartbeat_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (listing_id, user_id)
+         DO UPDATE SET full_name = EXCLUDED.full_name, last_heartbeat_at = EXCLUDED.last_heartbeat_at`,
+        [listingId, user.id, fullName, lastHeartbeatAt],
+      );
+    } catch (error) {
+      return NextResponse.json(
+        { success: false, error: error instanceof Error ? error.message : "Unknown error" },
+        { status: 500 },
+      );
     }
 
     void cleanupStaleSessions();

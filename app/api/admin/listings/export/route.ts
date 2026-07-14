@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { Parser } from "json2csv";
 import type { Database } from "@/types/supabase";
 
@@ -15,27 +16,21 @@ type ExportListingRow = Database["public"]["Tables"]["listings"]["Row"] & {
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check if user is admin
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
     if (
-      profileError ||
-      (profile?.role !== "admin" && profile?.role !== "super_admin")
+      !profile ||
+      (profile.role !== "admin" && profile.role !== "super_admin")
     ) {
       return NextResponse.json(
         { error: "Admin access required" },
@@ -59,121 +54,276 @@ export async function POST(request: NextRequest) {
       includeTechnical?: boolean;
     };
 
-    const relatedSelect = includeRelated
-      ? `
-        categories:category_id(name, slug, parent_id, parent:parent_id(name, slug)),
-        listing_features(
-          feature_id,
-          listing_features_master(name, icon_emoji, category)
-        ),
-        opening_hours(day_of_week, open_time, close_time, is_closed, branch_id),
-        deals(
-          id,
-          title,
-          description,
-          deal_type,
-          discount_value,
-          is_active,
-          bank_id,
-          start_date,
-          end_date,
-          valid_card_variants,
-          metadata,
-          banks(id, name, code)
-        ),
-        menu_sections(
-          id,
-          name,
-          description,
-          display_order,
-          menu_items(id, name, description, price, is_available, image_url, image_alt, display_order, is_featured)
-        ),
-        listing_images!fkey_listing_images_listing_id(url, alt_text, display_order, is_primary),
-        listing_branches(
-          id,
-          name,
-          address,
-          city,
-          country,
-          latitude,
-          longitude,
-          phone_number,
-          timings,
-          is_open_now,
-          is_primary,
-          is_verified,
-          distance_from_center,
-          custom_attributes,
-          peekaboo_branch_id,
-          opening_hours(day_of_week, open_time, close_time, is_closed, branch_id)
-        )
-      `
-      : "";
+    // Build WHERE clause for listing filters
+    const whereParams: unknown[] = [];
+    const whereClauses: string[] = [];
 
-    const selectClause = includeRelated ? `*,${relatedSelect}` : "*";
+    if (filters.status && filters.status !== "all") {
+      whereParams.push(filters.status);
+      whereClauses.push(`status = $${whereParams.length}`);
+    }
 
-    const buildQuery = () => {
-      let query = supabase.from("listings").select(selectClause);
-
-      // Apply filters
-      if (filters.status && filters.status !== "all") {
-        query = query.eq(
-          "status",
-          filters.status as NonNullable<
-            Database["public"]["Tables"]["listings"]["Row"]["status"]
-          >,
-        );
+    if (filters.categoryId && filters.categoryId !== "all") {
+      const categoryId = Number(filters.categoryId);
+      if (Number.isFinite(categoryId)) {
+        whereParams.push(categoryId);
+        whereClauses.push(`category_id = $${whereParams.length}`);
       }
+    }
 
-      if (filters.categoryId && filters.categoryId !== "all") {
-        const categoryId = Number(filters.categoryId);
-        if (Number.isFinite(categoryId)) {
-          query = query.eq("category_id", categoryId);
-        }
-      }
+    if (filters.isFeatured && filters.isFeatured !== "all") {
+      whereParams.push(filters.isFeatured === "true");
+      whereClauses.push(`is_featured = $${whereParams.length}`);
+    }
 
-      if (filters.isFeatured && filters.isFeatured !== "all") {
-        query = query.eq("is_featured", filters.isFeatured === "true");
-      }
+    if (filters.search) {
+      whereParams.push(`%${filters.search}%`);
+      whereClauses.push(
+        `(name ILIKE $${whereParams.length} OR description ILIKE $${whereParams.length})`,
+      );
+    }
 
-      if (filters.search) {
-        query = query.or(
-          `name.ilike.%${filters.search}%,description.ilike.%${filters.search}%`
-        );
-      }
-
-      return query;
-    };
+    const whereSql =
+      whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
     // Fetch all rows in deterministic pages to avoid API limits truncating exports.
     const pageSize = 1000;
     let offset = 0;
     const listings: ExportListingRow[] = [];
 
-    while (true) {
-      const { data, error } = await buildQuery()
-        .order("id", { ascending: true })
-        .range(offset, offset + pageSize - 1);
-
-      if (error) {
-        console.error("Error fetching listings for export:", error);
-        return NextResponse.json(
-          { error: "Failed to fetch listings" },
-          { status: 500 }
+    try {
+      while (true) {
+        const pageParams = [...whereParams, pageSize, offset];
+        const { rows } = await query(
+          `SELECT * FROM listings ${whereSql}
+           ORDER BY id ASC
+           LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+          pageParams,
         );
+
+        if (!rows || rows.length === 0) {
+          break;
+        }
+
+        listings.push(...(rows as unknown as ExportListingRow[]));
+
+        if (rows.length < pageSize) {
+          break;
+        }
+
+        offset += pageSize;
+      }
+    } catch (error) {
+      console.error("Error fetching listings for export:", error);
+      return NextResponse.json(
+        { error: "Failed to fetch listings" },
+        { status: 500 }
+      );
+    }
+
+    if (includeRelated && listings.length > 0) {
+      const listingIds = listings.map((l) => l.id);
+      const categoryIds = [
+        ...new Set(listings.map((l) => l.category_id).filter((id): id is number => id != null)),
+      ];
+
+      const [
+        categoriesResult,
+        listingFeaturesResult,
+        openingHoursResult,
+        dealsResult,
+        menuSectionsResult,
+        listingImagesResult,
+        listingBranchesResult,
+      ] = await Promise.all([
+        categoryIds.length > 0
+          ? query(
+              `SELECT id, name, slug, parent_id FROM categories WHERE id = ANY($1::int[])`,
+              [categoryIds],
+            )
+          : { rows: [] },
+        query(
+          `SELECT lf.listing_id, lf.feature_id, lfm.name, lfm.icon_emoji, lfm.category
+           FROM listing_features lf
+           JOIN listing_features_master lfm ON lfm.id = lf.feature_id
+           WHERE lf.listing_id = ANY($1::int[])`,
+          [listingIds],
+        ),
+        query(
+          `SELECT listing_id, branch_id, day_of_week, open_time, close_time, is_closed
+           FROM opening_hours WHERE listing_id = ANY($1::int[])`,
+          [listingIds],
+        ),
+        query(
+          `SELECT d.id, d.title, d.description, d.deal_type, d.discount_value, d.is_active,
+                  d.bank_id, d.start_date, d.end_date, d.valid_card_variants, d.metadata,
+                  d.listing_id, b.id AS bank_id_full, b.name AS bank_name, b.code AS bank_code
+           FROM deals d
+           LEFT JOIN banks b ON b.id = d.bank_id
+           WHERE d.listing_id = ANY($1::int[])`,
+          [listingIds],
+        ),
+        query(
+          `SELECT id, listing_id, name, description, display_order
+           FROM menu_sections WHERE listing_id = ANY($1::int[])`,
+          [listingIds],
+        ),
+        query(
+          `SELECT listing_id, url, alt_text, display_order, is_primary
+           FROM listing_images WHERE listing_id = ANY($1::int[])`,
+          [listingIds],
+        ),
+        query(
+          `SELECT id, listing_id, name, address, city, country, latitude, longitude,
+                  phone_number, timings, is_open_now, is_primary, is_verified,
+                  distance_from_center, custom_attributes, peekaboo_branch_id
+           FROM listing_branches WHERE listing_id = ANY($1::int[])`,
+          [listingIds],
+        ),
+      ]);
+
+      // Parent categories (for the "Parent > Child" category display) and
+      // menu items are independent of each other - fetch both in parallel.
+      const parentIds = [
+        ...new Set(
+          categoriesResult.rows.map((c) => c.parent_id).filter((id): id is number => id != null),
+        ),
+      ];
+      const sectionIds = menuSectionsResult.rows.map((s) => s.id);
+
+      const [parentCategoriesResult, menuItemsResult] = await Promise.all([
+        parentIds.length > 0
+          ? query(`SELECT id, name, slug FROM categories WHERE id = ANY($1::int[])`, [
+              parentIds,
+            ])
+          : { rows: [] },
+        sectionIds.length > 0
+          ? query(
+              `SELECT id, section_id, name, description, price, is_available, image_url,
+                      image_alt, display_order, is_featured
+               FROM menu_items WHERE section_id = ANY($1::int[])`,
+              [sectionIds],
+            )
+          : { rows: [] },
+      ]);
+      const parentCategoryById = new Map(
+        parentCategoriesResult.rows.map((c) => [c.id, c]),
+      );
+      const categoryById = new Map(
+        categoriesResult.rows.map((c) => [
+          c.id,
+          {
+            name: c.name,
+            slug: c.slug,
+            parent: c.parent_id ? parentCategoryById.get(c.parent_id) || null : null,
+          },
+        ]),
+      );
+
+      const featuresByListingId = new Map<number, SupabaseFeature[]>();
+      for (const row of listingFeaturesResult.rows) {
+        const existing = featuresByListingId.get(row.listing_id) || [];
+        existing.push({
+          listing_features_master: {
+            name: row.name,
+          },
+        });
+        featuresByListingId.set(row.listing_id, existing);
       }
 
-      if (!data || data.length === 0) {
-        break;
+      const hoursByListingId = new Map<number, SupabaseOpeningHour[]>();
+      const hoursByBranchId = new Map<number, SupabaseBranchOpeningHour[]>();
+      for (const row of openingHoursResult.rows) {
+        const listingHours = hoursByListingId.get(row.listing_id) || [];
+        listingHours.push({
+          day_of_week: row.day_of_week,
+          open_time: row.open_time,
+          close_time: row.close_time,
+          is_closed: row.is_closed,
+        });
+        hoursByListingId.set(row.listing_id, listingHours);
+
+        if (row.branch_id != null) {
+          const branchHours = hoursByBranchId.get(row.branch_id) || [];
+          branchHours.push({
+            day_of_week: row.day_of_week,
+            open_time: row.open_time,
+            close_time: row.close_time,
+            is_closed: row.is_closed,
+            branch_id: row.branch_id,
+          });
+          hoursByBranchId.set(row.branch_id, branchHours);
+        }
       }
 
-      listings.push(...(data as unknown as ExportListingRow[]));
-
-      if (data.length < pageSize) {
-        break;
+      const dealsByListingId = new Map<number, SupabaseDeal[]>();
+      for (const row of dealsResult.rows) {
+        const existing = dealsByListingId.get(row.listing_id) || [];
+        existing.push({
+          id: row.id,
+          title: row.title,
+          discount_value: row.discount_value,
+          is_active: row.is_active,
+          deal_type: row.deal_type,
+          description: row.description,
+          bank_id: row.bank_id,
+          start_date: row.start_date,
+          end_date: row.end_date,
+          valid_card_variants: row.valid_card_variants,
+          metadata: row.metadata,
+          banks: row.bank_id_full
+            ? { id: row.bank_id_full, name: row.bank_name, code: row.bank_code }
+            : null,
+        });
+        dealsByListingId.set(row.listing_id, existing);
       }
 
-      offset += pageSize;
+      const menuItemsBySectionId = new Map<number, SupabaseMenuItem[]>();
+      for (const item of menuItemsResult.rows) {
+        const existing = menuItemsBySectionId.get(item.section_id) || [];
+        existing.push(item);
+        menuItemsBySectionId.set(item.section_id, existing);
+      }
+
+      const menuSectionsByListingId = new Map<number, SupabaseMenuSection[]>();
+      for (const section of menuSectionsResult.rows) {
+        const existing = menuSectionsByListingId.get(section.listing_id) || [];
+        existing.push({
+          name: section.name,
+          display_order: section.display_order,
+          menu_items: menuItemsBySectionId.get(section.id) || [],
+        });
+        menuSectionsByListingId.set(section.listing_id, existing);
+      }
+
+      const imagesByListingId = new Map<number, SupabaseImage[]>();
+      for (const row of listingImagesResult.rows) {
+        const existing = imagesByListingId.get(row.listing_id) || [];
+        existing.push(row);
+        imagesByListingId.set(row.listing_id, existing);
+      }
+
+      const branchesByListingId = new Map<number, SupabaseBranch[]>();
+      for (const row of listingBranchesResult.rows) {
+        const existing = branchesByListingId.get(row.listing_id) || [];
+        existing.push({
+          ...row,
+          opening_hours: hoursByBranchId.get(row.id) || [],
+        });
+        branchesByListingId.set(row.listing_id, existing);
+      }
+
+      for (const listing of listings) {
+        listing.categories = listing.category_id
+          ? categoryById.get(listing.category_id) || null
+          : null;
+        listing.listing_features = featuresByListingId.get(listing.id) || [];
+        listing.opening_hours = hoursByListingId.get(listing.id) || [];
+        listing.deals = dealsByListingId.get(listing.id) || [];
+        listing.menu_sections = menuSectionsByListingId.get(listing.id) || [];
+        listing.listing_images = imagesByListingId.get(listing.id) || [];
+        listing.listing_branches = branchesByListingId.get(listing.id) || [];
+      }
     }
 
     // Transform data to CSV format
@@ -197,7 +347,7 @@ export async function POST(request: NextRequest) {
           Features: formatFeatures(listing.listing_features || []),
           Status: normalizeExportText(listing.status),
           Featured: listing.is_featured ? "TRUE" : "FALSE",
-          "Created Date": listing.created_at || "",
+          "Created Date": normalizeExportTimestamp(listing.created_at),
           "Display Order": listing.display_order || "",
           "Owner ID": listing.owner_id || "",
           "Place ID": normalizeExportText(listing.place_id),
@@ -216,7 +366,7 @@ export async function POST(request: NextRequest) {
           Whatsapp: normalizeExportText(listing.whatsapp_number),
           Instagram: normalizeExportText(listing.instagram_url),
           Youtube: normalizeExportText(listing.youtube_url),
-          "Last Update": listing.updated_at || "",
+          "Last Update": normalizeExportTimestamp(listing.updated_at),
         };
 
         if (includeTechnical) {
@@ -331,6 +481,23 @@ function formatOpeningHours(openingHours: SupabaseOpeningHour[]): string {
   return formatted;
 }
 
+// node-postgres returns timestamp columns as JS Date objects, not the ISO
+// strings PostgREST/Supabase used to hand back - normalize here so the CSV
+// output format doesn't silently change.
+function normalizeExportTimestamp(value: unknown): string {
+  if (!value) return "";
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+// `date` columns come back as Date objects too - format as YYYY-MM-DD to
+// match the date-only string PostgREST/Supabase used to return.
+function formatExportDateOnly(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().split("T")[0];
+  return String(value);
+}
+
 function normalizeExportText(value: string | null | undefined): string {
   if (!value) return "";
   return value
@@ -392,7 +559,7 @@ function formatJsonArray(value: unknown): string {
 type SupabaseMenuItem = {
   name?: string;
   description?: string | null;
-  price?: number;
+  price?: number | string | null;
   is_available?: boolean;
   image_url?: string | null;
   display_order?: number | null;
@@ -415,7 +582,11 @@ function formatMenuSections(sections: SupabaseMenuSection[]): string {
         .map(
           (item) => {
             const name = normalizeExportText(item.name);
-            const price = typeof item.price === "number" ? `Rs ${item.price}` : "";
+            // menu_items.price is a numeric column - node-postgres returns it
+            // as a string, not a JS number, so check/convert explicitly.
+            const priceValue =
+              item.price != null && item.price !== "" ? Number(item.price) : NaN;
+            const price = !isNaN(priceValue) ? `Rs ${priceValue}` : "";
             return [name, price].filter(Boolean).join(" - ");
           },
         )
@@ -432,9 +603,9 @@ type SupabaseDeal = {
   is_active?: boolean;
   deal_type?: Database["public"]["Enums"]["deal_type"];
   description?: string | null;
-  bank_id?: number | null;
-  start_date?: string | null;
-  end_date?: string | null;
+  bank_id?: number | string | null;
+  start_date?: string | Date | null;
+  end_date?: string | Date | null;
   valid_card_variants?: number[] | null;
   metadata?: unknown;
   banks?: { id?: number; name?: string | null; code?: string | null } | null;
@@ -458,13 +629,19 @@ function formatDealsJson(deals: SupabaseDeal[]): string {
         title: deal.title || null,
         description: deal.description || null,
         deal_type: deal.deal_type || null,
-        bank_id: typeof deal.bank_id === "number" ? deal.bank_id : null,
+        bank_id:
+          deal.bank_id != null && !isNaN(Number(deal.bank_id))
+            ? Number(deal.bank_id)
+            : null,
         bank_name: deal.banks?.name || null,
         bank_code: deal.banks?.code || null,
         discount_value: deal.discount_value || null,
         is_active: deal.is_active ?? true,
-        start_date: deal.start_date || null,
-        end_date: deal.end_date || null,
+        // start_date/end_date are `date` columns - node-postgres returns
+        // these as Date objects, which JSON.stringify would otherwise
+        // expand to a full ISO timestamp instead of a plain date string.
+        start_date: formatExportDateOnly(deal.start_date),
+        end_date: formatExportDateOnly(deal.end_date),
         valid_card_variants: deal.valid_card_variants || null,
         metadata: deal.metadata || null,
       }))

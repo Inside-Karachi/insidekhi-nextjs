@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  createServerSupabase,
-  getSupabaseClientForRole,
-} from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 // GET: List eligible business owners for a listing (minimal info)
 export async function GET(
@@ -11,22 +9,17 @@ export async function GET(
 ) {
   try {
     const params = await context.params;
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
     // Get user profile
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
     // Only allow lister, admin, super_admin
@@ -40,20 +33,28 @@ export async function GET(
         { status: 400 }
       );
     }
-    const dbClient = await getSupabaseClientForRole(profile.role);
     // Search users by query param (for autocomplete)
     const { searchParams } = new URL(request.url);
     const q = searchParams.get("q")?.trim() || "";
-    let userQuery = dbClient
-      .from("profiles")
-      .select("id, full_name, username, avatar_url, role")
-      .neq("role", "super_admin")
-      .limit(10);
+
+    const whereParams: unknown[] = [];
+    let whereSql = "role != 'super_admin'";
     if (q) {
-      userQuery = userQuery.or(`full_name.ilike.%${q}%,username.ilike.%${q}%`);
+      whereParams.push(`%${q}%`);
+      whereSql += ` AND (full_name ILIKE $${whereParams.length} OR username ILIKE $${whereParams.length})`;
     }
-    const { data: users, error: usersError } = await userQuery;
-    if (usersError) {
+
+    let users;
+    try {
+      const result = await query(
+        `SELECT id, full_name, username, avatar_url, role
+         FROM profiles
+         WHERE ${whereSql}
+         LIMIT 10`,
+        whereParams,
+      );
+      users = result.rows;
+    } catch {
       return NextResponse.json(
         { error: "Failed to fetch users" },
         { status: 500 }
@@ -76,22 +77,17 @@ export async function PATCH(
 ) {
   try {
     const params = await context.params;
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
     // Get user profile
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
     if (!["admin", "super_admin", "lister"].includes(profile.role)) {
@@ -104,15 +100,14 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    const dbClient = await getSupabaseClientForRole(profile.role);
     // If lister, check ownership
     if (profile.role === "lister") {
-      const { data: listing, error: listingError } = await dbClient
-        .from("listings")
-        .select("id, owner_id")
-        .eq("id", listingId)
-        .single();
-      if (listingError || !listing || listing.owner_id !== user.id) {
+      const { rows: listingRows } = await query(
+        `SELECT id, owner_id FROM listings WHERE id = $1`,
+        [listingId],
+      );
+      const listing = listingRows[0];
+      if (!listing || listing.owner_id !== session.userId) {
         return NextResponse.json({ error: "Not allowed" }, { status: 403 });
       }
     }
@@ -125,11 +120,12 @@ export async function PATCH(
       );
     }
     // Update listing owner
-    const { error: updateError } = await dbClient
-      .from("listings")
-      .update({ owner_id })
-      .eq("id", listingId);
-    if (updateError) {
+    try {
+      await query(`UPDATE listings SET owner_id = $1 WHERE id = $2`, [
+        owner_id,
+        listingId,
+      ]);
+    } catch {
       return NextResponse.json(
         { error: "Failed to update owner" },
         { status: 500 }

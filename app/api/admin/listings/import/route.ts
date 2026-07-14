@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { parse } from "csv-parse/sync";
 
-import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   validateCsvData,
   generateSlug,
@@ -351,7 +351,6 @@ function setExistingListing(
 }
 
 async function resolveCategoryId(
-  supabase: SupabaseClient<Database>,
   categoryName: string,
   context?: CategoryLookupContext,
 ): Promise<number | null> {
@@ -368,12 +367,11 @@ async function resolveCategoryId(
     }
   }
 
-  const { data: category } = await supabase
-    .from("categories")
-    .select("id")
-    .ilike("name", sanitized)
-    .limit(1)
-    .single();
+  const { rows } = await query(
+    `SELECT id FROM categories WHERE name ILIKE $1 LIMIT 1`,
+    [sanitized],
+  );
+  const category = rows[0];
 
   const categoryId = category?.id ?? null;
 
@@ -395,7 +393,6 @@ function deriveRecordName(record: string[]): string {
 }
 
 async function populateDuplicateLookupContext(
-  supabase: SupabaseClient<Database>,
   entries: PreparedListingEntry[],
   context: DuplicateLookupContext,
 ): Promise<void> {
@@ -415,9 +412,10 @@ async function populateDuplicateLookupContext(
     }
   }
 
-  const selection = "id, name, slug, place_id, updated_at";
   const chunkSize = 100;
 
+  // field is only ever one of the 3 hardcoded literals below, never
+  // user-controlled, so using it as a column identifier here is safe.
   const fetchByValues = async (
     field: "name" | "slug" | "place_id",
     values: Set<string>,
@@ -426,12 +424,14 @@ async function populateDuplicateLookupContext(
     if (values.size === 0) return;
     const valueArray = Array.from(values);
     for (const chunk of chunkArray(valueArray, chunkSize)) {
-      const { data, error } = await supabase
-        .from("listings")
-        .select(selection)
-        .in(field, chunk);
-
-      if (error) {
+      let rows;
+      try {
+        const result = await query(
+          `SELECT id, name, slug, place_id, updated_at FROM listings WHERE ${field} = ANY($1::text[])`,
+          [chunk],
+        );
+        rows = result.rows;
+      } catch (error) {
         console.error(
           `Failed to preload duplicate lookup for field ${field}:`,
           error,
@@ -439,18 +439,13 @@ async function populateDuplicateLookupContext(
         continue;
       }
 
-      (data || []).forEach((row) => {
-        const typedRow = row as Pick<
-          Database["public"]["Tables"]["listings"]["Row"],
-          "id" | "name" | "slug" | "place_id" | "updated_at"
-        >;
-
+      rows.forEach((row) => {
         const summary: ExistingListingSummary = {
-          id: typedRow.id,
-          name: typedRow.name ?? null,
-          slug: typedRow.slug ?? null,
-          place_id: typedRow.place_id ?? null,
-          updated_at: typedRow.updated_at ?? null,
+          id: row.id,
+          name: row.name ?? null,
+          slug: row.slug ?? null,
+          place_id: row.place_id ?? null,
+          updated_at: row.updated_at ?? null,
         };
 
         const directValue =
@@ -582,37 +577,24 @@ export async function POST(request: NextRequest) {
   let importHistory: ImportHistory | null = null;
 
   try {
-    const supabase = await createServerSupabase();
-
-    // Check if user is admin
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (
-      profileError ||
-      (profile?.role !== "admin" && profile?.role !== "super_admin")
-    ) {
+    if (!profile || (profile.role !== "admin" && profile.role !== "super_admin")) {
       return NextResponse.json(
         { error: "Admin access required" },
         { status: 403 },
       );
     }
-
-    const adminSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
 
     const formData = await request.formData();
     const file = formData.get("file") as File;
@@ -706,7 +688,6 @@ export async function POST(request: NextRequest) {
     // Dry run mode - simulate the import without actually saving
     if (options.dryRun) {
       const simulated = await simulateImport(
-        supabase,
         records,
         headers,
         options,
@@ -730,8 +711,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Create import history record for actual imports only
-    importHistory = await createImportHistory(supabase, {
-      user_id: user.id,
+    importHistory = await createImportHistory({
+      user_id: session.userId,
       filename: file.name,
       total_records: records.length,
       successful_imports: 0,
@@ -744,13 +725,11 @@ export async function POST(request: NextRequest) {
 
     // Execute actual import with transaction
     const importResult = await executeTransactionalImport(
-      supabase,
-      adminSupabase,
       records,
       headers,
       options,
       importHistory,
-      user.id,
+      session.userId,
     );
 
     // Update result
@@ -768,7 +747,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Update import history
-    await updateImportHistory(supabase, importHistory.id!, {
+    await updateImportHistory(importHistory.id!, {
       successful_imports: result.successful,
       failed_imports: result.failed,
       completed_at: new Date().toISOString(),
@@ -780,8 +759,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     // Update import history on error
     if (importHistory?.id) {
-      const supabase = await createServerSupabase();
-      await updateImportHistory(supabase, importHistory.id, {
+      await updateImportHistory(importHistory.id, {
         status: "failed",
         error_details: error instanceof Error ? error.message : "Unknown error",
         completed_at: new Date().toISOString(),
@@ -801,7 +779,6 @@ export async function POST(request: NextRequest) {
 
 async function transformRecordToListing(
   record: string[],
-  supabase: SupabaseClient<Database>,
   fieldStats?: FieldStats,
   categoryContext?: CategoryLookupContext,
 ): Promise<ListingTransformResult> {
@@ -1052,7 +1029,6 @@ async function transformRecordToListing(
 
       attemptedLookup = true;
       const resolvedId = await resolveCategoryId(
-        supabase,
         categoryName,
         categoryContext,
       );
@@ -1306,56 +1282,71 @@ async function transformRecordToListing(
 
 // Helper functions for import history management
 async function createImportHistory(
-  supabase: SupabaseClient<Database>,
   history: Omit<ImportHistory, "id">,
 ): Promise<ImportHistory> {
   // Ensure status is one of allowed values
   const allowedStatus = ["completed", "failed", "rolled_back"];
-  const safeHistory = {
-    ...history,
-    status: allowedStatus.includes(history.status as string)
-      ? history.status
-      : "completed",
-  };
-  const { data, error } = await supabase
-    .from("import_history")
-    .insert(safeHistory)
-    .select()
-    .single();
+  const safeStatus = allowedStatus.includes(history.status as string)
+    ? history.status
+    : "completed";
 
-  if (error) {
-    throw new Error(`Failed to create import history: ${error.message}`);
+  try {
+    const { rows } = await query(
+      `INSERT INTO import_history (
+         user_id, filename, total_records, successful_imports, failed_imports,
+         status, import_type, started_at, rollback_available
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        history.user_id,
+        history.filename,
+        history.total_records,
+        history.successful_imports,
+        history.failed_imports,
+        safeStatus,
+        history.import_type,
+        history.started_at,
+        history.rollback_available,
+      ],
+    );
+    return rows[0] as ImportHistory;
+  } catch (error) {
+    throw new Error(
+      `Failed to create import history: ${error instanceof Error ? error.message : "Unknown error"}`,
+    );
   }
-
-  // Cast status to allowed union type
-  if (data) {
-    (data as Database["public"]["Tables"]["import_history"]["Row"]).status =
-      data.status as "completed" | "failed" | "rolled_back";
-  }
-  return data as ImportHistory;
 }
 
 async function updateImportHistory(
-  supabase: SupabaseClient<Database>,
   id: number,
   updates: Partial<ImportHistory>,
 ): Promise<void> {
   // Remove id from updates if present
   const safeUpdates = { ...updates };
   delete safeUpdates.id;
-  const { error } = await supabase
-    .from("import_history")
-    .update(safeUpdates as Omit<ImportHistory, "id">)
-    .eq("id", id);
 
-  if (error) {
+  // safeUpdates keys always come from this module's own internal call sites
+  // (a small fixed set of ImportHistory fields), never from request input,
+  // so using them as column identifiers here is safe.
+  const updateKeys = Object.keys(safeUpdates) as Array<keyof typeof safeUpdates>;
+  if (updateKeys.length === 0) return;
+
+  const setClauses = updateKeys.map((key, idx) => `"${key}" = $${idx + 1}`);
+  const values: unknown[] = updateKeys.map((key) => safeUpdates[key]);
+  values.push(id);
+
+  try {
+    await query(
+      `UPDATE import_history SET ${setClauses.join(", ")} WHERE id = $${values.length}`,
+      values,
+    );
+  } catch (error) {
     console.error("Failed to update import history:", error);
   }
 }
 
 // Simulate import for dry run
 async function simulateImport(
-  supabase: SupabaseClient<Database>,
   records: string[][],
   headers: string[],
   options: ImportOptions,
@@ -1386,7 +1377,6 @@ async function simulateImport(
     try {
       const { listing } = await transformRecordToListing(
         record,
-        supabase,
         undefined,
         categoryContext,
       );
@@ -1418,16 +1408,14 @@ async function simulateImport(
 
   let existingNamesMap = new Map<string, boolean>();
   if (options.skipDuplicates && uniqueNames.length > 0) {
-    const { data: existingListings } = await supabase
-      .from("listings")
-      .select("name")
-      .in("name", uniqueNames);
+    const { rows: existingListings } = await query(
+      `SELECT name FROM listings WHERE name = ANY($1::text[])`,
+      [uniqueNames],
+    );
 
-    if (existingListings) {
-      existingNamesMap = new Map(
-        existingListings.map((item: { name: string }) => [item.name, true]),
-      );
-    }
+    existingNamesMap = new Map(
+      existingListings.map((item: { name: string }) => [item.name, true]),
+    );
   }
 
   for (const entry of validEntries) {
@@ -1464,8 +1452,6 @@ async function simulateImport(
 
 // Execute transactional import
 async function executeTransactionalImport(
-  supabase: SupabaseClient<Database>,
-  adminSupabase: SupabaseClient<Database>,
   records: string[][],
   _headers: string[],
   options: ImportOptions,
@@ -1525,7 +1511,6 @@ async function executeTransactionalImport(
     try {
       const transformed = await transformRecordToListing(
         record,
-        supabase,
         result.fieldStats,
         categoryContext,
       );
@@ -1550,7 +1535,6 @@ async function executeTransactionalImport(
 
   if (preparedEntries.length > 0) {
     await populateDuplicateLookupContext(
-      supabase,
       preparedEntries,
       duplicateContext,
     );
@@ -1568,8 +1552,6 @@ async function executeTransactionalImport(
     try {
       // Use RPC function for transactional batch processing
       const batchResult = await processBatchTransactionally(
-        supabase,
-        adminSupabase,
         batch,
         options,
         importHistory.id!,
@@ -1611,8 +1593,6 @@ async function executeTransactionalImport(
 
 // Process batch with transaction
 async function processBatchTransactionally(
-  supabase: SupabaseClient<Database>,
-  adminSupabase: SupabaseClient<Database>,
   batch: PreparedListingEntry[],
   options: ImportOptions,
   importId: number,
@@ -1697,27 +1677,21 @@ async function processBatchTransactionally(
         existingListing && options.updateExisting ? existingListing.id : null;
       const isUpdate = existingListingId !== null;
 
-      // Insert or update listing with transaction
-      const { data, error } = await adminSupabase.rpc(
-        "import_listing_transactionally",
-        {
-          listing_data: {
-            ...listingData,
-            import_id: importId,
-            user_id: userId,
-            existing_listing_id: existingListingId,
-            is_update: isUpdate,
-          } as unknown as Database["public"]["Functions"]["import_listing_transactionally"]["Args"]["listing_data"],
-          record_data: record,
-        },
+      // Insert or update listing with transaction - calls the same Postgres
+      // function directly, bypassing Supabase's RPC layer.
+      const listingDataArg = {
+        ...listingData,
+        import_id: importId,
+        user_id: userId,
+        existing_listing_id: existingListingId,
+        is_update: isUpdate,
+      };
+
+      const { rows: rpcRows } = await query(
+        `SELECT import_listing_transactionally($1::jsonb, $2::text[]) AS result`,
+        [JSON.stringify(listingDataArg), record],
       );
-
-      if (error) {
-        throw error;
-      }
-
-      // Cast RPC response to expected type
-      const rpcResult = data as
+      const rpcResult = rpcRows[0]?.result as
         | {
             status: "success" | "skipped" | "error";
             listing_id?: number;
@@ -1759,7 +1733,6 @@ async function processBatchTransactionally(
 
         if (shouldProcessDeals(meta)) {
           const dealSyncResult = await syncDealsForListing(
-            supabase,
             rpcResult.listing_id,
             meta,
             bankContext,
@@ -1772,7 +1745,6 @@ async function processBatchTransactionally(
 
         if (shouldProcessBranches(meta)) {
           const branchSyncResult = await syncBranchesForListing(
-            supabase,
             rpcResult.listing_id,
             meta,
           );
@@ -1796,7 +1768,7 @@ async function processBatchTransactionally(
         throw new Error(`RPC Error: ${rpcResult.error || "Unknown RPC error"}`);
       } else {
         // Handle unexpected response format
-        console.error(`Unexpected RPC response for row ${rowNumber}:`, data);
+        console.error(`Unexpected RPC response for row ${rowNumber}:`, rpcRows[0]);
         throw new Error("Unexpected response from import transaction");
       }
     } catch (error) {
@@ -2086,18 +2058,17 @@ function normalizeBankKey(value: string): string {
 }
 
 async function ensureBankLookupLoaded(
-  supabase: SupabaseClient<Database>,
   bankContext: BankLookupContext,
 ): Promise<void> {
   if (bankContext.loaded) {
     return;
   }
 
-  const { data: banks, error } = await supabase
-    .from("banks")
-    .select("id, name, code");
-
-  if (error) {
+  let banks;
+  try {
+    const result = await query(`SELECT id, name, code FROM banks`);
+    banks = result.rows;
+  } catch (error) {
     console.error("Failed to load banks for deals import:", error);
     bankContext.loaded = true;
     return;
@@ -2154,7 +2125,6 @@ function findBankIdForName(
 }
 
 async function syncDealsForListing(
-  supabase: SupabaseClient<Database>,
   listingId: number,
   meta: ListingRecordMeta,
   bankContext: BankLookupContext,
@@ -2165,7 +2135,7 @@ async function syncDealsForListing(
   const bankDeals = parseBankPromotions(meta.bankPromotions);
 
   if (bankDeals.length > 0) {
-    await ensureBankLookupLoaded(supabase, bankContext);
+    await ensureBankLookupLoaded(bankContext);
     for (const deal of bankDeals) {
       deal.bankId = findBankIdForName(bankContext, deal.bankName ?? null);
     }
@@ -2239,15 +2209,12 @@ async function syncDealsForListing(
     });
   }
 
-  const { error: deleteError } = await supabase
-    .from("deals")
-    .delete()
-    .eq("listing_id", listingId);
-
-  if (deleteError) {
+  try {
+    await query(`DELETE FROM deals WHERE listing_id = $1`, [listingId]);
+  } catch (deleteError) {
     return {
       success: false,
-      error: `Failed to reset deals for listing ${listingId}: ${deleteError.message}`,
+      error: `Failed to reset deals for listing ${listingId}: ${deleteError instanceof Error ? deleteError.message : "Unknown error"}`,
     };
   }
 
@@ -2255,12 +2222,40 @@ async function syncDealsForListing(
     return { success: true };
   }
 
-  const { error: insertError } = await supabase.from("deals").insert(payload);
+  try {
+    const valueRows: string[] = [];
+    const params: unknown[] = [];
+    for (const deal of payload) {
+      params.push(
+        deal.listing_id,
+        deal.title,
+        deal.description ?? null,
+        deal.deal_type,
+        deal.discount_value ?? null,
+        deal.bank_id ?? null,
+        deal.is_active,
+        deal.start_date ?? null,
+        deal.end_date ?? null,
+        deal.valid_card_variants ?? null,
+        deal.metadata ? JSON.stringify(deal.metadata) : null,
+      );
+      const base = params.length - 11;
+      valueRows.push(
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`,
+      );
+    }
 
-  if (insertError) {
+    await query(
+      `INSERT INTO deals (
+         listing_id, title, description, deal_type, discount_value, bank_id,
+         is_active, start_date, end_date, valid_card_variants, metadata
+       ) VALUES ${valueRows.join(", ")}`,
+      params,
+    );
+  } catch (insertError) {
     return {
       success: false,
-      error: `Failed to insert deals for listing ${listingId}: ${insertError.message}`,
+      error: `Failed to insert deals for listing ${listingId}: ${insertError instanceof Error ? insertError.message : "Unknown error"}`,
     };
   }
 
@@ -2407,7 +2402,6 @@ function parseBranchOpeningHoursJson(
 }
 
 async function syncBranchesForListing(
-  supabase: SupabaseClient<Database>,
   listingId: number,
   meta: ListingRecordMeta,
 ): Promise<{ success: boolean; error?: string }> {
@@ -2418,28 +2412,26 @@ async function syncBranchesForListing(
     return { success: true };
   }
 
-  const { error: clearHoursError } = await supabase
-    .from("opening_hours")
-    .delete()
-    .eq("listing_id", listingId)
-    .not("branch_id", "is", null);
-
-  if (clearHoursError) {
+  try {
+    await query(
+      `DELETE FROM opening_hours WHERE listing_id = $1 AND branch_id IS NOT NULL`,
+      [listingId],
+    );
+  } catch (clearHoursError) {
     return {
       success: false,
-      error: `Failed to reset branch opening hours for listing ${listingId}: ${clearHoursError.message}`,
+      error: `Failed to reset branch opening hours for listing ${listingId}: ${clearHoursError instanceof Error ? clearHoursError.message : "Unknown error"}`,
     };
   }
 
-  const { error: clearBranchesError } = await supabase
-    .from("listing_branches")
-    .delete()
-    .eq("listing_id", listingId);
-
-  if (clearBranchesError) {
+  try {
+    await query(`DELETE FROM listing_branches WHERE listing_id = $1`, [
+      listingId,
+    ]);
+  } catch (clearBranchesError) {
     return {
       success: false,
-      error: `Failed to reset branches for listing ${listingId}: ${clearBranchesError.message}`,
+      error: `Failed to reset branches for listing ${listingId}: ${clearBranchesError instanceof Error ? clearBranchesError.message : "Unknown error"}`,
     };
   }
 
@@ -2457,36 +2449,45 @@ async function syncBranchesForListing(
       primaryAssigned = true;
     }
 
-    const payload: Database["public"]["Tables"]["listing_branches"]["Insert"] = {
-      listing_id: listingId,
-      name: branch.name,
-      address: branch.address,
-      city: branch.city,
-      country: branch.country,
-      latitude: branch.latitude,
-      longitude: branch.longitude,
-      phone_number: branch.phone_number,
-      timings: branch.timings,
-      is_open_now: branch.is_open_now,
-      is_primary: isPrimary,
-      is_verified: branch.is_verified,
-      distance_from_center: branch.distance_from_center,
-      custom_attributes:
-        (branch.custom_attributes as Database["public"]["Tables"]["listing_branches"]["Insert"]["custom_attributes"]) ||
-        {},
-      peekaboo_branch_id: branch.peekaboo_branch_id,
-    };
-
-    const { data: insertedBranch, error: branchInsertError } = await supabase
-      .from("listing_branches")
-      .insert(payload)
-      .select("id, name, peekaboo_branch_id")
-      .single();
-
-    if (branchInsertError || !insertedBranch) {
+    let insertedBranch;
+    try {
+      const { rows } = await query(
+        `INSERT INTO listing_branches (
+           listing_id, name, address, city, country, latitude, longitude,
+           phone_number, timings, is_open_now, is_primary, is_verified,
+           distance_from_center, custom_attributes, peekaboo_branch_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING id, name, peekaboo_branch_id`,
+        [
+          listingId,
+          branch.name,
+          branch.address,
+          branch.city,
+          branch.country,
+          branch.latitude,
+          branch.longitude,
+          branch.phone_number,
+          branch.timings,
+          branch.is_open_now,
+          isPrimary,
+          branch.is_verified,
+          branch.distance_from_center,
+          JSON.stringify(branch.custom_attributes || {}),
+          branch.peekaboo_branch_id,
+        ],
+      );
+      insertedBranch = rows[0];
+    } catch (branchInsertError) {
       return {
         success: false,
-        error: `Failed to insert branch for listing ${listingId}: ${branchInsertError?.message || "unknown error"}`,
+        error: `Failed to insert branch for listing ${listingId}: ${branchInsertError instanceof Error ? branchInsertError.message : "unknown error"}`,
+      };
+    }
+
+    if (!insertedBranch) {
+      return {
+        success: false,
+        error: `Failed to insert branch for listing ${listingId}: unknown error`,
       };
     }
 
@@ -2500,7 +2501,14 @@ async function syncBranchesForListing(
     return { success: true };
   }
 
-  const openingHoursPayload: Database["public"]["Tables"]["opening_hours"]["Insert"][] = [];
+  const openingHoursPayload: Array<{
+    listing_id: number;
+    branch_id: number;
+    day_of_week: number;
+    open_time: string | null;
+    close_time: string | null;
+    is_closed: boolean;
+  }> = [];
 
   for (const branchHours of parsedBranchHours) {
     const resolvedBranchId =
@@ -2531,14 +2539,33 @@ async function syncBranchesForListing(
     return { success: true };
   }
 
-  const { error: insertHoursError } = await supabase
-    .from("opening_hours")
-    .insert(openingHoursPayload);
+  try {
+    const valueRows: string[] = [];
+    const params: unknown[] = [];
+    for (const row of openingHoursPayload) {
+      params.push(
+        row.listing_id,
+        row.branch_id,
+        row.day_of_week,
+        row.open_time,
+        row.close_time,
+        row.is_closed,
+      );
+      const base = params.length - 6;
+      valueRows.push(
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`,
+      );
+    }
 
-  if (insertHoursError) {
+    await query(
+      `INSERT INTO opening_hours (listing_id, branch_id, day_of_week, open_time, close_time, is_closed)
+       VALUES ${valueRows.join(", ")}`,
+      params,
+    );
+  } catch (insertHoursError) {
     return {
       success: false,
-      error: `Failed to insert branch hours for listing ${listingId}: ${insertHoursError.message}`,
+      error: `Failed to insert branch hours for listing ${listingId}: ${insertHoursError instanceof Error ? insertHoursError.message : "Unknown error"}`,
     };
   }
 

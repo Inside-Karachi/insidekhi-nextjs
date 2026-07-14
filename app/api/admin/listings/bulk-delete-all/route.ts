@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { deleteFile } from "@/lib/storage/spaces";
 
 /**
  * SUPER ADMIN ONLY: Bulk delete ALL listings
@@ -13,22 +15,18 @@ import { createServerSupabase } from "@/lib/supabase/server";
 export async function DELETE(request: NextRequest) {
   try {
     // Authenticate user
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check if user is super admin
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
     if (!profile || profile.role !== "super_admin") {
       return NextResponse.json(
@@ -37,21 +35,17 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Use service role client to bypass RLS
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     // Get count of listings before deletion
-    const { count: initialCount } = await adminSupabase
-      .from("listings")
-      .select("*", { count: "exact", head: true });
+    const { rows: initialCountRows } = await query(
+      `SELECT COUNT(*) FROM listings`,
+    );
+    const initialCount = parseInt(initialCountRows[0].count, 10);
 
     // CRITICAL: Delete all images from storage FIRST
     console.log(
       "[BULK DELETE ALL] Fetching all listing images from storage...",
     );
-    const { data: allImages } = await adminSupabase
-      .from("listing_images")
-      .select("url");
+    const { rows: allImages } = await query(`SELECT url FROM listing_images`);
 
     if (allImages && allImages.length > 0) {
       const storageFilesToDelete: string[] = [];
@@ -70,25 +64,37 @@ export async function DELETE(request: NextRequest) {
         console.log(
           `[BULK DELETE ALL] Deleting ${storageFilesToDelete.length} images from storage...`,
         );
-        const { error: storageError } = await adminSupabase.storage
-          .from("listing-images")
-          .remove(storageFilesToDelete);
-
-        if (storageError) {
-          console.error(
-            "[BULK DELETE ALL] Storage deletion failed:",
-            storageError,
-          );
-        } else {
+        let storageFailures = 0;
+        for (const path of storageFilesToDelete) {
+          try {
+            await deleteFile(path, "listing-images");
+          } catch (storageError) {
+            storageFailures += 1;
+            console.error(
+              "[BULK DELETE ALL] Failed to delete storage file:",
+              path,
+              storageError,
+            );
+          }
+        }
+        if (storageFailures === 0) {
           console.log(
             `[BULK DELETE ALL] Successfully deleted ${storageFilesToDelete.length} images`,
+          );
+        } else {
+          console.error(
+            `[BULK DELETE ALL] Storage deletion had ${storageFailures} failure(s)`,
           );
         }
       }
     }
 
     // Delete all related data in correct order (foreign key dependencies)
-    const deletionSteps = [
+    const deletionSteps: Array<{
+      table: string;
+      filter: string | null;
+      name: string;
+    }> = [
       { table: "events", filter: "listing_id", name: "Events" },
       { table: "reviews", filter: "listing_id", name: "Reviews" },
       { table: "favorite_listings", filter: null, name: "Favorites" },
@@ -101,71 +107,60 @@ export async function DELETE(request: NextRequest) {
       { table: "venues", filter: "listing_id", name: "Venues" },
     ];
 
+    // Table/column names below come only from the fixed deletionSteps list
+    // above (not user input), so building SQL from them is safe.
     const deletionResults: Record<string, number> = {};
 
-    // Delete related data
     for (const step of deletionSteps) {
       try {
-        // Use type assertion since we're dynamically accessing tables
-        const { error, count } = await (step.filter
-          ? (
-              adminSupabase.from as (
-                table: string,
-              ) => ReturnType<typeof adminSupabase.from>
-            )(step.table)
-              .delete()
-              .not(step.filter, "is", null)
-          : (
-              adminSupabase.from as (
-                table: string,
-              ) => ReturnType<typeof adminSupabase.from>
-            )(step.table)
-              .delete()
-              .neq("id", 0));
-
-        if (error) {
-          console.error(`Error deleting ${step.name}:`, error);
-          throw new Error(`Failed to delete ${step.name}: ${error.message}`);
-        }
-
-        deletionResults[step.name] = count || 0;
+        const sql = step.filter
+          ? `DELETE FROM ${step.table} WHERE ${step.filter} IS NOT NULL`
+          : `DELETE FROM ${step.table}`;
+        const result = await query(sql);
+        deletionResults[step.name] = result.rowCount || 0;
       } catch (error) {
         console.error(`Failed to delete ${step.name}:`, error);
-        throw error;
+        throw new Error(
+          `Failed to delete ${step.name}: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
       }
     }
 
     // Finally, delete all listings
-    const { error: listingsError, count: listingsDeleted } = await adminSupabase
-      .from("listings")
-      .delete()
-      .neq("id", 0); // Delete all (id != 0 means all)
-
-    if (listingsError) {
-      console.error("Error deleting listings:", listingsError);
-      throw new Error(`Failed to delete listings: ${listingsError.message}`);
+    let listingsDeleted: number;
+    try {
+      const result = await query(`DELETE FROM listings`);
+      listingsDeleted = result.rowCount || 0;
+    } catch (error) {
+      console.error("Error deleting listings:", error);
+      throw new Error(
+        `Failed to delete listings: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
     }
 
-    deletionResults["Listings"] = listingsDeleted || 0;
+    deletionResults["Listings"] = listingsDeleted;
 
     // Log the super admin action
     try {
-      await adminSupabase.from("audit_logs").insert({
-        user_id: user.id,
-        action: "bulk_delete_all_listings",
-        entity_type: "listings",
-        entity_id: "all",
-        details: {
-          initial_count: initialCount,
-          deleted_count: listingsDeleted,
-          related_deletions: deletionResults,
-        },
-        ip_address:
+      await query(
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address, user_agent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          session.userId,
+          "bulk_delete_all_listings",
+          "listings",
+          "all",
+          JSON.stringify({
+            initial_count: initialCount,
+            deleted_count: listingsDeleted,
+            related_deletions: deletionResults,
+          }),
           request.headers.get("x-forwarded-for") ||
-          request.headers.get("x-real-ip") ||
-          "unknown",
-        user_agent: request.headers.get("user-agent") || undefined,
-      });
+            request.headers.get("x-real-ip") ||
+            "unknown",
+          request.headers.get("user-agent") || undefined,
+        ],
+      );
     } catch (logError) {
       console.error("Failed to log bulk deletion:", logError);
       // Don't fail the operation if logging fails

@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  createServerSupabase,
-  getSupabaseClientForRole,
-} from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 /**
  * GET ALL LISTING IDS (for bulk selection across pages)
@@ -14,25 +12,20 @@ import {
  */
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check user role
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
 
@@ -40,43 +33,46 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
-
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search") || "";
     const status = searchParams.get("status") || "";
     const categoryId = searchParams.get("category_id") || "";
 
-    // Build query to get only IDs
-    let query = adminSupabase.from("listings").select("id", { count: "exact" });
+    // Build query to get only IDs, applying same filters as main listing endpoint
+    const whereClauses: string[] = [];
+    const params: unknown[] = [];
 
-    // Apply same filters as main listing endpoint
     if (search) {
-      query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
+      params.push(`%${search}%`);
+      whereClauses.push(
+        `(name ILIKE $${params.length} OR description ILIKE $${params.length})`,
+      );
     }
 
     if (status && status !== "all") {
-      query = query.eq(
-        "status",
-        status as
-          | "draft"
-          | "published"
-          | "archived"
-          | "pending_approval"
-          | "rejected",
-      );
+      params.push(status);
+      whereClauses.push(`status = $${params.length}`);
     }
 
     if (categoryId && categoryId !== "all") {
       const categoryIdNum = parseInt(categoryId);
       if (!isNaN(categoryIdNum)) {
-        query = query.eq("category_id", categoryIdNum);
+        params.push(categoryIdNum);
+        whereClauses.push(`category_id = $${params.length}`);
       }
     }
 
-    const { data: listings, error, count } = await query;
+    const whereSql =
+      whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
-    if (error) {
+    let listings;
+    try {
+      const result = await query(
+        `SELECT id FROM listings ${whereSql}`,
+        params,
+      );
+      listings = result.rows;
+    } catch (error) {
       console.error("Error fetching listing IDs:", error);
       return NextResponse.json(
         { error: "Failed to fetch listing IDs" },
@@ -84,13 +80,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const ids = (listings || []).map((l) => l.id);
+    const ids = listings.map((l) => l.id);
 
     return NextResponse.json({
       success: true,
       data: {
         ids,
-        count: count || 0,
+        count: ids.length,
       },
     });
   } catch (error) {

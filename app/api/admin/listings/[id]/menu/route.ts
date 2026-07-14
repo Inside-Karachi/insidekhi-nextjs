@@ -3,6 +3,7 @@ import {
   assertListingRouteAccess,
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
+import { query } from "@/lib/db";
 
 export async function GET(
   request: NextRequest,
@@ -18,33 +19,41 @@ export async function GET(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     // Get menu sections with items
-    const { data: menuSections, error } = await supabase
-      .from("menu_sections")
-      .select(
-        `
-        *,
-        menu_items (
-          *,
-          id,
-          name,
-          description,
-          price,
-          is_available,
-          display_order
-        )
-      `
-      )
-      .eq("listing_id", listingId)
-      .order("display_order", { ascending: true });
+    let menuSections;
+    try {
+      const { rows: sections } = await query(
+        `SELECT * FROM menu_sections WHERE listing_id = $1 ORDER BY display_order ASC`,
+        [listingId],
+      );
 
-    if (error) {
+      const sectionIds = sections.map((s) => s.id);
+      const { rows: items } =
+        sectionIds.length > 0
+          ? await query(
+              `SELECT id, section_id, name, description, price, is_available, display_order
+               FROM menu_items WHERE section_id = ANY($1::int[])`,
+              [sectionIds],
+            )
+          : { rows: [] };
+
+      const itemsBySectionId = new Map<number, typeof items>();
+      for (const item of items) {
+        const existing = itemsBySectionId.get(item.section_id) || [];
+        existing.push(item);
+        itemsBySectionId.set(item.section_id, existing);
+      }
+
+      menuSections = sections.map((section) => ({
+        ...section,
+        menu_items: itemsBySectionId.get(section.id) || [],
+      }));
+    } catch (error) {
       console.error("Error fetching menu:", error);
       return NextResponse.json(
         { error: "Failed to fetch menu" },
@@ -82,11 +91,10 @@ export async function POST(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     const body = await request.json();
     const { name, description, display_order = 0 } = body;
@@ -99,14 +107,14 @@ export async function POST(
     }
 
     // Check for duplicate section name in the same listing
-    const { data: existingSection, error: checkError } = await supabase
-      .from("menu_sections")
-      .select("id")
-      .eq("listing_id", listingId)
-      .eq("name", name.trim())
-      .single();
-
-    if (checkError && checkError.code !== "PGRST116") {
+    let existingSection;
+    try {
+      const { rows } = await query(
+        `SELECT id FROM menu_sections WHERE listing_id = $1 AND name = $2`,
+        [listingId, name.trim()],
+      );
+      existingSection = rows[0];
+    } catch (checkError) {
       console.error("Error checking for duplicate section:", checkError);
       return NextResponse.json(
         { error: "Failed to validate section" },
@@ -122,18 +130,16 @@ export async function POST(
     }
 
     // Create menu section
-    const { data: section, error } = await supabase
-      .from("menu_sections")
-      .insert({
-        listing_id: listingId,
-        name: name.trim(),
-        description: description?.trim() || null,
-        display_order,
-      })
-      .select()
-      .single();
-
-    if (error) {
+    let section;
+    try {
+      const { rows } = await query(
+        `INSERT INTO menu_sections (listing_id, name, description, display_order)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [listingId, name.trim(), description?.trim() || null, display_order],
+      );
+      section = rows[0];
+    } catch (error) {
       console.error("Error creating menu section:", error);
       return NextResponse.json(
         { error: "Failed to create menu section" },

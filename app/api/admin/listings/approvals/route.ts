@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { createNotification } from "@/lib/notifications/service";
 import type { Database } from "@/types/supabase";
 
@@ -8,32 +9,28 @@ export const dynamic = "force-dynamic";
 // GET - Get pending listings for approval
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
 
     const status = searchParams.get("status") || "pending_approval";
     const page = parseInt(searchParams.get("page") || "1", 10);
     const limit = parseInt(searchParams.get("limit") || "20", 10);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
       );
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
@@ -47,31 +44,31 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    let query = supabase
-      .from("listings")
-      .select(
-        `
-        *,
-        categories(id, name, icon_name),
-        profiles:owner_id(id, full_name)
-      `,
-        { count: "exact" },
-      )
-      .order("created_at", { ascending: false });
-
+    const whereParams: unknown[] = [];
+    let whereSql = "";
     if (status && status !== "all") {
-      query = query.eq(
-        "status",
-        status as Database["public"]["Enums"]["listing_status"],
-      );
+      whereParams.push(status);
+      whereSql = `WHERE status = $${whereParams.length}`;
     }
 
-    const offset = (page - 1) * limit;
-    query = query.range(offset, offset + limit - 1);
+    let listings, count;
+    try {
+      const countResult = await query(
+        `SELECT COUNT(*) FROM listings ${whereSql}`,
+        whereParams,
+      );
+      count = parseInt(countResult.rows[0].count, 10);
 
-    const { data: listings, error, count } = await query;
-
-    if (error) {
+      const offset = (page - 1) * limit;
+      const listParams = [...whereParams, limit, offset];
+      const listingsResult = await query(
+        `SELECT * FROM listings ${whereSql}
+         ORDER BY created_at DESC
+         LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+        listParams,
+      );
+      listings = listingsResult.rows;
+    } catch (error) {
       console.error("Error fetching listings for approval:", error);
       return NextResponse.json(
         { success: false, error: "Failed to fetch listings" },
@@ -79,7 +76,31 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const listingIds = (listings || []).map((listing) => listing.id);
+    const listingIds = listings.map((listing) => listing.id);
+    const categoryIds = [
+      ...new Set(listings.map((l) => l.category_id).filter((id) => id != null)),
+    ];
+    const ownerIds = [
+      ...new Set(listings.map((l) => l.owner_id).filter((id) => id != null)),
+    ];
+
+    const [categoriesResult, ownersResult] = await Promise.all([
+      categoryIds.length > 0
+        ? query(
+            `SELECT id, name, icon_name FROM categories WHERE id = ANY($1::int[])`,
+            [categoryIds],
+          )
+        : { rows: [] },
+      ownerIds.length > 0
+        ? query(
+            `SELECT id, full_name FROM profiles WHERE id = ANY($1::uuid[])`,
+            [ownerIds],
+          )
+        : { rows: [] },
+    ]);
+
+    const categoryById = new Map(categoriesResult.rows.map((c) => [c.id, c]));
+    const ownerById = new Map(ownersResult.rows.map((o) => [o.id, o]));
 
     const isDeletionRequest = (request: {
       change_type: string;
@@ -105,26 +126,20 @@ export async function GET(request: NextRequest) {
       return false;
     };
 
-    const { data: pendingDeleteRequests } =
+    const pendingDeleteRequests =
       listingIds.length > 0
-        ? await supabase
-            .from("listing_change_requests")
-            .select("id, listing_id, change_type, reason, created_at, proposed_data")
-            .eq("status", "pending")
-            .in("listing_id", listingIds)
-        : {
-            data: [] as Array<{
-              id: number;
-              listing_id: number;
-              change_type: string;
-              reason: string | null;
-              created_at: string;
-              proposed_data: unknown;
-            }>,
-          };
+        ? (
+            await query(
+              `SELECT id, listing_id, change_type, reason, created_at, proposed_data
+               FROM listing_change_requests
+               WHERE status = 'pending' AND listing_id = ANY($1::int[])`,
+              [listingIds],
+            )
+          ).rows
+        : [];
 
     const deleteRequestByListingId = new Map(
-      (pendingDeleteRequests || [])
+      pendingDeleteRequests
         .filter(isDeletionRequest)
         .map((request) => [
           request.listing_id,
@@ -137,29 +152,19 @@ export async function GET(request: NextRequest) {
         ]),
     );
 
-    const listingsWithRequestContext = (listings || []).map((listing) => ({
+    const listingsWithRequestContext = listings.map((listing) => ({
       ...listing,
+      categories: categoryById.get(listing.category_id) || null,
+      profiles: ownerById.get(listing.owner_id) || null,
       deletion_request: deleteRequestByListingId.get(listing.id) || null,
     }));
 
     const [draftResult, pendingResult, publishedResult, rejectedResult] =
       await Promise.all([
-        supabase
-          .from("listings")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "draft"),
-        supabase
-          .from("listings")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "pending_approval"),
-        supabase
-          .from("listings")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "published"),
-        supabase
-          .from("listings")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "rejected"),
+        query(`SELECT COUNT(*) FROM listings WHERE status = 'draft'`),
+        query(`SELECT COUNT(*) FROM listings WHERE status = 'pending_approval'`),
+        query(`SELECT COUNT(*) FROM listings WHERE status = 'published'`),
+        query(`SELECT COUNT(*) FROM listings WHERE status = 'rejected'`),
       ]);
 
     const totalPages = Math.ceil((count || 0) / limit);
@@ -176,10 +181,10 @@ export async function GET(request: NextRequest) {
           hasNext: page < totalPages,
           hasPrev: page > 1,
         },
-        draftCount: draftResult.count || 0,
-        pendingCount: pendingResult.count || 0,
-        publishedCount: publishedResult.count || 0,
-        rejectedCount: rejectedResult.count || 0,
+        draftCount: parseInt(draftResult.rows[0].count, 10) || 0,
+        pendingCount: parseInt(pendingResult.rows[0].count, 10) || 0,
+        publishedCount: parseInt(publishedResult.rows[0].count, 10) || 0,
+        rejectedCount: parseInt(rejectedResult.rows[0].count, 10) || 0,
       },
     });
   } catch (error) {
@@ -194,27 +199,22 @@ export async function GET(request: NextRequest) {
 // POST - Approve or reject a listing
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
       );
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
@@ -260,13 +260,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: listing, error: fetchError } = await supabase
-      .from("listings")
-      .select("id, name, status, owner_id")
-      .eq("id", listing_id)
-      .single();
+    const { rows: listingRows } = await query(
+      `SELECT id, name, status, owner_id FROM listings WHERE id = $1`,
+      [listing_id],
+    );
+    const listing = listingRows[0];
 
-    if (fetchError || !listing) {
+    if (!listing) {
       return NextResponse.json(
         { success: false, error: "Listing not found" },
         { status: 404 },
@@ -283,23 +283,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: pendingRequest, error: pendingDeleteRequestError } =
-      await supabase
-        .from("listing_change_requests")
-        .select("id, change_type, proposed_data")
-        .eq("listing_id", listing_id)
-        .eq("status", "pending")
-        .maybeSingle();
-
-    if (pendingDeleteRequestError) {
+    let pendingRequest;
+    try {
+      const result = await query(
+        `SELECT id, change_type, proposed_data
+         FROM listing_change_requests
+         WHERE listing_id = $1 AND status = 'pending'
+         LIMIT 1`,
+        [listing_id],
+      );
+      pendingRequest = result.rows[0] || null;
+    } catch (pendingDeleteRequestError) {
       console.error(
         "[POST /api/admin/listings/approvals] Failed to load pending delete request",
         {
           listingId: listing_id,
-          message: pendingDeleteRequestError.message,
-          details: pendingDeleteRequestError.details,
-          hint: pendingDeleteRequestError.hint,
-          code: pendingDeleteRequestError.code,
+          message:
+            pendingDeleteRequestError instanceof Error
+              ? pendingDeleteRequestError.message
+              : "Unknown error",
         },
       );
       return NextResponse.json(
@@ -349,24 +351,23 @@ export async function POST(request: NextRequest) {
           ? "published"
           : "rejected";
 
-    const approvalPayload: Record<string, unknown> = {
-      status: newStatus,
-      reviewed_at: new Date().toISOString(),
-      reviewed_by: user.id,
-      review_notes: review_notes || null,
-      updated_at: new Date().toISOString(),
-    };
+    const reviewedAt = new Date().toISOString();
+    const updatedAt = new Date().toISOString();
 
-    let { error: updateError } = await supabase
-      .from("listings")
-      .update(approvalPayload)
-      .eq("id", listing_id);
+    let updateError: (Error & { code?: string }) | null = null;
+    try {
+      await query(
+        `UPDATE listings
+         SET status = $1, reviewed_at = $2, reviewed_by = $3, review_notes = $4, updated_at = $5
+         WHERE id = $6`,
+        [newStatus, reviewedAt, session.userId, review_notes || null, updatedAt, listing_id],
+      );
+    } catch (error) {
+      updateError = error as Error & { code?: string };
+    }
 
     // Backward-compatible retry until review metadata columns are migrated.
-    if (
-      updateError?.code === "PGRST204" &&
-      updateError.message.includes("column of 'listings'")
-    ) {
+    if (updateError?.code === "42703") {
       console.warn(
         "[POST /api/admin/listings/approvals] Review metadata columns missing; retrying with status-only payload",
         {
@@ -376,17 +377,15 @@ export async function POST(request: NextRequest) {
         },
       );
 
-      const fallbackPayload = {
-        status: newStatus as Database["public"]["Enums"]["listing_status"],
-        updated_at: new Date().toISOString(),
-      };
-
-      const fallbackResult = await supabase
-        .from("listings")
-        .update(fallbackPayload)
-        .eq("id", listing_id);
-
-      updateError = fallbackResult.error;
+      try {
+        await query(
+          `UPDATE listings SET status = $1, updated_at = $2 WHERE id = $3`,
+          [newStatus, updatedAt, listing_id],
+        );
+        updateError = null;
+      } catch (fallbackError) {
+        updateError = fallbackError as Error & { code?: string };
+      }
     }
 
     if (updateError) {
@@ -394,8 +393,6 @@ export async function POST(request: NextRequest) {
         listingId: listing_id,
         action,
         message: updateError.message,
-        details: updateError.details,
-        hint: updateError.hint,
         code: updateError.code,
       });
       return NextResponse.json(
@@ -405,28 +402,30 @@ export async function POST(request: NextRequest) {
     }
 
     if (pendingRequest && isDeleteRequest) {
-      const { error: changeRequestUpdateError } = await supabase
-        .from("listing_change_requests")
-        .update({
-          status: action === "approve" ? "approved" : "rejected",
-          reviewed_by: user.id,
-          reviewed_at: new Date().toISOString(),
-          review_notes: review_notes || null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", pendingRequest.id)
-        .eq("status", "pending");
-
-      if (changeRequestUpdateError) {
+      try {
+        await query(
+          `UPDATE listing_change_requests
+           SET status = $1, reviewed_by = $2, reviewed_at = $3, review_notes = $4, updated_at = $5
+           WHERE id = $6 AND status = 'pending'`,
+          [
+            action === "approve" ? "approved" : "rejected",
+            session.userId,
+            new Date().toISOString(),
+            review_notes || null,
+            new Date().toISOString(),
+            pendingRequest.id,
+          ],
+        );
+      } catch (changeRequestUpdateError) {
         console.error(
           "[POST /api/admin/listings/approvals] Failed to finalize delete change request",
           {
             listingId: listing_id,
             changeRequestId: pendingRequest.id,
-            message: changeRequestUpdateError.message,
-            details: changeRequestUpdateError.details,
-            hint: changeRequestUpdateError.hint,
-            code: changeRequestUpdateError.code,
+            message:
+              changeRequestUpdateError instanceof Error
+                ? changeRequestUpdateError.message
+                : "Unknown error",
           },
         );
       }
@@ -476,7 +475,7 @@ export async function POST(request: NextRequest) {
         action: "listing_updated",
         entity_type: "listing",
         entity_id: listing_id.toString(),
-        admin_id: user.id,
+        admin_id: session.userId,
         new_values: {
           status: newStatus,
           review_notes: review_notes || "No notes provided",

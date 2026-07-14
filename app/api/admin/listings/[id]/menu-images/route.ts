@@ -3,12 +3,16 @@ import {
   assertListingRouteAccess,
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
+import { query } from "@/lib/db";
+import { listFiles, getPublicUrl, deleteFile } from "@/lib/storage/spaces";
+
+const MENU_IMAGES_BUCKET = "listing-images";
 
 /**
  * GET /api/admin/listings/[id]/menu-images
- * Fetches menu images from both:
- * 1. listing_images table (filtered by custom_attributes.peekaboo_type = 'menu')
- * 2. Storage bucket peekaboo/{listingId}/menu/ folder (for scraped images)
+ * Fetches menu images from storage:
+ * 1. peekaboo/{peekaboo_id}/menu/ folder (for scraped listings)
+ * 2. {listing_id}/menu/ folder (for manually created listings)
  */
 export async function GET(
   request: NextRequest,
@@ -25,20 +29,19 @@ export async function GET(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     // Fetch the listing to get peekaboo_id
-    const { data: listing, error: listingError } = await adminSupabase
-      .from("listings")
-      .select("peekaboo_id")
-      .eq("id", listingId)
-      .single();
+    const { rows: listingRows } = await query(
+      `SELECT peekaboo_id FROM listings WHERE id = $1`,
+      [listingId],
+    );
+    const listing = listingRows[0];
 
-    if (listingError || !listing) {
+    if (!listing) {
       return NextResponse.json({ error: "Listing not found" }, { status: 404 });
     }
 
@@ -60,60 +63,42 @@ export async function GET(
     // Path 1: Check peekaboo folder (for scraped listings)
     if (listing.peekaboo_id) {
       const peekabooPath = `peekaboo/${listing.peekaboo_id}/menu`;
-      const { data: peekabooFiles } = await adminSupabase.storage
-        .from("listing-images")
-        .list(peekabooPath);
+      const peekabooFiles = await listFiles(peekabooPath, MENU_IMAGES_BUCKET);
 
-      if (peekabooFiles && peekabooFiles.length > 0) {
-        const peekabooImages = peekabooFiles
-          .filter((file) => file.name && !file.name.startsWith("."))
-          .map((file) => {
-            const { data } = adminSupabase.storage
-              .from("listing-images")
-              .getPublicUrl(`${peekabooPath}/${file.name}`);
+      const peekabooImages = peekabooFiles
+        .map((key) => key.split("/").pop() ?? "")
+        .filter((name) => name && !name.startsWith("."))
+        .map((name) => ({
+          id: -1 * ++imageIndex,
+          listing_id: listingId,
+          url: getPublicUrl(`${peekabooPath}/${name}`, MENU_IMAGES_BUCKET),
+          alt_text: "Menu image",
+          display_order: imageIndex - 1,
+          created_at: new Date().toISOString(),
+          source: "storage" as const,
+        }));
 
-            return {
-              id: -1 * ++imageIndex,
-              listing_id: listingId,
-              url: data.publicUrl,
-              alt_text: "Menu image",
-              display_order: imageIndex - 1,
-              created_at: file.created_at || new Date().toISOString(),
-              source: "storage" as const,
-            };
-          });
-
-        allMenuImages.push(...peekabooImages);
-      }
+      allMenuImages.push(...peekabooImages);
     }
 
     // Path 2: Check manual upload folder (for manually created listings)
     const manualPath = `${listingId}/menu`;
-    const { data: manualFiles } = await adminSupabase.storage
-      .from("listing-images")
-      .list(manualPath);
+    const manualFiles = await listFiles(manualPath, MENU_IMAGES_BUCKET);
 
-    if (manualFiles && manualFiles.length > 0) {
-      const manualImages = manualFiles
-        .filter((file) => file.name && !file.name.startsWith("."))
-        .map((file) => {
-          const { data } = adminSupabase.storage
-            .from("listing-images")
-            .getPublicUrl(`${manualPath}/${file.name}`);
+    const manualImages = manualFiles
+      .map((key) => key.split("/").pop() ?? "")
+      .filter((name) => name && !name.startsWith("."))
+      .map((name) => ({
+        id: -1 * ++imageIndex,
+        listing_id: listingId,
+        url: getPublicUrl(`${manualPath}/${name}`, MENU_IMAGES_BUCKET),
+        alt_text: "Menu image",
+        display_order: imageIndex - 1,
+        created_at: new Date().toISOString(),
+        source: "storage" as const,
+      }));
 
-          return {
-            id: -1 * ++imageIndex,
-            listing_id: listingId,
-            url: data.publicUrl,
-            alt_text: "Menu image",
-            display_order: imageIndex - 1,
-            created_at: file.created_at || new Date().toISOString(),
-            source: "storage" as const,
-          };
-        });
-
-      allMenuImages.push(...manualImages);
-    }
+    allMenuImages.push(...manualImages);
 
     return NextResponse.json({
       success: true,
@@ -134,7 +119,7 @@ export async function GET(
 
 /**
  * DELETE /api/admin/listings/[id]/menu-images
- * Deletes a menu image from both storage and database
+ * Deletes a menu image from storage
  */
 export async function DELETE(
   request: NextRequest,
@@ -151,11 +136,10 @@ export async function DELETE(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     const { imageUrl } = await request.json();
 
@@ -166,10 +150,10 @@ export async function DELETE(
       );
     }
 
-    // Menu images are stored in storage only, not in database
-    // Extract storage path from URL
+    // Menu images are stored in storage only, not in database.
+    // Extract the storage key from the CDN/public URL.
     const urlMatch = imageUrl.match(
-      /\/storage\/v1\/object\/public\/listing-images\/(.+)$/,
+      /digitaloceanspaces\.com\/(.+)$/,
     );
 
     if (!urlMatch) {
@@ -181,12 +165,10 @@ export async function DELETE(
 
     const storagePath = decodeURIComponent(urlMatch[1]);
 
-    const { error: storageDeleteError } = await adminSupabase.storage
-      .from("listing-images")
-      .remove([storagePath]);
-
-    if (storageDeleteError) {
-      console.error("[MENU IMAGES] Storage delete error:", storageDeleteError);
+    try {
+      await deleteFile(storagePath, MENU_IMAGES_BUCKET);
+    } catch (storageError) {
+      console.error("[MENU IMAGES] Storage delete error:", storageError);
       return NextResponse.json(
         { error: "Failed to delete image from storage" },
         { status: 500 },

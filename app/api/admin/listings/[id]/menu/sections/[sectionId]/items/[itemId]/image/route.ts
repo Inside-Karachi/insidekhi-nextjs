@@ -3,7 +3,8 @@ import {
   assertListingRouteAccess,
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { uploadFile, deleteFile } from "@/lib/storage/spaces";
 
 export async function POST(
   request: NextRequest,
@@ -30,27 +31,22 @@ export async function POST(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     // Verify the menu item belongs to the listing and section
-    const { data: menuItem, error: itemError } = await adminSupabase
-      .from("menu_items")
-      .select(
-        `
-        id,
-        section_id,
-        menu_sections!inner(listing_id)
-      `,
-      )
-      .eq("id", itemIdNum)
-      .eq("section_id", sectionIdNum)
-      .single();
+    const { rows: menuItemRows } = await query(
+      `SELECT mi.id, mi.section_id
+       FROM menu_items mi
+       JOIN menu_sections ms ON ms.id = mi.section_id
+       WHERE mi.id = $1 AND mi.section_id = $2 AND ms.listing_id = $3`,
+      [itemIdNum, sectionIdNum, listingId],
+    );
+    const menuItem = menuItemRows[0];
 
-    if (itemError || !menuItem) {
+    if (!menuItem) {
       return NextResponse.json(
         { error: "Menu item not found or access denied" },
         { status: 404 },
@@ -172,15 +168,16 @@ export async function POST(
     const fileExt = processedFile.name.split(".").pop() || "jpg";
     const fileName = `listing-${listingId}/menu-item-${itemIdNum}-${Date.now()}.${fileExt}`;
 
-    // Upload to Supabase Storage
-    const { error: uploadError } = await adminSupabase.storage
-      .from("menu-item-images")
-      .upload(fileName, processedFile, {
-        cacheControl: "3600",
-        upsert: false,
+    // Upload to DigitalOcean Spaces
+    let publicUrl;
+    try {
+      const buffer = Buffer.from(await processedFile.arrayBuffer());
+      const uploadResult = await uploadFile(fileName, buffer, {
+        bucket: "menu-item-images",
+        contentType: processedFile.type || "application/octet-stream",
       });
-
-    if (uploadError) {
+      publicUrl = uploadResult.publicUrl;
+    } catch (uploadError) {
       console.error("Upload error:", uploadError);
       return NextResponse.json(
         { error: "Failed to upload image" },
@@ -188,38 +185,18 @@ export async function POST(
       );
     }
 
-    // Get public URL
-    const { data: urlData } = adminSupabase.storage
-      .from("menu-item-images")
-      .getPublicUrl(fileName);
-
-    if (!urlData.publicUrl) {
-      return NextResponse.json(
-        { error: "Failed to generate public URL" },
-        { status: 500 },
-      );
-    }
-
     // Update menu item with image URL and alt text
-    const { data: updatedItem, error: updateError } = await adminSupabase
-      .from("menu_items")
-      .update({
-        image_url: urlData.publicUrl,
-        image_alt: alt?.trim() || null,
-      })
-      .eq("id", itemIdNum)
-      .select()
-      .single();
-
-    if (updateError) {
+    let updatedItem;
+    try {
+      const { rows } = await query(
+        `UPDATE menu_items SET image_url = $1, image_alt = $2 WHERE id = $3 RETURNING *`,
+        [publicUrl, alt?.trim() || null, itemIdNum],
+      );
+      updatedItem = rows[0];
+    } catch (updateError) {
       console.error("Update error:", updateError);
-      // Try to clean up uploaded file using service role
-      const serviceRoleClient = await createServerSupabase({
-        useServiceRole: true,
-      });
-      await serviceRoleClient.storage
-        .from("menu-item-images")
-        .remove([fileName]);
+      // Try to clean up uploaded file
+      await deleteFile(fileName, "menu-item-images");
 
       return NextResponse.json(
         { error: "Failed to update menu item" },
@@ -272,20 +249,23 @@ export async function DELETE(
       );
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     // Get current menu item to extract image URL for cleanup
-    const { data: menuItem, error: itemError } = await adminSupabase
-      .from("menu_items")
-      .select("image_url")
-      .eq("id", itemIdNum)
-      .single();
+    // (also verify the item belongs to this listing's section, per the fix above)
+    const { rows: menuItemRows } = await query(
+      `SELECT mi.image_url
+       FROM menu_items mi
+       JOIN menu_sections ms ON ms.id = mi.section_id
+       WHERE mi.id = $1 AND mi.section_id = $2 AND ms.listing_id = $3`,
+      [itemIdNum, sectionIdNum, listingId],
+    );
+    const menuItem = menuItemRows[0];
 
-    if (itemError || !menuItem) {
+    if (!menuItem) {
       return NextResponse.json(
         { error: "Menu item not found" },
         { status: 404 },
@@ -293,17 +273,14 @@ export async function DELETE(
     }
 
     // Update menu item to remove image
-    const { data: updatedItem, error: updateError } = await adminSupabase
-      .from("menu_items")
-      .update({
-        image_url: null,
-        image_alt: null,
-      })
-      .eq("id", itemIdNum)
-      .select()
-      .single();
-
-    if (updateError) {
+    let updatedItem;
+    try {
+      const { rows } = await query(
+        `UPDATE menu_items SET image_url = NULL, image_alt = NULL WHERE id = $1 RETURNING *`,
+        [itemIdNum],
+      );
+      updatedItem = rows[0];
+    } catch (updateError) {
       console.error("Update error:", updateError);
       return NextResponse.json(
         { error: "Failed to remove image" },
@@ -318,13 +295,7 @@ export async function DELETE(
         const urlParts = menuItem.image_url.split("/");
         const fileName = urlParts[urlParts.length - 1];
 
-        // Use service role client for storage deletion
-        const serviceRoleClient = await createServerSupabase({
-          useServiceRole: true,
-        });
-        await serviceRoleClient.storage
-          .from("menu-item-images")
-          .remove([fileName]);
+        await deleteFile(fileName, "menu-item-images");
       } catch (storageError) {
         console.warn("Failed to clean up storage file:", storageError);
         // Don't fail the request if cleanup fails

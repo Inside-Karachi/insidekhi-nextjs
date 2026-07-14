@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { deleteListing } from "@/lib/utils/listing-deletion";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 
@@ -38,29 +39,23 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check if user is admin or lister
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check admin or lister role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
     if (
-      profileError ||
-      (profile?.role !== "admin" &&
-        profile?.role !== "super_admin" &&
-        profile?.role !== "lister")
+      !profile ||
+      (profile.role !== "admin" &&
+        profile.role !== "super_admin" &&
+        profile.role !== "lister")
     ) {
       return NextResponse.json(
         { error: "Admin or lister access required" },
@@ -77,13 +72,14 @@ export async function GET(
       );
     }
 
-    const { data: listing, error } = await supabase
-      .from("listings_with_details")
-      .select("*")
-      .eq("id", listingId)
-      .single();
-
-    if (error) {
+    let listing;
+    try {
+      const result = await query(
+        `SELECT * FROM listings_with_details WHERE id = $1`,
+        [listingId],
+      );
+      listing = result.rows[0];
+    } catch (error) {
       console.error("Error fetching listing:", error);
       captureRouteError(error, { route: ROUTE, method: "GET" });
       return NextResponse.json(
@@ -97,13 +93,14 @@ export async function GET(
     }
 
     // Get listing images
-    const { data: images, error: imagesError } = await supabase
-      .from("listing_images")
-      .select("*")
-      .eq("listing_id", listingId)
-      .order("display_order", { ascending: true });
-
-    if (imagesError) {
+    let images;
+    try {
+      const result = await query(
+        `SELECT * FROM listing_images WHERE listing_id = $1 ORDER BY display_order ASC`,
+        [listingId],
+      );
+      images = result.rows;
+    } catch (imagesError) {
       console.error("Error fetching listing images:", imagesError);
       // Don't fail the request if images can't be fetched
     }
@@ -131,29 +128,23 @@ export async function PATCH(
 ) {
   const requestId = createRequestId();
   try {
-    const supabase = await createServerSupabase();
-
-    // Check if user is admin or lister
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check admin or lister role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
     if (
-      profileError ||
-      (profile?.role !== "admin" &&
-        profile?.role !== "super_admin" &&
-        profile?.role !== "lister")
+      !profile ||
+      (profile.role !== "admin" &&
+        profile.role !== "super_admin" &&
+        profile.role !== "lister")
     ) {
       return patchErrorResponse(
         requestId,
@@ -175,24 +166,25 @@ export async function PATCH(
     }
 
     const body = await request.json();
-    const { data: existingListing, error: fetchError } = await supabase
-      .from("listings")
-      .select("*")
-      .eq("id", listingId)
-      .single();
-
-    if (fetchError) {
+    let existingListing;
+    try {
+      const result = await query(`SELECT * FROM listings WHERE id = $1`, [
+        listingId,
+      ]);
+      existingListing = result.rows[0];
+    } catch (fetchError) {
+      const code =
+        fetchError && typeof fetchError === "object" && "code" in fetchError
+          ? (fetchError as { code?: string }).code
+          : undefined;
       console.error("Error fetching existing listing for update:", fetchError);
-      if (
-        fetchError.code === "42501" ||
-        fetchError.message?.includes("permission denied")
-      ) {
+      if (code === "42501") {
         return patchErrorResponse(
           requestId,
           403,
           "FORBIDDEN",
           "Permission denied while loading listing for update",
-          { dbCode: fetchError.code ?? null },
+          { dbCode: code ?? null },
         );
       }
       return patchErrorResponse(
@@ -200,7 +192,7 @@ export async function PATCH(
         500,
         "INTERNAL_ERROR",
         "Failed to load listing for update",
-        { dbCode: fetchError.code ?? null },
+        { dbCode: code ?? null },
       );
     }
 
@@ -320,21 +312,42 @@ export async function PATCH(
       );
     }
 
-    let query = supabase
-      .from("listings")
-      .update(updateData)
-      .eq("id", listingId);
+    // updateData's keys are a fixed, hardcoded set (built above), not
+    // user-controlled, so it's safe to use them as SQL column identifiers.
+    const updateKeys = Object.keys(updateData);
+    const setClauses = updateKeys.map((key, idx) => `"${key}" = $${idx + 1}`);
+    const updateValues: unknown[] = updateKeys.map(
+      (key) => updateData[key as keyof typeof updateData],
+    );
 
-    // Atomic CAS: only update if updated_at hasn't changed since the client loaded
+    let whereSql = `id = $${updateValues.length + 1}`;
+    updateValues.push(listingId);
+
+    // Atomic CAS: only update if updated_at hasn't changed since the client loaded.
+    // Compare truncated to milliseconds - the client only ever has millisecond
+    // precision (JS Date/JSON.stringify), while Postgres timestamptz can carry
+    // microsecond precision, so a raw equality check would always mismatch.
     if (hasOptimisticLock) {
-      query = query.eq("updated_at", body.expected_updated_at);
+      updateValues.push(body.expected_updated_at);
+      whereSql += ` AND date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $${updateValues.length}::timestamptz)`;
     }
 
-    const { data: listing, error } = await query.select().single();
-
-    if (error) {
+    let listing;
+    let updateErrorCode: string | undefined;
+    try {
+      const result = await query(
+        `UPDATE listings SET ${setClauses.join(", ")} WHERE ${whereSql} RETURNING *`,
+        updateValues,
+      );
+      listing = result.rows[0];
+    } catch (error) {
+      updateErrorCode =
+        error && typeof error === "object" && "code" in error
+          ? (error as { code?: string }).code
+          : undefined;
       console.error("Error updating listing:", error);
-      const isValidationError = error.code === "23503" || error.code === "22P02";
+      const isValidationError =
+        updateErrorCode === "23503" || updateErrorCode === "22P02";
       if (!isValidationError) {
         captureRouteError(error, { route: ROUTE, method: "PATCH" });
       }
@@ -344,7 +357,7 @@ export async function PATCH(
         isValidationError ? "VALIDATION_ERROR" : "UPDATE_FAILED",
         "Failed to update listing",
         {
-          dbCode: error.code ?? null,
+          dbCode: updateErrorCode ?? null,
         },
       );
     }
@@ -371,7 +384,7 @@ export async function PATCH(
     try {
       const { logListingUpdate } = await import("@/lib/audit");
       await logListingUpdate(
-        user.id,
+        session.userId,
         listingId.toString(),
         existingListing,
         listing,
@@ -403,29 +416,23 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check if user is admin or lister
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check admin or lister role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
     if (
-      profileError ||
-      (profile?.role !== "admin" &&
-        profile?.role !== "super_admin" &&
-        profile?.role !== "lister")
+      !profile ||
+      (profile.role !== "admin" &&
+        profile.role !== "super_admin" &&
+        profile.role !== "lister")
     ) {
       return NextResponse.json(
         { error: "Admin or lister access required" },
@@ -443,24 +450,19 @@ export async function DELETE(
     }
 
     // Get listing data before deletion for logging
-    const { data: listingToDelete, error: fetchError } = await supabase
-      .from("listings")
-      .select("*")
-      .eq("id", listingId)
-      .single();
+    const { rows: listingToDeleteRows } = await query(
+      `SELECT * FROM listings WHERE id = $1`,
+      [listingId],
+    );
+    const listingToDelete = listingToDeleteRows[0];
 
-    if (fetchError || !listingToDelete) {
-      console.error("Error fetching listing for deletion:", fetchError);
+    if (!listingToDelete) {
+      console.error("Error fetching listing for deletion: not found");
       return NextResponse.json({ error: "Listing not found" }, { status: 404 });
     }
 
-    // Use service role for storage operations
-    const serviceRoleClient = await createServerSupabase({
-      useServiceRole: true,
-    });
-
     // Use centralized deletion utility
-    const deletionResult = await deleteListing(serviceRoleClient, listingId);
+    const deletionResult = await deleteListing(listingId);
 
     if (!deletionResult.success) {
       const statusCode = deletionResult.error?.includes("change requests")
@@ -485,7 +487,7 @@ export async function DELETE(
     try {
       const { logListingDeletion } = await import("@/lib/audit");
       await logListingDeletion(
-        user.id,
+        session.userId,
         listingId.toString(),
         listingToDelete,
         request.headers.get("x-forwarded-for") ||

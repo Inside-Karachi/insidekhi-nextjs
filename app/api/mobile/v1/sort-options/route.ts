@@ -1,7 +1,7 @@
 import { type NextRequest } from "next/server";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
-import { createMobilePublicClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 
@@ -17,15 +17,18 @@ export const dynamic = "force-dynamic";
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
 
-  const supabase = createMobilePublicClient();
-  const { data, error } = await supabase
-    .from("sort_options")
-    .select("key, label, icon_name, is_default")
-    .eq("is_active", true)
-    .order("display_order", { ascending: true });
-
-  if (error) {
-    console.error("[mobile-api] sort-options query failed:", error.message);
+  let data;
+  try {
+    const { rows } = await query(
+      `SELECT key, label, icon_name, is_default FROM sort_options
+       WHERE is_active = true ORDER BY display_order ASC`,
+    );
+    data = rows;
+  } catch (error) {
+    console.error(
+      "[mobile-api] sort-options query failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError(
       "internal_error",
       "Failed to load sort options.",

@@ -1,22 +1,22 @@
 import { type NextRequest } from "next/server";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
-import { createMobilePublicClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePagination, buildPaginationMeta } from "@/lib/mobile/pagination";
 import { MobileApiError } from "@/lib/mobile/errors";
 import {
-  LISTING_CARD_COLUMNS,
   toListingCard,
   toListingImage,
   type ListingImageDTO,
   type ListingRowLike,
 } from "@/lib/mobile/mappers";
 import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
-import {
-  buildListingSearchOrFilter,
-  sortFetchedListingsBySearchRelevance,
-} from "@/lib/listings/search-relevance";
+import { sortFetchedListingsBySearchRelevance } from "@/lib/listings/search-relevance";
+
+/** Explicit column list for `listings_with_details` - never use `*`. */
+const LISTING_CARD_SQL_COLUMNS =
+  "id, name, slug, description, address, category_id, category_name, latitude, longitude, avg_rating, review_count, is_featured, status, menu_pdf_url, google_maps_url";
 
 export const dynamic = "force-dynamic";
 
@@ -45,7 +45,6 @@ const SUPPORTED_SORTS = new Set([
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
 
-  const supabase = createMobilePublicClient();
   const { searchParams } = new URL(request.url);
   const { page, limit, offset } = parsePagination(searchParams, {
     defaultLimit: 9,
@@ -78,21 +77,21 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   if (categoryParam && categoryParam !== "all") {
     const categoryId = Number(categoryParam);
     if (Number.isInteger(categoryId) && categoryId > 0) {
-      const { data: category } = await supabase
-        .from("categories")
-        .select("id, name, parent_id")
-        .eq("id", categoryId)
-        .single();
+      const { rows: categoryRows } = await query(
+        `SELECT id, name, parent_id FROM categories WHERE id = $1`,
+        [categoryId],
+      );
+      const category = categoryRows[0];
 
       if (category) {
         if (category.parent_id === null) {
-          const { data: subcategories } = await supabase
-            .from("categories")
-            .select("name")
-            .eq("parent_id", category.id);
+          const { rows: subcategories } = await query(
+            `SELECT name FROM categories WHERE parent_id = $1`,
+            [category.id],
+          );
           categoryNames = [
             category.name,
-            ...(subcategories?.map((s) => s.name) ?? []),
+            ...subcategories.map((s) => s.name),
           ];
         } else {
           categoryNames = [category.name];
@@ -101,57 +100,76 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     }
   }
 
-  let query = supabase
-    .from("listings_with_details")
-    .select(LISTING_CARD_COLUMNS, { count: "exact" })
-    .eq("status", "published");
+  const whereClauses: string[] = [`status = 'published'`];
+  const params: unknown[] = [];
 
   if (categoryNames.length > 0) {
-    query = query.in("category_name", categoryNames);
+    params.push(categoryNames);
+    whereClauses.push(`category_name = ANY($${params.length}::text[])`);
   }
 
   if (sanitizedSearch) {
-    const orClause = buildListingSearchOrFilter(sanitizedSearch);
-    if (orClause) query = query.or(orClause);
+    params.push(`%${sanitizedSearch}%`);
+    const idx = params.length;
+    whereClauses.push(
+      `(name ILIKE $${idx} OR description ILIKE $${idx} OR address ILIKE $${idx})`,
+    );
   }
 
   if (minRating) {
     const rating = parseFloat(minRating);
-    if (!Number.isNaN(rating)) query = query.gte("avg_rating", rating);
+    if (!Number.isNaN(rating)) {
+      params.push(rating);
+      whereClauses.push(`avg_rating >= $${params.length}`);
+    }
   }
 
-  if (excludeFeatured) query = query.eq("is_featured", false);
+  if (excludeFeatured) {
+    whereClauses.push(`is_featured = false`);
+  }
 
+  let orderBySql: string;
   switch (sort) {
     case "rating":
     case "top-rated":
-      query = query
-        .order("avg_rating", { ascending: false, nullsFirst: false })
-        .order("id", { ascending: true });
+      orderBySql = `avg_rating DESC NULLS LAST, id ASC`;
       break;
     case "newest":
-      query = query
-        .order("created_at", { ascending: false })
-        .order("id", { ascending: true });
+      orderBySql = `created_at DESC, id ASC`;
       break;
     case "name":
-      query = query
-        .order("name", { ascending: true })
-        .order("id", { ascending: true });
+      orderBySql = `name ASC, id ASC`;
       break;
     default:
-      query = query
-        .order("is_featured", { ascending: false, nullsFirst: false })
-        .order("avg_rating", { ascending: false, nullsFirst: false })
-        .order("id", { ascending: true });
+      orderBySql = `is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC`;
       break;
   }
 
-  const { data, count, error } = await query
-    .range(offset, offset + limit - 1)
-    .returns<ListingRowLike[]>();
-  if (error) {
-    console.error("[mobile-api] listings query failed:", error.message);
+  const whereSql = `WHERE ${whereClauses.join(" AND ")}`;
+
+  let data: ListingRowLike[];
+  let count: number;
+  try {
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM listings_with_details ${whereSql}`,
+      params,
+    );
+    count = parseInt(countRows[0].count, 10);
+
+    const dataParams = [...params, limit, offset];
+    const { rows } = await query(
+      `SELECT ${LISTING_CARD_SQL_COLUMNS} FROM listings_with_details
+       ${whereSql}
+       ORDER BY ${orderBySql}
+       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+      dataParams,
+    );
+    data = rows as ListingRowLike[];
+  } catch (error) {
+    console.error(
+      "[mobile-api] listings query failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError("internal_error", "Failed to load listings.", 500);
   }
 
@@ -171,13 +189,15 @@ export const GET = mobileRoute(async (request: NextRequest) => {
 
   const imagesByListing: Record<number, ListingImageDTO[]> = {};
   if (listingIds.length > 0) {
-    const { data: images } = await supabase
-      .from("listing_images")
-      .select("id, listing_id, url, alt_text, display_order, is_primary")
-      .in("listing_id", listingIds)
-      .order("display_order", { ascending: true });
+    const { rows: images } = await query(
+      `SELECT id, listing_id, url, alt_text, display_order, is_primary
+       FROM listing_images
+       WHERE listing_id = ANY($1::int[])
+       ORDER BY display_order ASC`,
+      [listingIds],
+    );
 
-    for (const img of images ?? []) {
+    for (const img of images) {
       (imagesByListing[img.listing_id] ??= []).push(toListingImage(img));
     }
   }

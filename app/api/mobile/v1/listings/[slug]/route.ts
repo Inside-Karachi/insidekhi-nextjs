@@ -4,9 +4,8 @@ import { ok } from "@/lib/mobile/response";
 import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 import {
-  LISTING_CARD_COLUMNS,
-  REVIEW_COLUMNS,
   toListingCard,
   toListingImage,
   toReview,
@@ -21,10 +20,9 @@ export const dynamic = "force-dynamic";
 const MAX_GALLERY_IMAGES = 20;
 const REVIEW_PREVIEW_LIMIT = 5;
 
-type BankJoin =
-  | { name: string | null; logo_url: string | null }
-  | { name: string | null; logo_url: string | null }[]
-  | null;
+/** Explicit column list for `listings_with_details` - never use `*`. */
+const LISTING_DETAIL_SQL_COLUMNS =
+  "id, name, slug, description, address, category_id, category_name, latitude, longitude, avg_rating, review_count, is_featured, status, menu_pdf_url, google_maps_url, place_id, phone_number, email, website";
 
 /**
  * GET /api/mobile/v1/listings/{slug}
@@ -37,17 +35,17 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
   await enforceMobileRateLimit(request);
 
   const { slug } = await params;
-  const { user, supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
   const currentUserId = user?.id ?? null;
 
-  const { data: listingRow, error: listingError } = await supabase
-    .from("listings_with_details")
-    .select(`${LISTING_CARD_COLUMNS}, place_id, phone_number, email, website`)
-    .eq("slug", slug)
-    .eq("status", "published")
-    .single();
+  const { rows: listingRows } = await query(
+    `SELECT ${LISTING_DETAIL_SQL_COLUMNS} FROM listings_with_details
+     WHERE slug = $1 AND status = 'published'`,
+    [slug],
+  );
+  const listingRow = listingRows[0];
 
-  if (listingError || !listingRow) {
+  if (!listingRow) {
     throw new MobileApiError("not_found", "Listing not found.", 404);
   }
 
@@ -65,82 +63,109 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
 
   const [
     imagesRes,
-    menuRes,
+    menuSectionsRes,
     dealsRes,
     hoursRes,
     branchesRes,
     reviewsRes,
     reviewsCountRes,
+    favRes,
   ] = await Promise.all([
-    supabase
-      .from("listing_images")
-      .select("id, listing_id, url, alt_text, display_order, is_primary")
-      .eq("listing_id", listingId)
-      .order("display_order", { ascending: true })
-      .limit(50),
+    query(
+      `SELECT id, listing_id, url, alt_text, display_order, is_primary
+       FROM listing_images WHERE listing_id = $1
+       ORDER BY display_order ASC LIMIT 50`,
+      [listingId],
+    ),
     isRestaurant
-      ? supabase
-          .from("menu_sections")
-          .select(
-            "id, name, description, display_order, menu_items(id, name, description, price, display_order, image_url, is_available)",
-          )
-          .eq("listing_id", listingId)
-          .order("display_order", { ascending: true })
-          .limit(50)
-      : Promise.resolve({ data: [] as unknown[] }),
-    supabase
-      .from("deals")
-      .select(
-        "id, title, description, discount_value, deal_type, end_date, banks(name, logo_url)",
-      )
-      .eq("listing_id", listingId)
-      .eq("is_active", true)
-      .or(`end_date.is.null,end_date.gte.${new Date().toISOString()}`)
-      .order("created_at", { ascending: false })
-      .limit(50),
-    supabase
-      .from("opening_hours")
-      .select("id, day_of_week, open_time, close_time, is_closed, branch_id")
-      .eq("listing_id", listingId)
-      .order("day_of_week", { ascending: true })
-      .limit(100),
-    supabase
-      .from("listing_branches")
-      .select(
-        "id, name, address, city, latitude, longitude, is_primary, phone_number",
-      )
-      .eq("listing_id", listingId)
-      .order("is_primary", { ascending: false })
-      .order("created_at", { ascending: true })
-      .limit(50),
-    supabase
-      .from("reviews")
-      .select(REVIEW_COLUMNS)
-      .eq("listing_id", listingId)
-      .eq("status", "approved")
-      .order("created_at", { ascending: false })
-      .limit(REVIEW_PREVIEW_LIMIT)
-      .returns<ReviewRowLike[]>(),
-    supabase
-      .from("reviews")
-      .select("id", { count: "exact", head: true })
-      .eq("listing_id", listingId)
-      .eq("status", "approved"),
+      ? query(
+          `SELECT id, name, description, display_order FROM menu_sections
+           WHERE listing_id = $1 ORDER BY display_order ASC LIMIT 50`,
+          [listingId],
+        )
+      : Promise.resolve({ rows: [] as Array<Record<string, unknown>> }),
+    query(
+      `SELECT d.id, d.title, d.description, d.discount_value, d.deal_type, d.end_date,
+              b.name AS bank_name, b.logo_url AS bank_logo_url
+       FROM deals d
+       LEFT JOIN banks b ON b.id = d.bank_id
+       WHERE d.listing_id = $1 AND d.is_active = true
+         AND (d.end_date IS NULL OR d.end_date >= NOW())
+       ORDER BY d.created_at DESC LIMIT 50`,
+      [listingId],
+    ),
+    query(
+      `SELECT id, day_of_week, open_time, close_time, is_closed, branch_id
+       FROM opening_hours WHERE listing_id = $1
+       ORDER BY day_of_week ASC LIMIT 100`,
+      [listingId],
+    ),
+    query(
+      `SELECT id, name, address, city, latitude, longitude, is_primary, phone_number
+       FROM listing_branches WHERE listing_id = $1
+       ORDER BY is_primary DESC, created_at ASC LIMIT 50`,
+      [listingId],
+    ),
+    query(
+      `SELECT r.id, r.listing_id, r.branch_id, r.user_id, r.rating, r.comment,
+              r.status, r.helpful_count, r.created_at, r.updated_at,
+              p.username, p.avatar_url
+       FROM reviews r
+       LEFT JOIN profiles p ON p.id = r.user_id
+       WHERE r.listing_id = $1 AND r.status = 'approved'
+       ORDER BY r.created_at DESC LIMIT $2`,
+      [listingId, REVIEW_PREVIEW_LIMIT],
+    ),
+    query(
+      `SELECT COUNT(*) FROM reviews WHERE listing_id = $1 AND status = 'approved'`,
+      [listingId],
+    ),
+    currentUserId
+      ? query(
+          `SELECT listing_id FROM favorite_listings WHERE user_id = $1 AND listing_id = $2`,
+          [currentUserId, listingId],
+        )
+      : Promise.resolve({ rows: [] as Array<Record<string, unknown>> }),
   ]);
 
-  // Favorited flag (only when authenticated; RLS scopes to the caller's rows).
-  let favorited = false;
-  if (currentUserId) {
-    const { data: fav } = await supabase
-      .from("favorite_listings")
-      .select("listing_id")
-      .eq("user_id", currentUserId)
-      .eq("listing_id", listingId)
-      .maybeSingle();
-    favorited = fav != null;
+  let menuItemsBySection: Record<
+    number,
+    Array<{
+      id: number;
+      name: string;
+      description: string | null;
+      price: number;
+      display_order: number | null;
+      image_url: string | null;
+      is_available: boolean;
+    }>
+  > = {};
+  if (isRestaurant && menuSectionsRes.rows.length > 0) {
+    const sectionIds = menuSectionsRes.rows.map((s) => s.id as number);
+    const { rows: itemRows } = await query(
+      `SELECT id, section_id, name, description, price, display_order, image_url, is_available
+       FROM menu_items WHERE section_id = ANY($1::int[])
+       ORDER BY display_order ASC`,
+      [sectionIds],
+    );
+    menuItemsBySection = {};
+    for (const item of itemRows) {
+      (menuItemsBySection[item.section_id as number] ??= []).push({
+        id: item.id,
+        name: item.name,
+        description: item.description,
+        price: Number(item.price),
+        display_order: item.display_order,
+        image_url: item.image_url,
+        is_available: item.is_available,
+      });
+    }
   }
 
-  const allImages = (imagesRes.data ?? []) as Array<{
+  // Favorited flag (only when authenticated).
+  const favorited = favRes.rows.length > 0;
+
+  const allImages = imagesRes.rows as Array<{
     id: number;
     url: string;
     alt_text: string | null;
@@ -162,65 +187,44 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
       display_order: index,
     }));
 
-  const menuSections = (menuRes.data ?? []) as Array<{
-    id: number;
-    name: string;
-    description: string | null;
-    display_order: number | null;
-    menu_items: Array<{
-      id: number;
-      name: string;
-      description: string | null;
-      price: number;
-      display_order: number | null;
-      image_url: string | null;
-      is_available: boolean;
-    }>;
-  }>;
-
-  const menu = menuSections.map((section) => ({
-    id: section.id,
-    name: section.name,
-    description: section.description,
-    display_order: section.display_order,
-    items: [...(section.menu_items ?? [])]
-      .sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0))
-      .map((item) => ({
-        id: item.id,
-        name: item.name,
-        description: item.description,
-        price: item.price,
-        display_order: item.display_order,
-        image_url: item.image_url,
-        is_available: item.is_available,
-      })),
+  const menu = menuSectionsRes.rows.map((section) => ({
+    id: section.id as number,
+    name: section.name as string,
+    description: section.description as string | null,
+    display_order: section.display_order as number | null,
+    items: [...(menuItemsBySection[section.id as number] ?? [])].sort(
+      (a, b) => (a.display_order ?? 0) - (b.display_order ?? 0),
+    ),
   }));
 
-  const dealsRows = (dealsRes.data ?? []) as Array<{
+  const dealsRows = dealsRes.rows as Array<{
     id: number;
     title: string;
     description: string | null;
     discount_value: string | null;
     deal_type: string;
-    end_date: string | null;
-    banks: BankJoin;
+    end_date: Date | string | null;
+    bank_name: string | null;
+    bank_logo_url: string | null;
   }>;
 
-  const deals = dealsRows.map((deal) => {
-    const bank = Array.isArray(deal.banks) ? deal.banks[0] : deal.banks;
-    return {
-      id: deal.id,
-      title: deal.title,
-      description: deal.description,
-      discount_value: deal.discount_value,
-      deal_type: deal.deal_type,
-      end_date: deal.end_date,
-      bank: bank ? { name: bank.name, logo_url: bank.logo_url } : null,
-    };
-  });
+  const deals = dealsRows.map((deal) => ({
+    id: deal.id,
+    title: deal.title,
+    description: deal.description,
+    discount_value: deal.discount_value,
+    deal_type: deal.deal_type,
+    end_date:
+      deal.end_date instanceof Date
+        ? deal.end_date.toISOString()
+        : deal.end_date,
+    bank: deal.bank_name
+      ? { name: deal.bank_name, logo_url: deal.bank_logo_url }
+      : null,
+  }));
 
   const openingHours = (
-    (hoursRes.data ?? []) as Array<{
+    hoursRes.rows as Array<{
       id: number;
       day_of_week: number;
       open_time: string | null;
@@ -238,26 +242,46 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
     branch_id: h.branch_id,
   }));
 
-  const branches = (branchesRes.data ?? []) as Array<{
+  const branches = branchesRes.rows as Array<{
     id: number;
     name: string;
     address: string;
     city: string;
-    latitude: number;
-    longitude: number;
+    latitude: number | null;
+    longitude: number | null;
     is_primary: boolean | null;
     phone_number: string | null;
   }>;
 
-  const reviewsPreview = (reviewsRes.data ?? []).map((r) =>
-    toReview(r, currentUserId),
+  const reviewsPreview = (reviewsRes.rows as Array<Record<string, unknown>>).map(
+    (r) => {
+      const reviewRow: ReviewRowLike = {
+        id: r.id as number,
+        listing_id: r.listing_id as number,
+        branch_id: r.branch_id as number,
+        user_id: r.user_id as string,
+        rating: r.rating as number,
+        comment: r.comment as string | null,
+        status: r.status as string,
+        helpful_count: r.helpful_count as number | null,
+        created_at:
+          r.created_at instanceof Date
+            ? r.created_at.toISOString()
+            : (r.created_at as string),
+        updated_at:
+          r.updated_at instanceof Date
+            ? r.updated_at.toISOString()
+            : (r.updated_at as string | null),
+        profiles: {
+          username: r.username as string | null,
+          avatar_url: r.avatar_url as string | null,
+        },
+      };
+      return toReview(reviewRow, currentUserId);
+    },
   );
 
-  // If the count query failed, fall back to the preview length rather than
-  // reporting 0 (which would wrongly tell the app "no more reviews to fetch").
-  const reviewsTotal = reviewsCountRes.error
-    ? reviewsPreview.length
-    : (reviewsCountRes.count ?? 0);
+  const reviewsTotal = parseInt(reviewsCountRes.rows[0]?.count ?? "0", 10);
 
   const listing = {
     ...toListingCard(row, gallery),

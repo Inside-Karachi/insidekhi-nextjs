@@ -1,7 +1,7 @@
 import { type NextRequest } from "next/server";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
-import { createMobilePublicClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 
@@ -17,13 +17,17 @@ export const dynamic = "force-dynamic";
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
 
-  const supabase = createMobilePublicClient();
-  const { data, error } = await supabase
-    .from("site_settings_active")
-    .select("key, value");
-
-  if (error) {
-    console.error("[mobile-api] site-settings query failed:", error.message);
+  let data;
+  try {
+    const { rows } = await query(
+      `SELECT key, value FROM site_settings_active`,
+    );
+    data = rows;
+  } catch (error) {
+    console.error(
+      "[mobile-api] site-settings query failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError(
       "internal_error",
       "Failed to load site settings.",

@@ -1,7 +1,7 @@
 import { type NextRequest } from "next/server";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
-import { createMobilePublicClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 
@@ -17,14 +17,17 @@ export const dynamic = "force-dynamic";
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
 
-  const supabase = createMobilePublicClient();
-  const { data, error } = await supabase
-    .from("banks")
-    .select("id, name, logo_url, code")
-    .order("name", { ascending: true });
-
-  if (error) {
-    console.error("[mobile-api] banks query failed:", error.message);
+  let data;
+  try {
+    const { rows } = await query(
+      `SELECT id, name, logo_url, code FROM banks ORDER BY name ASC`,
+    );
+    data = rows;
+  } catch (error) {
+    console.error(
+      "[mobile-api] banks query failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError("internal_error", "Failed to load banks.", 500);
   }
 

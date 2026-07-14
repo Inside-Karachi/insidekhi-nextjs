@@ -44,6 +44,7 @@ type ListingStatus = "draft" | "pending_approval" | "published" | "rejected";
 interface Listing {
   id: number;
   name: string;
+  slug: string;
   status: ListingStatus;
   address: string;
   created_at: string;
@@ -562,7 +563,7 @@ export function ListingApprovalsPage() {
                           variant="ghost"
                           size="sm"
                           onClick={() =>
-                            window.open(`/listing/${listing.id}`, "_blank")
+                            window.open(`/listing/${listing.slug}`, "_blank")
                           }
                           className="h-9"
                         >

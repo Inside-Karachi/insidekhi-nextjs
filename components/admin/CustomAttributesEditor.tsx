@@ -29,7 +29,6 @@ import {
   CustomTag,
   CustomAttributesEditorProps,
 } from "@/types/listing.types";
-import { createClient } from "@/lib/supabase/client";
 
 const amenityCategories = [
   { value: "dining", label: "Dining", icon: Utensils },
@@ -138,44 +137,28 @@ export function CustomAttributesEditor({
   React.useEffect(() => {
     const fetchDatabaseFeatures = async () => {
       try {
-        const supabase = createClient();
+        const response = await fetch(
+          `/api/admin/listings/${listingId ?? "new"}/features`,
+        );
 
-        // Get all available features from master table
-        const { data: allFeatures, error: masterError } = await supabase
-          .from("listing_features_master")
-          .select("id, name, description, icon_emoji")
-          .order("name");
-
-        if (masterError) {
-          console.error("Error fetching master features:", masterError);
+        if (!response.ok) {
+          console.error("Error fetching features:", await response.text());
+          setDatabaseFeatures([]);
           return;
         }
 
-        // If we have a listingId, also get currently assigned features
-        let assignedFeatureIds = new Set<number>();
-        if (listingId) {
-          const { data: assignedFeatures, error: assignedError } =
-            await supabase
-              .from("listing_features")
-              .select(
-                `
-              feature_id,
-              listing_features_master (
-                id,
-                name
-              )
-            `,
-              )
-              .eq("listing_id", listingId);
+        const result = await response.json();
+        const allFeatures: Array<{
+          id: number;
+          name: string;
+          description: string | null;
+          icon_emoji: string | null;
+        }> = result.data?.masterFeatures || [];
+        const assignedFeatureIdList: number[] =
+          result.data?.assignedFeatureIds || [];
 
-          if (assignedError) {
-            console.error("Error fetching assigned features:", assignedError);
-          } else {
-            assignedFeatureIds = new Set(
-              assignedFeatures?.map((item) => item.feature_id) || [],
-            );
-          }
-        }
+        // If we have a listingId, use the server-reported assigned features
+        let assignedFeatureIds = new Set<number>(assignedFeatureIdList);
 
         // For create mode, initialize with any pre-selected features
         if (!listingId && selectedDatabaseFeatures.size > 0) {
@@ -183,7 +166,7 @@ export function CustomAttributesEditor({
         }
 
         // Combine all features with assignment status
-        if (allFeatures && allFeatures.length > 0) {
+        if (allFeatures.length > 0) {
           const features = allFeatures.map((masterFeature) => ({
             name: masterFeature.name,
             icon: masterFeature.icon_emoji || "✨",

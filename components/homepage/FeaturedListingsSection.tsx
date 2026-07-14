@@ -296,7 +296,7 @@ export function FeaturedListingsSection({
                               ))}
                             </div>
                             <span className="text-sm font-medium text-muted-foreground ml-1">
-                              {(listing.avg_rating || 0).toFixed(1)}
+                              {Number(listing.avg_rating || 0).toFixed(1)}
                             </span>
                           </div>
                         </div>

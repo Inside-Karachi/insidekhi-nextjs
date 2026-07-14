@@ -460,7 +460,7 @@ export function SimilarListingsCarousel({
                                 ))}
                               </div>
                               <span className="text-sm font-medium text-muted-foreground ml-1">
-                                {(similar.avg_rating || 0).toFixed(1)}
+                                {Number(similar.avg_rating || 0).toFixed(1)}
                               </span>
                             </div>
                           </div>

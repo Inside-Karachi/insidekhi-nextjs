@@ -351,11 +351,9 @@ export function PremiumSidebar({
 
   const handleSignOut = async () => {
     try {
-      const supabase = createClient();
-      // Local scope clears the session without a server round-trip; race a
-      // short timeout so a slow/stuck auth lock can never strand the user.
+      // Race a short timeout so a slow/stuck request can never strand the user.
       await Promise.race([
-        supabase.auth.signOut({ scope: "local" }),
+        fetch("/api/auth/logout", { method: "POST" }),
         new Promise((resolve) => setTimeout(resolve, 2000)),
       ]);
     } catch (err) {

@@ -81,17 +81,27 @@ export function BranchesTab({
       // Save opening hours if provided
       if (hours && hours.length > 0 && result.branch) {
         try {
-          await fetch(`/api/admin/listings/${listingId}/opening-hours`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              opening_hours: hours.map((h) => ({
-                ...h,
-                listing_id: listingId,
-                branch_id: result.branch.id,
-              })),
-            }),
-          });
+          const hoursResponse = await fetch(
+            `/api/admin/listings/${listingId}/opening-hours`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                opening_hours: hours.map((h) => ({
+                  ...h,
+                  listing_id: listingId,
+                  branch_id: result.branch.id,
+                })),
+              }),
+            },
+          );
+
+          if (!hoursResponse.ok) {
+            const hoursResult = await hoursResponse.json().catch(() => null);
+            throw new Error(
+              hoursResult?.error || "Failed to save opening hours",
+            );
+          }
         } catch (err) {
           console.error("Error saving opening hours:", err);
           toast({

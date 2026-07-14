@@ -16,7 +16,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { createClient } from "@/lib/supabase/client";
 import { usePathname } from "next/navigation";
 import { useAvatar } from "@/hooks/useAvatar";
 import Link from "next/link";
@@ -39,7 +38,6 @@ export function UserDropdown({ user, profile }: UserDropdownProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const pathname = usePathname();
-  const supabase = createClient();
 
   // Use robust avatar loading with automatic signed URL refresh
   const { avatarUrl } = useAvatar(user.id, profile?.avatar_url);
@@ -80,10 +78,9 @@ export function UserDropdown({ user, profile }: UserDropdownProps) {
   const handleLogout = async () => {
     setIsLoading(true);
     try {
-      // Local scope clears the session without a server round-trip; race a
-      // short timeout so a slow/stuck auth lock can never strand the user.
+      // Race a short timeout so a slow/stuck request can never strand the user.
       await Promise.race([
-        supabase.auth.signOut({ scope: "local" }),
+        fetch("/api/auth/logout", { method: "POST" }),
         new Promise((resolve) => setTimeout(resolve, 2000)),
       ]);
     } catch (err) {

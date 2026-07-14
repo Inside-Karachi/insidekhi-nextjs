@@ -63,6 +63,7 @@ import { getListingStatusLabel } from "@/lib/listings/status-display";
 import {
   loadListingEditModalHydration,
   mergePrimaryBranchIntoEditor,
+  mapListingOpeningHoursFromApi,
 } from "@/lib/listings/listing-modal-edit-hydration";
 import {
   createEmptyListingFormData,
@@ -296,7 +297,7 @@ export function ListingModal({
               const hoursData = await hoursRes.json();
               return {
                 ...branch,
-                opening_hours: hoursData.opening_hours || [],
+                opening_hours: mapListingOpeningHoursFromApi(hoursData.data),
               };
             }
           } catch (err) {
@@ -1184,6 +1185,13 @@ export function ListingModal({
 
       const result = await onSave(listingData);
 
+      if (!result) {
+        // onSave intentionally returns null after a handled failure
+        // (validation error, 409 conflict, thrown error) - it has already
+        // shown the user a toast, so there's nothing else to do here.
+        return;
+      }
+
       // Defensive: extract listing id from result shape
       let newListingId: number | undefined = undefined;
       if (result && typeof result === "object") {
@@ -1250,10 +1258,6 @@ export function ListingModal({
         }
       }
 
-      if (!result) {
-        return;
-      }
-
       const effectiveListingId = listing?.id ?? newListingId;
       if (!effectiveListingId) {
         // Save failed or returned unexpected payload: stop before any dependent writes.
@@ -1261,8 +1265,10 @@ export function ListingModal({
       }
 
       // Save opening hours for both edit and newly created listings
-      // CRITICAL: Only save opening hours for listings with NO branches or exactly 1 branch
-      // Multi-branch listings should have hours edited per-branch via the branches API
+      // CRITICAL: Only save top-level opening hours for listings with NO branches.
+      // Any listing with a branch (1 or more) manages hours exclusively via the
+      // per-branch dialog (BranchesTab) - writing here too would clobber that
+      // branch-specific save with this stale top-level `openingHours` state.
       try {
         const hoursListingId = effectiveListingId;
 
@@ -1273,10 +1279,10 @@ export function ListingModal({
           );
           const branchCheckData = await branchCheckResponse.json();
           const actualBranchCount = branchCheckData.branches?.length || 0;
-          const hasMultipleBranches = actualBranchCount > 1;
+          const hasAnyBranch = actualBranchCount > 0;
 
-          if (hasMultipleBranches) {
-            // No-op: multi-branch listings manage hours per branch.
+          if (hasAnyBranch) {
+            // No-op: listings with a branch manage hours per branch.
           } else {
             const response = await fetch(
               `/api/admin/listings/${hoursListingId}/opening-hours`,

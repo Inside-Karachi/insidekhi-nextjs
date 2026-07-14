@@ -78,6 +78,14 @@ const nextConfig: NextConfig = (() => {
       port: "",
       pathname: "/**",
     },
+    {
+      // TEMP: legacy Supabase-hosted images not yet migrated to DO Spaces.
+      // Remove once all listing image URLs point to DO.
+      protocol: "https",
+      hostname: "yllihsklgwbktqyjcgwr.supabase.co",
+      port: "",
+      pathname: "/**",
+    },
   ];
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;

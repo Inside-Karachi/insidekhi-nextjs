@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { query } from "@/lib/db";
+import { getOptionalSessionUser } from "@/lib/auth/require-session";
 import { PremiumListingHero } from "@/components/listing/PremiumListingHeroServer";
 import { PremiumGallery } from "@/components/listing/PremiumGallery";
 import { ListingFeatures } from "@/components/listing/ListingFeatures";
@@ -42,9 +43,7 @@ export default async function ListingPage({ params }: ListingPageProps) {
   const { slug } = await params;
 
   const { rows: listingRows } = await query(
-    `SELECT * FROM listings_with_details
-     WHERE slug = $1 AND status = 'published'
-     LIMIT 1`,
+    `SELECT * FROM listings_with_details WHERE slug = $1 LIMIT 1`,
     [slug],
   );
   const listing = listingRows[0];
@@ -52,6 +51,17 @@ export default async function ListingPage({ params }: ListingPageProps) {
   if (!listing || !listing.id) {
     console.error("[listing-page] Failed to fetch listing:", { slug });
     notFound();
+  }
+
+  if (listing.status !== "published") {
+    const sessionResult = await getOptionalSessionUser();
+    const role = sessionResult?.profile?.role;
+    const canPreviewUnpublished = role === "admin" || role === "super_admin";
+
+    if (!canPreviewUnpublished) {
+      console.error("[listing-page] Listing not published:", { slug });
+      notFound();
+    }
   }
 
   const listingId = listing.id as number;

@@ -1,8 +1,9 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 
 export async function GET(
-  request: Request,
+  request: NextRequest,
   props: { params: Promise<{ id: string }> }
 ) {
   try {
@@ -21,49 +22,21 @@ export async function GET(
     const url = new URL(request.url);
     const includeDeleted = url.searchParams.get("include_deleted") === "true";
 
-    const supabase = await createServerSupabase();
-
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Use service role to bypass RLS for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify admin/staff role
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (
-      !profile ||
-      !["admin", "super_admin", "lister", "writer"].includes(profile.role)
-    ) {
-      return NextResponse.json(
-        { error: "Admin access required" },
-        { status: 403 }
-      );
-    }
+    await requireStaff(request);
 
     // Fetch replies using the RPC function
     // Note: p_include_deleted defaults to false (excludes soft-deleted replies)
-    const { data: replies, error } = await adminSupabase.rpc(
-      "get_submission_replies_with_details" as never,
-      {
-        p_submission_id: submissionId,
-        p_include_deleted: includeDeleted,
-      } as never
-    );
-
-    if (error) {
+    let replies: unknown[];
+    try {
+      const { rows } = await query(
+        `SELECT * FROM get_submission_replies_with_details(
+           p_submission_id => $1::integer,
+           p_include_deleted => $2::boolean
+         )`,
+        [submissionId, includeDeleted],
+      );
+      replies = rows;
+    } catch (error) {
       console.error("Error fetching replies:", error);
       return NextResponse.json(
         { error: "Failed to fetch replies" },
@@ -76,6 +49,13 @@ export async function GET(
       replies: replies || [],
     });
   } catch (error) {
+    const authStatus = getAdminAuthErrorStatus(error);
+    if (authStatus) {
+      return NextResponse.json(
+        { error: "Admin access required" },
+        { status: authStatus }
+      );
+    }
     console.error("Replies API error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

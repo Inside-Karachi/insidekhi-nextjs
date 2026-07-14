@@ -1,54 +1,33 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { requireSuperAdmin, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Use service role for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify super admin role
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (profile?.role !== "super_admin") {
-      return NextResponse.json(
-        { error: "Super admin access required" },
-        { status: 403 }
-      );
-    }
+    const { user } = await requireSuperAdmin(request);
 
     // Get threshold from request body
     const body = await request.json();
     const ageThresholdDays = body.age_threshold_days || 90;
 
     // Call cleanup RPC function
-    const { data: result, error: rpcError } = await adminSupabase.rpc(
-      "manual_cleanup_soft_deleted_replies" as unknown as never,
-      {
-        p_age_threshold_days: ageThresholdDays,
-        p_executed_by: user.id,
-      } as never
-    );
-
-    if (rpcError) {
+    let result: unknown;
+    try {
+      const { rows } = await query(
+        `SELECT manual_cleanup_soft_deleted_replies(
+           p_age_threshold_days => $1::integer,
+           p_executed_by => $2::uuid
+         ) AS result`,
+        [ageThresholdDays, user.id],
+      );
+      result = rows[0]?.result;
+    } catch (rpcError) {
       console.error("Cleanup RPC error:", rpcError);
       return NextResponse.json(
-        { error: rpcError.message || "Cleanup failed" },
+        {
+          error:
+            rpcError instanceof Error ? rpcError.message : "Cleanup failed",
+        },
         { status: 500 }
       );
     }
@@ -58,6 +37,13 @@ export async function POST(request: Request) {
       result,
     });
   } catch (error) {
+    const authStatus = getAdminAuthErrorStatus(error);
+    if (authStatus) {
+      return NextResponse.json(
+        { error: "Super admin access required" },
+        { status: authStatus }
+      );
+    }
     console.error("Cleanup API error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

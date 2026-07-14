@@ -1,8 +1,8 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 import type { SendReplyPayload } from "@/types/form.types";
 import generatePremiumEmailTemplate from "@/lib/emails/premium-template";
-import type { Json } from "@/types/supabase";
 
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 // IMPORTANT: This email MUST be verified in your Brevo account
@@ -80,7 +80,7 @@ async function sendReplyEmail(params: {
 }
 
 export async function POST(
-  request: Request,
+  request: NextRequest,
   props: { params: Promise<{ id: string }> },
 ) {
   try {
@@ -94,37 +94,7 @@ export async function POST(
       );
     }
 
-    const supabase = await createServerSupabase();
-
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Use service role to bypass RLS for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify admin/staff role
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role, full_name")
-      .eq("id", user.id)
-      .single();
-
-    if (
-      !profile ||
-      !["admin", "super_admin", "lister", "writer"].includes(profile.role)
-    ) {
-      return NextResponse.json(
-        { error: "Admin access required" },
-        { status: 403 },
-      );
-    }
+    const { user } = await requireStaff(request);
 
     // Parse request body
     const body: SendReplyPayload = await request.json();
@@ -138,13 +108,13 @@ export async function POST(
     }
 
     // Get submission details
-    const { data: submission, error: submissionError } = await adminSupabase
-      .from("form_submissions")
-      .select("*")
-      .eq("id", submissionId)
-      .single();
+    const { rows: submissionRows } = await query(
+      `SELECT * FROM form_submissions WHERE id = $1`,
+      [submissionId],
+    );
+    const submission = submissionRows[0];
 
-    if (submissionError || !submission) {
+    if (!submission) {
       return NextResponse.json(
         { error: "Submission not found" },
         { status: 404 },
@@ -196,22 +166,27 @@ export async function POST(
     }
 
     // Insert reply record with accurate status
-    const { data: reply, error: replyError } = await adminSupabase
-      .from("form_submission_replies")
-      .insert({
-        submission_id: submissionId,
-        replied_by: user.id,
-        reply_type: replyType,
-        reply_text: replyText.trim(),
-        email_subject: emailSubject.trim(),
-        previous_status: previousStatus || submission.status,
-        new_status: newStatus || submission.status,
-        metadata: metadata as Json,
-      })
-      .select()
-      .single();
-
-    if (replyError) {
+    let reply;
+    try {
+      const { rows } = await query(
+        `INSERT INTO form_submission_replies (
+           submission_id, replied_by, reply_type, reply_text, email_subject,
+           previous_status, new_status, metadata
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [
+          submissionId,
+          user.id,
+          replyType,
+          replyText.trim(),
+          emailSubject.trim(),
+          previousStatus || submission.status,
+          newStatus || submission.status,
+          JSON.stringify(metadata),
+        ],
+      );
+      reply = rows[0];
+    } catch (replyError) {
       console.error("Error inserting reply:", replyError);
       return NextResponse.json(
         { error: "Failed to save reply" },
@@ -226,12 +201,12 @@ export async function POST(
         `Updating status from "${submission.status}" to "${newStatus}" for submission ${submissionId}`,
       );
 
-      const { error: updateError } = await adminSupabase
-        .from("form_submissions")
-        .update({ status: newStatus })
-        .eq("id", submissionId);
-
-      if (updateError) {
+      try {
+        await query(
+          `UPDATE form_submissions SET status = $1 WHERE id = $2`,
+          [newStatus, submissionId],
+        );
+      } catch (updateError) {
         console.error("Error updating status:", updateError);
         return NextResponse.json(
           { error: "Failed to update submission status" },
@@ -243,23 +218,35 @@ export async function POST(
     }
 
     // Fetch the reply with staff details
-    const { data: replyWithStaff } = await adminSupabase.rpc(
-      "get_submission_replies_with_details",
-      {
-        p_submission_id: submissionId,
-        p_include_deleted: false,
-      },
-    );
-
-    const latestReply = replyWithStaff?.find((r) => r.id === reply.id);
+    let latestReply = reply;
+    try {
+      const { rows: replyWithStaff } = await query(
+        `SELECT * FROM get_submission_replies_with_details(
+           p_submission_id => $1::integer,
+           p_include_deleted => $2::boolean
+         )`,
+        [submissionId, false],
+      );
+      latestReply =
+        replyWithStaff.find((r) => r.id === reply.id) ?? reply;
+    } catch (detailsError) {
+      console.error("Failed to fetch reply with staff details:", detailsError);
+    }
 
     return NextResponse.json({
       success: true,
       emailSent: emailResult.success,
       emailError: emailResult.error || null,
-      reply: latestReply || reply,
+      reply: latestReply,
     });
   } catch (error) {
+    const authStatus = getAdminAuthErrorStatus(error);
+    if (authStatus) {
+      return NextResponse.json(
+        { error: "Admin access required" },
+        { status: authStatus },
+      );
+    }
     console.error("Send reply API error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

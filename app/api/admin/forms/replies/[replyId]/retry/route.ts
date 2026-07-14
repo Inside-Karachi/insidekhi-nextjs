@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 import type { Json } from "@/types/supabase";
 
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
@@ -70,77 +71,52 @@ async function sendReplyEmail(params: {
 }
 
 export async function POST(
-  request: Request,
+  request: NextRequest,
   props: { params: Promise<{ replyId: string }> }
 ) {
   try {
     const { replyId } = await props.params;
 
-    const supabase = await createServerSupabase();
+    const { user } = await requireStaff(request);
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Use service role for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify admin role
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (
-      !profile ||
-      !["admin", "super_admin", "lister"].includes(profile.role)
-    ) {
-      return NextResponse.json(
-        { error: "Admin access required" },
-        { status: 403 }
+    // Call RPC to update retry counter
+    try {
+      await query(
+        `SELECT retry_failed_reply_email(
+           p_reply_id => $1::uuid,
+           p_retried_by => $2::uuid
+         )`,
+        [replyId, user.id],
       );
-    }
-
-    // Call RPC to update retry counter (function will be created in migration)
-    const { error: rpcError } = await adminSupabase.rpc(
-      "retry_failed_reply_email" as unknown as never,
-      {
-        p_reply_id: replyId,
-        p_retried_by: user.id,
-      } as never
-    );
-
-    if (rpcError) {
+    } catch (rpcError) {
       console.error("RPC error:", rpcError);
       return NextResponse.json(
-        { error: rpcError.message || "Failed to mark for retry" },
+        {
+          error:
+            rpcError instanceof Error
+              ? rpcError.message
+              : "Failed to mark for retry",
+        },
         { status: 500 }
       );
     }
 
     // Get the reply details to resend email
-    const { data: reply, error: replyError } = await adminSupabase
-      .from("form_submission_replies")
-      .select("*, form_submissions(*)")
-      .eq("id", replyId)
-      .single();
+    const { rows: replyRows } = await query(
+      `SELECT r.*, s.email AS submission_email, s.name AS submission_name,
+              s.company_name AS submission_company_name
+       FROM form_submission_replies r
+       JOIN form_submissions s ON s.id = r.submission_id
+       WHERE r.id = $1`,
+      [replyId],
+    );
+    const reply = replyRows[0];
 
-    if (replyError || !reply || !reply.form_submissions) {
+    if (!reply) {
       return NextResponse.json({ error: "Reply not found" }, { status: 404 });
     }
 
-    const submission = Array.isArray(reply.form_submissions)
-      ? reply.form_submissions[0]
-      : reply.form_submissions;
-
-    if (!submission || !reply.reply_text) {
+    if (!reply.reply_text) {
       return NextResponse.json(
         { error: "Invalid reply data" },
         { status: 400 }
@@ -149,8 +125,8 @@ export async function POST(
 
     // Attempt to resend email
     const emailResult = await sendReplyEmail({
-      to: submission.email,
-      toName: submission.name || submission.company_name || undefined,
+      to: reply.submission_email,
+      toName: reply.submission_name || reply.submission_company_name || undefined,
       subject: reply.email_subject || "Reply from Inside Karachi",
       text: reply.reply_text,
       html: `
@@ -169,21 +145,19 @@ export async function POST(
 
     // Update reply with new status
     if (emailResult.success) {
-      // Update to email_sent
-      const { error: updateError } = await adminSupabase
-        .from("form_submission_replies")
-        .update({
-          reply_type: "email_sent",
-          metadata: {
-            ...(reply.metadata as object),
-            retry_successful: true,
-            retry_succeeded_at: new Date().toISOString(),
-            brevo_message_id: emailResult.messageId,
-          } as Json,
-        })
-        .eq("id", replyId);
+      const updatedMetadata: Json = {
+        ...(reply.metadata as object),
+        retry_successful: true,
+        retry_succeeded_at: new Date().toISOString(),
+        brevo_message_id: emailResult.messageId,
+      } as Json;
 
-      if (updateError) {
+      try {
+        await query(
+          `UPDATE form_submission_replies SET reply_type = $1, metadata = $2 WHERE id = $3`,
+          ["email_sent", JSON.stringify(updatedMetadata), replyId],
+        );
+      } catch (updateError) {
         console.error("Failed to update reply status:", updateError);
       }
 
@@ -193,19 +167,18 @@ export async function POST(
         message: "Email sent successfully on retry",
       });
     } else {
-      // Still failed, update metadata
-      const { error: updateError } = await adminSupabase
-        .from("form_submission_replies")
-        .update({
-          metadata: {
-            ...(reply.metadata as object),
-            last_retry_error: emailResult.error,
-            last_retry_failed_at: new Date().toISOString(),
-          } as Json,
-        })
-        .eq("id", replyId);
+      const updatedMetadata: Json = {
+        ...(reply.metadata as object),
+        last_retry_error: emailResult.error,
+        last_retry_failed_at: new Date().toISOString(),
+      } as Json;
 
-      if (updateError) {
+      try {
+        await query(
+          `UPDATE form_submission_replies SET metadata = $1 WHERE id = $2`,
+          [JSON.stringify(updatedMetadata), replyId],
+        );
+      } catch (updateError) {
         console.error("Failed to update retry metadata:", updateError);
       }
 
@@ -217,6 +190,13 @@ export async function POST(
       });
     }
   } catch (error) {
+    const authStatus = getAdminAuthErrorStatus(error);
+    if (authStatus) {
+      return NextResponse.json(
+        { error: "Admin access required" },
+        { status: authStatus }
+      );
+    }
     console.error("Retry reply API error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

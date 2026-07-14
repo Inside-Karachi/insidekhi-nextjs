@@ -1,38 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 import type { Database } from "@/types/supabase";
 import type { FormSubmissionWithAssets } from "@/types/form.types";
 
 // GET all form submissions (admin only)
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Use service role for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify admin role
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (
-      !profile ||
-      !["admin", "super_admin", "lister"].includes(profile.role)
-    ) {
-      return NextResponse.json({ error: "Admin required" }, { status: 403 });
-    }
+    await requireStaff(request);
 
     const { searchParams } = new URL(request.url);
 
@@ -48,35 +23,49 @@ export async function GET(request: NextRequest) {
     );
     const offset = (page - 1) * limit;
 
-    // Build query with service role client to respect RLS bypass
-    let query = adminSupabase.from("form_submissions").select("*");
+    // Table/column names below are fixed - never user input.
+    const whereClauses: string[] = [];
+    const params: unknown[] = [];
 
     if (formType) {
-      query = query.eq("form_type", formType);
+      params.push(formType);
+      whereClauses.push(`form_type = $${params.length}`);
     }
     if (status) {
-      query = query.eq("status", status);
+      params.push(status);
+      whereClauses.push(`status = $${params.length}`);
     }
     if (dateFrom) {
-      query = query.gte("submitted_at", dateFrom);
+      params.push(dateFrom);
+      whereClauses.push(`submitted_at >= $${params.length}`);
     }
     if (dateTo) {
-      query = query.lte("submitted_at", dateTo);
+      params.push(dateTo);
+      whereClauses.push(`submitted_at <= $${params.length}`);
     }
     if (search) {
-      const sanitized = search.replace(/%/g, "\\%").replace(/,/g, "\\,");
-      query = query.or(
-        `name.ilike.%${sanitized}%,company_name.ilike.%${sanitized}%,email.ilike.%${sanitized}%`
+      params.push(`%${search}%`);
+      const idx = params.length;
+      whereClauses.push(
+        `(name ILIKE $${idx} OR company_name ILIKE $${idx} OR email ILIKE $${idx})`
       );
     }
 
-    query = query
-      .order("submitted_at", { ascending: false })
-      .range(offset, offset + limit - 1);
+    const whereSql = whereClauses.length
+      ? `WHERE ${whereClauses.join(" AND ")}`
+      : "";
 
-    const { data, error } = await query;
-
-    if (error) {
+    const dataParams = [...params, limit, offset];
+    let data: Array<Record<string, unknown>>;
+    try {
+      const result = await query(
+        `SELECT * FROM form_submissions ${whereSql}
+         ORDER BY submitted_at DESC
+         LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+        dataParams,
+      );
+      data = result.rows;
+    } catch (error) {
       console.error("Database error:", error);
       return NextResponse.json(
         { error: "Failed to fetch form submissions" },
@@ -84,82 +73,48 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const submissionIds = (data ?? []).map((submission) => submission.id);
+    const submissionIds = data.map((submission) => submission.id as number);
     let imagesBySubmission = new Map<
       number,
       Database["public"]["Tables"]["form_submission_images"]["Row"][]
     >();
 
     if (submissionIds.length > 0) {
-      const { data: imageRows, error: imageError } = await adminSupabase
-        .from("form_submission_images")
-        .select("*")
-        .in("submission_id", submissionIds);
+      const { rows: imageRows } = await query(
+        `SELECT * FROM form_submission_images WHERE submission_id = ANY($1::int[])`,
+        [submissionIds],
+      );
 
-      if (imageError) {
-        console.error("Failed to fetch submission images:", imageError);
-      } else if (imageRows) {
-        imagesBySubmission = imageRows.reduce((map, image) => {
-          const list = map.get(image.submission_id) ?? [];
-          list.push(image);
-          map.set(image.submission_id, list);
-          return map;
-        }, new Map<number, Database["public"]["Tables"]["form_submission_images"]["Row"][]>());
-      }
+      imagesBySubmission = imageRows.reduce((map, image) => {
+        const list = map.get(image.submission_id) ?? [];
+        list.push(image);
+        map.set(image.submission_id, list);
+        return map;
+      }, new Map<number, Database["public"]["Tables"]["form_submission_images"]["Row"][]>());
     }
 
     // Get total count for pagination
-    let countQuery = adminSupabase
-      .from("form_submissions")
-      .select("id", { count: "exact", head: true });
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM form_submissions ${whereSql}`,
+      params,
+    );
+    const count = parseInt(countRows[0].count, 10);
 
-    if (formType) {
-      countQuery = countQuery.eq("form_type", formType);
-    }
-    if (status) {
-      countQuery = countQuery.eq("status", status);
-    }
-    if (dateFrom) {
-      countQuery = countQuery.gte("submitted_at", dateFrom);
-    }
-    if (dateTo) {
-      countQuery = countQuery.lte("submitted_at", dateTo);
-    }
-    if (search) {
-      const sanitized = search.replace(/%/g, "\\%").replace(/,/g, "\\,");
-      countQuery = countQuery.or(
-        `name.ilike.%${sanitized}%,company_name.ilike.%${sanitized}%,email.ilike.%${sanitized}%`
-      );
-    }
-
-    const { count } = await countQuery;
-
-    const formsTotalPromise = adminSupabase
-      .from("form_submissions")
-      .select("id", { count: "exact", head: true });
-    const formsPendingPromise = adminSupabase
-      .from("form_submissions")
-      .select("id", { count: "exact", head: true })
-      .or("status.is.null,status.eq.pending");
-    const formsRecentPromise = adminSupabase
-      .from("form_submissions")
-      .select("id", { count: "exact", head: true })
-      .gte(
-        "submitted_at",
-        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-      );
-
-    const [formsTotalResult, formsPendingResult, formsRecentResult] =
-      await Promise.all([
-        formsTotalPromise,
-        formsPendingPromise,
-        formsRecentPromise,
-      ]);
+    const [totalRes, pendingRes, recentRes] = await Promise.all([
+      query(`SELECT COUNT(*) FROM form_submissions`),
+      query(
+        `SELECT COUNT(*) FROM form_submissions WHERE status IS NULL OR status = 'pending'`,
+      ),
+      query(
+        `SELECT COUNT(*) FROM form_submissions WHERE submitted_at >= $1`,
+        [new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()],
+      ),
+    ]);
 
     const metrics = {
-      overall: formsTotalResult.count || 0,
-      pending: formsPendingResult.count || 0,
-      last24Hours: formsRecentResult.count || 0,
+      overall: parseInt(totalRes.rows[0].count, 10) || 0,
+      pending: parseInt(pendingRes.rows[0].count, 10) || 0,
+      last24Hours: parseInt(recentRes.rows[0].count, 10) || 0,
     };
 
     const statusCounts: Record<string, number> = {
@@ -167,58 +122,46 @@ export async function GET(request: NextRequest) {
       processed: Math.max(0, metrics.overall - metrics.pending),
     };
 
-    const { data: allFormTypeRows, error: typeError } = await adminSupabase
-      .from("form_submissions")
-      .select("form_type");
-
-    if (typeError) {
-      console.error("Failed to fetch form types:", typeError);
-    }
-
-    const formTypeList = Array.from(
-      new Set(
-        (allFormTypeRows || [])
-          .map((item) => item.form_type)
-          .filter((value): value is string => Boolean(value))
-      )
+    const { rows: allFormTypeRows } = await query(
+      `SELECT DISTINCT form_type FROM form_submissions WHERE form_type IS NOT NULL`,
     );
+
+    const formTypeList = allFormTypeRows
+      .map((item) => item.form_type as string | null)
+      .filter((value): value is string => Boolean(value));
 
     const formTypeSummaries = await Promise.all(
       formTypeList.map(async (type) => {
-        const [
-          { count: totalForType },
-          { count: pendingForType },
-          { data: lastSubmitted },
-        ] = await Promise.all([
-          adminSupabase
-            .from("form_submissions")
-            .select("id", { count: "exact", head: true })
-            .eq("form_type", type),
-          adminSupabase
-            .from("form_submissions")
-            .select("id", { count: "exact", head: true })
-            .eq("form_type", type)
-            .or("status.is.null,status.eq.pending"),
-          adminSupabase
-            .from("form_submissions")
-            .select("submitted_at")
-            .eq("form_type", type)
-            .order("submitted_at", { ascending: false })
-            .limit(1)
-            .maybeSingle(),
-        ]);
+        const [totalForTypeRes, pendingForTypeRes, lastSubmittedRes] =
+          await Promise.all([
+            query(
+              `SELECT COUNT(*) FROM form_submissions WHERE form_type = $1`,
+              [type],
+            ),
+            query(
+              `SELECT COUNT(*) FROM form_submissions
+               WHERE form_type = $1 AND (status IS NULL OR status = 'pending')`,
+              [type],
+            ),
+            query(
+              `SELECT submitted_at FROM form_submissions
+               WHERE form_type = $1
+               ORDER BY submitted_at DESC LIMIT 1`,
+              [type],
+            ),
+          ]);
 
         return {
           formType: type,
-          total: totalForType || 0,
-          pending: pendingForType || 0,
-          lastSubmittedAt: lastSubmitted?.submitted_at ?? null,
+          total: parseInt(totalForTypeRes.rows[0].count, 10) || 0,
+          pending: parseInt(pendingForTypeRes.rows[0].count, 10) || 0,
+          lastSubmittedAt: lastSubmittedRes.rows[0]?.submitted_at ?? null,
         };
       })
     );
 
-    const rawSubmissions = (data ||
-      []) as Database["public"]["Tables"]["form_submissions"]["Row"][];
+    const rawSubmissions =
+      data as Database["public"]["Tables"]["form_submissions"]["Row"][];
 
     const submissions: FormSubmissionWithAssets[] = rawSubmissions.map(
       (submission) => {
@@ -249,6 +192,10 @@ export async function GET(request: NextRequest) {
       typeBreakdown: formTypeSummaries,
     });
   } catch (error) {
+    const authStatus = getAdminAuthErrorStatus(error);
+    if (authStatus) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: authStatus });
+    }
     console.error("API error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -260,34 +207,7 @@ export async function GET(request: NextRequest) {
 // UPDATE form submission status (admin only)
 export async function PATCH(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check admin authentication
-    const userResponse = await supabase.auth.getUser();
-    const user = userResponse.data?.user;
-    const authError = userResponse.error;
-    if (authError || !user || typeof user.id !== "string") {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-    const safeUser = user!;
-
-    // Use service role for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify admin role
-    const profileResponse = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", safeUser.id)
-      .single();
-    const profile = profileResponse.data!;
-    if (
-      !profile ||
-      typeof profile.role !== "string" ||
-      !["admin", "super_admin", "lister"].includes(profile.role)
-    ) {
-      return NextResponse.json({ error: "Admin required" }, { status: 403 });
-    }
+    await requireStaff(request);
 
     const body = await request.json();
     const { id, status, reviewer_notes } = body;
@@ -299,24 +219,18 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    // Use strict type for update
-    const updateData: Partial<
-      Database["public"]["Tables"]["form_submissions"]["Row"]
-    > = {
-      status,
-      reviewed_at: new Date().toISOString(),
-      ...(reviewer_notes ? { reviewer_notes } : {}),
-    };
+    const { rows } = await query(
+      `UPDATE form_submissions
+       SET status = $1, reviewed_at = $2, reviewer_notes = COALESCE($3, reviewer_notes)
+       WHERE id = $4
+       RETURNING *`,
+      [status, new Date().toISOString(), reviewer_notes ?? null, id],
+    );
+    const data = rows[0] as
+      | Database["public"]["Tables"]["form_submissions"]["Row"]
+      | undefined;
 
-    const { data, error } = await supabase
-      .from("form_submissions")
-      .update(updateData)
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Database error:", error);
+    if (!data) {
       return NextResponse.json(
         { error: "Failed to update submission" },
         { status: 500 }
@@ -325,11 +239,10 @@ export async function PATCH(request: NextRequest) {
 
     // Award XP for "suggest_place" if approved/processed
     // This connects the "Suggest New Place" activity
-    const additionalData = data?.additional_data as Record<string, unknown> | null;
+    const additionalData = data.additional_data as Record<string, unknown> | null;
     const userId = typeof additionalData?.user_id === "string" ? additionalData.user_id : null;
 
     if (
-      data &&
       (data.status === "approved" || data.status === "processed") &&
       data.form_type === "get-listed" &&
       userId // Only if we captured the user ID
@@ -344,7 +257,6 @@ export async function PATCH(request: NextRequest) {
 
     // Award XP for "report_info" if approved/processed
     if (
-      data &&
       (data.status === "approved" || data.status === "processed") &&
       (data.form_type === "listing_report" || data.form_type === "event_report") &&
       userId
@@ -360,11 +272,14 @@ export async function PATCH(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      submission:
-        data as Database["public"]["Tables"]["form_submissions"]["Row"],
+      submission: data,
       message: "Submission updated successfully",
     });
   } catch (error) {
+    const authStatus = getAdminAuthErrorStatus(error);
+    if (authStatus) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: authStatus });
+    }
     console.error("API error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

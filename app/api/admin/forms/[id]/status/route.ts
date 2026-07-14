@@ -1,12 +1,13 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 
 interface UpdateStatusPayload {
   status: string;
 }
 
 export async function PATCH(
-  request: Request,
+  request: NextRequest,
   props: { params: Promise<{ id: string }> }
 ) {
   try {
@@ -21,37 +22,7 @@ export async function PATCH(
       );
     }
 
-    const supabase = await createServerSupabase();
-
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Use service role to bypass RLS for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify admin/staff role
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (
-      !profile ||
-      !["admin", "super_admin", "lister", "writer"].includes(profile.role)
-    ) {
-      return NextResponse.json(
-        { error: "Admin access required" },
-        { status: 403 }
-      );
-    }
+    await requireStaff(request);
 
     // Parse request body
     const body: UpdateStatusPayload = await request.json();
@@ -89,12 +60,12 @@ export async function PATCH(
     }
 
     // Update submission status
-    const { error: updateError } = await adminSupabase
-      .from("form_submissions")
-      .update({ status })
-      .eq("id", submissionId);
-
-    if (updateError) {
+    try {
+      await query(
+        `UPDATE form_submissions SET status = $1 WHERE id = $2`,
+        [status, submissionId],
+      );
+    } catch (updateError) {
       console.error("Error updating status:", updateError);
       return NextResponse.json(
         { error: "Failed to update submission status" },
@@ -107,6 +78,13 @@ export async function PATCH(
       message: `Status updated to "${status}"`,
     });
   } catch (error) {
+    const authStatus = getAdminAuthErrorStatus(error);
+    if (authStatus) {
+      return NextResponse.json(
+        { error: "Admin access required" },
+        { status: authStatus }
+      );
+    }
     console.error("Update status error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

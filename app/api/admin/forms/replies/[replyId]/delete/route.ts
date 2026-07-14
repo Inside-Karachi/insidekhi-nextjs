@@ -1,8 +1,9 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 export async function DELETE(
-  request: Request,
+  request: NextRequest,
   props: { params: Promise<{ replyId: string }> }
 ) {
   try {
@@ -11,27 +12,16 @@ export async function DELETE(
     const hardDelete = searchParams.get("hard") === "true";
     const reason = searchParams.get("reason");
 
-    const supabase = await createServerSupabase();
-
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Use service role for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify role based on delete type
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
     if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 404 });
@@ -54,20 +44,27 @@ export async function DELETE(
     }
 
     // Call appropriate RPC function
-    const rpcFunction = hardDelete ? "hard_delete_reply" : "soft_delete_reply";
-    const { data: result, error: rpcError } = await adminSupabase.rpc(
-      rpcFunction as unknown as never,
-      {
-        p_reply_id: replyId,
-        p_deleted_by: user.id,
-        p_deletion_reason: reason || null,
-      } as never
-    );
-
-    if (rpcError) {
+    let result: unknown;
+    try {
+      const fnName = hardDelete ? "hard_delete_reply" : "soft_delete_reply";
+      const { rows } = await query(
+        `SELECT ${fnName}(
+           p_reply_id => $1::uuid,
+           p_deleted_by => $2::uuid,
+           p_deletion_reason => $3::text
+         ) AS result`,
+        [replyId, session.userId, reason || null],
+      );
+      result = rows[0]?.result;
+    } catch (rpcError) {
       console.error("RPC error:", rpcError);
       return NextResponse.json(
-        { error: rpcError.message || "Failed to delete reply" },
+        {
+          error:
+            rpcError instanceof Error
+              ? rpcError.message
+              : "Failed to delete reply",
+        },
         { status: 500 }
       );
     }

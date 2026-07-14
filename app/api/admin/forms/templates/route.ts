@@ -1,48 +1,19 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Use service role to bypass RLS for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify admin/staff role
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (
-      !profile ||
-      !["admin", "super_admin", "lister", "writer"].includes(profile.role)
-    ) {
-      return NextResponse.json(
-        { error: "Admin access required" },
-        { status: 403 }
-      );
-    }
+    await requireStaff(request);
 
     // Fetch active templates
-    const { data: templates, error } = await adminSupabase
-      .from("form_reply_templates")
-      .select("*")
-      .eq("is_active", true)
-      .order("name", { ascending: true });
-
-    if (error) {
+    let templates;
+    try {
+      const { rows } = await query(
+        `SELECT * FROM form_reply_templates WHERE is_active = true ORDER BY name ASC`,
+      );
+      templates = rows;
+    } catch (error) {
       console.error("Error fetching templates:", error);
       return NextResponse.json(
         { error: "Failed to fetch templates" },
@@ -55,6 +26,13 @@ export async function GET() {
       templates: templates || [],
     });
   } catch (error) {
+    const authStatus = getAdminAuthErrorStatus(error);
+    if (authStatus) {
+      return NextResponse.json(
+        { error: "Admin access required" },
+        { status: authStatus }
+      );
+    }
     console.error("Templates API error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

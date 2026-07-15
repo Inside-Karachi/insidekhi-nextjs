@@ -1,7 +1,29 @@
-import type { Database } from "@/types/supabase";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { CommentWithAuthor, CommentStatus } from "@/types/comment.types";
+
+function commentColumns(alias: string): string {
+  return (
+    `${alias}.id, ${alias}.review_id, ${alias}.user_id, ${alias}.parent_id, ${alias}.content, ${alias}.status, ${alias}.moderated_by, ` +
+    `to_json(${alias}.moderated_at) #>> '{}' AS moderated_at, ` +
+    `to_json(${alias}.created_at) #>> '{}' AS created_at, ` +
+    `to_json(${alias}.updated_at) #>> '{}' AS updated_at, ` +
+    `${alias}.edit_count, ` +
+    `to_json(${alias}.last_edited_at) #>> '{}' AS last_edited_at`
+  );
+}
+
+function toNumericComment<T extends { id: unknown; review_id: unknown; parent_id: unknown }>(
+  row: T
+) {
+  return {
+    ...row,
+    id: Number(row.id),
+    review_id: Number(row.review_id),
+    parent_id: row.parent_id !== null ? Number(row.parent_id) : null,
+  };
+}
 
 // GET /api/reviews/[reviewId]/comments/[commentId] - Get a specific comment with its replies
 export async function GET(
@@ -9,8 +31,6 @@ export async function GET(
   { params }: { params: Promise<{ reviewId: string; commentId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
-
     const { reviewId: reviewIdParam, commentId: commentIdParam } = await params;
     const reviewId = parseInt(reviewIdParam);
     const commentId = parseInt(commentIdParam);
@@ -20,58 +40,49 @@ export async function GET(
     }
 
     // Get the main comment with author info
-    const { data: comment, error: commentError } = await supabase
-      .from("review_comments")
-      .select(
-        `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url)
-      `
-      )
-      .eq("id", commentId)
-      .eq("review_id", reviewId)
-      .eq("status", "approved")
-      .is("parent_id", null)
-      .single();
+    const { rows: commentRows } = await query(
+      `SELECT ${commentColumns("c")},
+         CASE WHEN p.id IS NOT NULL
+           THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+           ELSE NULL
+         END AS profiles
+       FROM review_comments c
+       LEFT JOIN profiles p ON p.id = c.user_id
+       WHERE c.id = $1 AND c.review_id = $2 AND c.status = 'approved' AND c.parent_id IS NULL`,
+      [commentId, reviewId]
+    );
+    const comment = commentRows[0];
 
-    if (commentError || !comment) {
+    if (!comment) {
       return NextResponse.json({ error: "Comment not found" }, { status: 404 });
     }
 
     // Get replies to this comment
-    const { data: replies, error: repliesError } = await supabase
-      .from("review_comments")
-      .select(
-        `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url)
-      `
-      )
-      .eq("parent_id", commentId)
-      .eq("status", "approved")
-      .order("created_at", { ascending: true });
-
-    if (repliesError) {
-      console.error("Error fetching replies:", repliesError);
-      return NextResponse.json(
-        { error: "Failed to fetch replies" },
-        { status: 500 }
-      );
-    }
+    const { rows: replyRows } = await query(
+      `SELECT ${commentColumns("c")},
+         CASE WHEN p.id IS NOT NULL
+           THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+           ELSE NULL
+         END AS profiles
+       FROM review_comments c
+       LEFT JOIN profiles p ON p.id = c.user_id
+       WHERE c.parent_id = $1 AND c.status = 'approved'
+       ORDER BY c.created_at ASC`,
+      [commentId]
+    );
 
     // Transform data
     const transformedComment = {
-      ...comment,
+      ...toNumericComment(comment),
       author_name: comment.profiles?.full_name || null,
       author_avatar: comment.profiles?.avatar_url || null,
     };
 
-    const transformedReplies =
-      replies?.map((reply) => ({
-        ...reply,
-        author_name: reply.profiles?.full_name || null,
-        author_avatar: reply.profiles?.avatar_url || null,
-      })) || [];
+    const transformedReplies = replyRows.map((reply) => ({
+      ...toNumericComment(reply),
+      author_name: reply.profiles?.full_name || null,
+      author_avatar: reply.profiles?.avatar_url || null,
+    }));
 
     return NextResponse.json({
       thread: {
@@ -98,14 +109,9 @@ export async function PUT(
   { params }: { params: Promise<{ reviewId: string; commentId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
-
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -122,13 +128,12 @@ export async function PUT(
     const { content, status } = body;
 
     // Check if user is admin for status updates
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: roleRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
     const isAdmin =
-      profile?.role === "admin" || profile?.role === "super_admin";
+      roleRows[0]?.role === "admin" || roleRows[0]?.role === "super_admin";
 
     // Validate request
     if (content !== undefined && status !== undefined) {
@@ -179,21 +184,20 @@ export async function PUT(
     }
 
     // Check if comment exists and user owns it
-    const { data: existingComment, error: checkError } = await supabase
-      .from("review_comments")
-      .select("id, user_id, status")
-      .eq("id", commentId)
-      .eq("review_id", reviewId)
-      .single();
+    const { rows: existingRows } = await query(
+      `SELECT id, user_id, status FROM review_comments WHERE id = $1 AND review_id = $2`,
+      [commentId, reviewId]
+    );
+    const existingComment = existingRows[0];
 
-    if (checkError || !existingComment) {
+    if (!existingComment) {
       return NextResponse.json({ error: "Comment not found" }, { status: 404 });
     }
 
     // Check permissions based on operation type
     if (content !== undefined) {
       // Content updates: only comment owner can edit pending comments
-      if (existingComment.user_id !== user.id) {
+      if (existingComment.user_id !== session.userId) {
         return NextResponse.json(
           { error: "You can only edit your own comments" },
           { status: 403 }
@@ -216,40 +220,48 @@ export async function PUT(
       }
     }
 
-    // Prepare update data
-    const updateData: Partial<
-      Database["public"]["Tables"]["review_comments"]["Row"]
-    > = {
-      updated_at: new Date().toISOString(),
-    };
+    // Prepare update
+    const setClauses: string[] = ["updated_at = NOW()"];
+    const updateParams: unknown[] = [];
 
     if (content !== undefined) {
-      updateData.content = content.trim();
+      updateParams.push(content.trim());
+      setClauses.push(`content = $${updateParams.length}`);
     }
 
     if (status !== undefined) {
-      updateData.status = status;
-      updateData.moderated_by = user.id;
-      updateData.moderated_at = new Date().toISOString();
+      updateParams.push(status);
+      setClauses.push(`status = $${updateParams.length}`);
+      updateParams.push(session.userId);
+      setClauses.push(`moderated_by = $${updateParams.length}`);
+      setClauses.push(`moderated_at = NOW()`);
     }
 
-    // Omit 'id' from updateData for Supabase update
-    const { id: _, ...safeUpdateData } = updateData;
-    const { data: updatedComment, error: updateError } = await supabase
-      .from("review_comments")
-      .update(safeUpdateData)
-      .eq("id", commentId)
-      .eq("review_id", reviewId)
-      .select(
-        `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url)
-      `
-      )
-      .single();
+    updateParams.push(commentId, reviewId);
+    const idIdx = updateParams.length - 1;
+    const reviewIdIdx = updateParams.length;
 
-    if (updateError) {
-      console.error("Error updating comment:", updateError);
+    let updatedComment;
+    try {
+      const { rows: updatedRows } = await query(
+        `WITH updated AS (
+           UPDATE review_comments
+           SET ${setClauses.join(", ")}
+           WHERE id = $${idIdx} AND review_id = $${reviewIdIdx}
+           RETURNING *
+         )
+         SELECT ${commentColumns("updated")},
+           CASE WHEN p.id IS NOT NULL
+             THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+             ELSE NULL
+           END AS profiles
+         FROM updated
+         LEFT JOIN profiles p ON p.id = updated.user_id`,
+        updateParams
+      );
+      updatedComment = updatedRows[0];
+    } catch (error) {
+      console.error("Error updating comment:", error);
       return NextResponse.json(
         { error: "Failed to update comment" },
         { status: 500 }
@@ -259,7 +271,7 @@ export async function PUT(
     // Transform the response data
     const transformedComment = updatedComment
       ? {
-          ...updatedComment,
+          ...toNumericComment(updatedComment),
           author_name: updatedComment.profiles?.full_name || null,
           author_avatar: updatedComment.profiles?.avatar_url || null,
         }
@@ -287,14 +299,9 @@ export async function DELETE(
   { params }: { params: Promise<{ reviewId: string; commentId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
-
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -307,18 +314,17 @@ export async function DELETE(
     }
 
     // Check if comment exists and user owns it
-    const { data: existingComment, error: checkError } = await supabase
-      .from("review_comments")
-      .select("id, user_id, status")
-      .eq("id", commentId)
-      .eq("review_id", reviewId)
-      .single();
+    const { rows: existingRows } = await query(
+      `SELECT id, user_id, status FROM review_comments WHERE id = $1 AND review_id = $2`,
+      [commentId, reviewId]
+    );
+    const existingComment = existingRows[0];
 
-    if (checkError || !existingComment) {
+    if (!existingComment) {
       return NextResponse.json({ error: "Comment not found" }, { status: 404 });
     }
 
-    if (existingComment.user_id !== user.id) {
+    if (existingComment.user_id !== session.userId) {
       return NextResponse.json(
         { error: "You can only delete your own comments" },
         { status: 403 }
@@ -332,15 +338,15 @@ export async function DELETE(
       );
     }
 
-    // Delete the comment (this will cascade to delete replies)
-    const { error: deleteError } = await supabase
-      .from("review_comments")
-      .delete()
-      .eq("id", commentId)
-      .eq("review_id", reviewId);
-
-    if (deleteError) {
-      console.error("Error deleting comment:", deleteError);
+    // Delete the comment (this will cascade to delete replies, per the
+    // review_comments_parent_id_fkey ON DELETE CASCADE constraint)
+    try {
+      await query(
+        `DELETE FROM review_comments WHERE id = $1 AND review_id = $2`,
+        [commentId, reviewId]
+      );
+    } catch (error) {
+      console.error("Error deleting comment:", error);
       return NextResponse.json(
         { error: "Failed to delete comment" },
         { status: 500 }

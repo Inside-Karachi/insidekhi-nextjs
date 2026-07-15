@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { requireAdmin, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 
 /**
  * Admin API: List All Bookings with Complete Details
@@ -7,156 +8,112 @@ import { createServerSupabase } from "@/lib/supabase/server";
  * Returns all bookings with event, user, ticket items, and guest details.
  * Only admins can access this endpoint.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
-    // Check user is authenticated and is admin
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    let profile;
+    try {
+      ({ profile } = await requireAdmin(request));
+    } catch (error) {
+      const status = getAdminAuthErrorStatus(error);
       return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
+        {
+          success: false,
+          error: error instanceof Error ? error.message : "Unauthorized",
+        },
+        { status: status ?? 500 }
       );
     }
-
-    // Check admin role
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    const isAdmin =
-      profile?.role === "admin" || profile?.role === "super_admin";
-    if (!isAdmin) {
-      return NextResponse.json(
-        { success: false, error: "Admin access required" },
-        { status: 403 }
-      );
-    }
-
-    // Use service role to bypass RLS for admin queries
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
 
     // Fetch bookings with event info and more fields
-    const { data: bookings, error: bookingsError } = await adminSupabase
-      .from("bookings")
-      .select(
-        `
-        id,
-        booking_reference,
-        payment_status,
-        status,
-        total_amount,
-        created_at,
-        customer_name,
-        customer_email,
-        customer_phone,
-        cnic_last4,
-        event_id,
-        user_id,
-        events (
-          id,
-          name,
-          slug
-        )
-      `
-      )
-      .order("created_at", { ascending: false })
-      .limit(500);
-
-    if (bookingsError) {
-      console.error("Fetch bookings error:", bookingsError);
-      return NextResponse.json(
-        { success: false, error: bookingsError.message },
-        { status: 500 }
-      );
-    }
+    const { rows: bookings } = await query(
+      `SELECT b.id, b.booking_reference, b.payment_status, b.status, b.total_amount,
+              b.created_at, b.customer_name, b.customer_email, b.customer_phone,
+              b.cnic_last4, b.event_id, b.user_id,
+              CASE WHEN e.id IS NULL THEN NULL
+                   ELSE json_build_object('id', e.id, 'name', e.name, 'slug', e.slug)
+              END AS events
+       FROM bookings b
+       LEFT JOIN events e ON e.id = b.event_id
+       ORDER BY b.created_at DESC
+       LIMIT 500`
+    );
 
     // Fetch user profiles
     const userIds = [
-      ...new Set((bookings || []).map((b) => b.user_id).filter(Boolean)),
-    ] as string[];
-    const { data: profiles } =
+      ...new Set(bookings.map((b) => b.user_id as string).filter(Boolean)),
+    ];
+    const { rows: profiles } =
       userIds.length > 0
-        ? await adminSupabase
-            .from("profiles")
-            .select("id, full_name, phone")
-            .in("id", userIds)
-        : { data: [] };
+        ? await query(
+            `SELECT id, full_name, phone FROM profiles WHERE id = ANY($1::uuid[])`,
+            [userIds]
+          )
+        : { rows: [] as { id: string; full_name: string; phone: string }[] };
 
-    const profileMap = new Map((profiles || []).map((p) => [p.id, p]));
+    const profileMap = new Map(profiles.map((p) => [p.id, p]));
 
     // Fetch booking items with ticket types
-    const bookingIds = (bookings || []).map((b) => b.id);
-    const { data: bookingItems } =
+    const bookingIds = bookings.map((b) => b.id as number);
+    const { rows: bookingItems } =
       bookingIds.length > 0
-        ? await adminSupabase
-            .from("booking_items")
-            .select(
-              `
-              booking_id,
-              quantity,
-              price_per_ticket,
-              ticket_type:ticket_type_id (
-                id,
-                name,
-                price
-              )
-            `
-            )
-            .in("booking_id", bookingIds)
-        : { data: [] };
+        ? await query(
+            `SELECT bi.booking_id, bi.quantity, bi.price_per_ticket,
+                    CASE WHEN tt.id IS NULL THEN NULL
+                         ELSE json_build_object('id', tt.id, 'name', tt.name, 'price', tt.price)
+                    END AS ticket_type
+             FROM booking_items bi
+             LEFT JOIN ticket_types tt ON tt.id = bi.ticket_type_id
+             WHERE bi.booking_id = ANY($1::int[])`,
+            [bookingIds]
+          )
+        : { rows: [] as Record<string, unknown>[] };
 
     // Group booking items by booking_id
     const itemsMap = new Map<number, typeof bookingItems>();
-    (bookingItems || []).forEach((item) => {
-      const existing = itemsMap.get(item.booking_id) || [];
+    bookingItems.forEach((item) => {
+      const bookingId = item.booking_id as number;
+      const existing = itemsMap.get(bookingId) || [];
       existing.push(item);
-      itemsMap.set(item.booking_id, existing);
+      itemsMap.set(bookingId, existing);
     });
 
     // Fetch ticket passes (guest details) for paid bookings
-    const { data: ticketPasses } =
+    const { rows: ticketPasses } =
       bookingIds.length > 0
-        ? await adminSupabase
-            .from("ticket_passes")
-            .select(
-              `
-              booking_id,
-              guest_name,
-              guest_cnic,
-              cnic_last4,
-              code,
-              status,
-              checked_in_at,
-              ticket_type:ticket_type_id (name)
-            `
-            )
-            .in("booking_id", bookingIds)
-        : { data: [] };
+        ? await query(
+            `SELECT tp.booking_id, tp.guest_name, tp.guest_cnic, tp.cnic_last4, tp.code,
+                    tp.status, tp.checked_in_at,
+                    CASE WHEN tt.id IS NULL THEN NULL
+                         ELSE json_build_object('name', tt.name)
+                    END AS ticket_type
+             FROM ticket_passes tp
+             LEFT JOIN ticket_types tt ON tt.id = tp.ticket_type_id
+             WHERE tp.booking_id = ANY($1::int[])`,
+            [bookingIds]
+          )
+        : { rows: [] as Record<string, unknown>[] };
 
     // Group ticket passes by booking_id
     const passesMap = new Map<number, typeof ticketPasses>();
-    (ticketPasses || []).forEach((pass) => {
-      const existing = passesMap.get(pass.booking_id) || [];
+    ticketPasses.forEach((pass) => {
+      const bookingId = pass.booking_id as number;
+      const existing = passesMap.get(bookingId) || [];
       existing.push(pass);
-      passesMap.set(pass.booking_id, existing);
+      passesMap.set(bookingId, existing);
     });
 
     // Transform the data with complete details
-    const transformedBookings = (bookings || []).map((booking) => {
-      const items = itemsMap.get(booking.id) || [];
-      const passes = passesMap.get(booking.id) || [];
-      const userProfile = profileMap.get(booking.user_id);
+    const transformedBookings = bookings.map((booking) => {
+      const bookingId = booking.id as number;
+      const items = itemsMap.get(bookingId) || [];
+      const passes = passesMap.get(bookingId) || [];
+      const userProfile = profileMap.get(booking.user_id as string);
 
       // Calculate total tickets
-      const totalTickets = items.reduce((sum, item) => sum + item.quantity, 0);
+      const totalTickets = items.reduce(
+        (sum, item) => sum + (item.quantity as number),
+        0
+      );
 
       // Normalize payment status (handle 'pending' -> 'awaiting_payment')
       let normalizedPaymentStatus = booking.payment_status;
@@ -191,10 +148,10 @@ export async function GET() {
           // Get last 4 digits of CNIC (prefer cnic_last4, fallback to extracting from guest_cnic)
           let cnicLast4: string | null = null;
           if (pass.cnic_last4) {
-            cnicLast4 = pass.cnic_last4;
+            cnicLast4 = pass.cnic_last4 as string;
           } else if (pass.guest_cnic) {
             // Extract last 4 characters from full CNIC
-            const cnicClean = pass.guest_cnic.replace(/-/g, "");
+            const cnicClean = (pass.guest_cnic as string).replace(/-/g, "");
             cnicLast4 = cnicClean.slice(-4);
           }
 

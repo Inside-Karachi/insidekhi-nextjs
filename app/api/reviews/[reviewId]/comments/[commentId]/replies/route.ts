@@ -1,6 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { CommentWithAuthor, CommentListResponse } from "@/types/comment.types";
+
+function commentColumns(alias: string): string {
+  return (
+    `${alias}.id, ${alias}.review_id, ${alias}.user_id, ${alias}.parent_id, ${alias}.content, ${alias}.status, ${alias}.moderated_by, ` +
+    `to_json(${alias}.moderated_at) #>> '{}' AS moderated_at, ` +
+    `to_json(${alias}.created_at) #>> '{}' AS created_at, ` +
+    `to_json(${alias}.updated_at) #>> '{}' AS updated_at, ` +
+    `${alias}.edit_count, ` +
+    `to_json(${alias}.last_edited_at) #>> '{}' AS last_edited_at`
+  );
+}
+
+function toNumericComment<T extends { id: unknown; review_id: unknown; parent_id: unknown }>(
+  row: T
+) {
+  return {
+    ...row,
+    id: Number(row.id),
+    review_id: Number(row.review_id),
+    parent_id: row.parent_id !== null ? Number(row.parent_id) : null,
+  };
+}
 
 // GET /api/reviews/[reviewId]/comments/[commentId]/replies - Get replies to a comment
 export async function GET(
@@ -8,7 +31,6 @@ export async function GET(
   { params }: { params: Promise<{ reviewId: string; commentId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
 
     const { reviewId: reviewIdParam, commentId: commentIdParam } = await params;
@@ -20,16 +42,13 @@ export async function GET(
     }
 
     // Check if parent comment exists and is approved
-    const { data: parentComment, error: parentError } = await supabase
-      .from("review_comments")
-      .select("id, status")
-      .eq("id", commentId)
-      .eq("review_id", reviewId)
-      .eq("status", "approved")
-      .is("parent_id", null)
-      .single();
+    const { rows: parentRows } = await query(
+      `SELECT id, status FROM review_comments
+       WHERE id = $1 AND review_id = $2 AND status = 'approved' AND parent_id IS NULL`,
+      [commentId, reviewId]
+    );
 
-    if (parentError || !parentComment) {
+    if (!parentRows[0]) {
       return NextResponse.json(
         { error: "Parent comment not found or not approved" },
         { status: 404 }
@@ -45,39 +64,32 @@ export async function GET(
     const offset = (page - 1) * limit;
 
     // Get replies with author info
-    const {
-      data: replies,
-      error: repliesError,
-      count,
-    } = await supabase
-      .from("review_comments")
-      .select(
-        `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url)
-      `,
-        { count: "exact" }
-      )
-      .eq("parent_id", commentId)
-      .eq("status", "approved")
-      .order("created_at", { ascending: true })
-      .range(offset, offset + limit - 1);
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM review_comments WHERE parent_id = $1 AND status = 'approved'`,
+      [commentId]
+    );
+    const count = parseInt(countRows[0].count, 10);
 
-    if (repliesError) {
-      console.error("Error fetching replies:", repliesError);
-      return NextResponse.json(
-        { error: "Failed to fetch replies" },
-        { status: 500 }
-      );
-    }
+    const { rows: replyRows } = await query(
+      `SELECT ${commentColumns("c")},
+         CASE WHEN p.id IS NOT NULL
+           THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+           ELSE NULL
+         END AS profiles
+       FROM review_comments c
+       LEFT JOIN profiles p ON p.id = c.user_id
+       WHERE c.parent_id = $1 AND c.status = 'approved'
+       ORDER BY c.created_at ASC
+       LIMIT $2 OFFSET $3`,
+      [commentId, limit, offset]
+    );
 
     // Transform data
-    const transformedReplies =
-      replies?.map((reply) => ({
-        ...reply,
-        author_name: reply.profiles?.full_name || null,
-        author_avatar: reply.profiles?.avatar_url || null,
-      })) || [];
+    const transformedReplies = replyRows.map((reply) => ({
+      ...toNumericComment(reply),
+      author_name: reply.profiles?.full_name || null,
+      author_avatar: reply.profiles?.avatar_url || null,
+    }));
 
     const response: CommentListResponse = {
       comments: transformedReplies as CommentWithAuthor[],
@@ -106,14 +118,9 @@ export async function POST(
   { params }: { params: Promise<{ reviewId: string; commentId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
-
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -126,16 +133,13 @@ export async function POST(
     }
 
     // Check if parent comment exists and is approved
-    const { data: parentComment, error: parentError } = await supabase
-      .from("review_comments")
-      .select("id, status")
-      .eq("id", commentId)
-      .eq("review_id", reviewId)
-      .eq("status", "approved")
-      .is("parent_id", null)
-      .single();
+    const { rows: parentRows } = await query(
+      `SELECT id, status FROM review_comments
+       WHERE id = $1 AND review_id = $2 AND status = 'approved' AND parent_id IS NULL`,
+      [commentId, reviewId]
+    );
 
-    if (parentError || !parentComment) {
+    if (!parentRows[0]) {
       return NextResponse.json(
         { error: "Parent comment not found or not approved" },
         { status: 404 }
@@ -162,25 +166,26 @@ export async function POST(
     }
 
     // Create the reply
-    const { data: newReply, error: insertError } = await supabase
-      .from("review_comments")
-      .insert({
-        review_id: reviewId,
-        user_id: user.id,
-        parent_id: commentId,
-        content: content.trim(),
-        status: "pending", // All new replies start as pending
-      })
-      .select(
-        `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url)
-      `
-      )
-      .single();
-
-    if (insertError) {
-      console.error("Error creating reply:", insertError);
+    let newReply;
+    try {
+      const { rows: insertedRows } = await query(
+        `WITH inserted AS (
+           INSERT INTO review_comments (review_id, user_id, parent_id, content, status)
+           VALUES ($1, $2, $3, $4, 'pending')
+           RETURNING *
+         )
+         SELECT ${commentColumns("inserted")},
+           CASE WHEN p.id IS NOT NULL
+             THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+             ELSE NULL
+           END AS profiles
+         FROM inserted
+         LEFT JOIN profiles p ON p.id = inserted.user_id`,
+        [reviewId, session.userId, commentId, content.trim()]
+      );
+      newReply = toNumericComment(insertedRows[0]);
+    } catch (error) {
+      console.error("Error creating reply:", error);
       return NextResponse.json(
         { error: "Failed to create reply" },
         { status: 500 }

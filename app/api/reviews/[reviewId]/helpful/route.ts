@@ -1,21 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ reviewId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
     const { reviewId } = await params;
 
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -31,13 +27,13 @@ export async function POST(
     }
 
     // Validate review exists and is approved
-    const { data: review, error: reviewError } = await supabase
-      .from("reviews")
-      .select("id, user_id, status")
-      .eq("id", parsedReviewId)
-      .single();
+    const { rows: reviewRows } = await query(
+      `SELECT id, user_id, status FROM reviews WHERE id = $1`,
+      [parsedReviewId]
+    );
+    const review = reviewRows[0];
 
-    if (reviewError || !review) {
+    if (!review) {
       return NextResponse.json(
         { success: false, error: "Review not found" },
         { status: 404 }
@@ -53,7 +49,7 @@ export async function POST(
     }
 
     // Prevent self-voting
-    if (review.user_id === user.id) {
+    if (review.user_id === session.userId) {
       return NextResponse.json(
         { success: false, error: "Cannot vote on your own review" },
         { status: 400 }
@@ -61,30 +57,27 @@ export async function POST(
     }
 
     // Check if user already voted
-    const { data: existingVote, error: _voteCheckError } = await supabase
-      .from("helpful_reviews")
-      .select("user_id")
-      .eq("user_id", user.id)
-      .eq("review_id", parsedReviewId)
-      .maybeSingle();
+    const { rows: existingVoteRows } = await query(
+      `SELECT user_id FROM helpful_reviews WHERE user_id = $1 AND review_id = $2`,
+      [session.userId, parsedReviewId]
+    );
 
-    if (existingVote) {
+    if (existingVoteRows.length > 0) {
       return NextResponse.json(
         { success: false, error: "Already voted on this review" },
         { status: 400 }
       );
     }
 
-    // Insert helpful vote
-    const { error: insertError } = await supabase
-      .from("helpful_reviews")
-      .insert({
-        user_id: user.id,
-        review_id: parsedReviewId,
-      });
-
-    if (insertError) {
-      console.error("Error inserting helpful vote:", insertError);
+    // Insert helpful vote (reviews.helpful_count is kept in sync by the
+    // trigger_update_helpful_count DB trigger)
+    try {
+      await query(
+        `INSERT INTO helpful_reviews (user_id, review_id) VALUES ($1, $2)`,
+        [session.userId, parsedReviewId]
+      );
+    } catch (error) {
+      console.error("Error inserting helpful vote:", error);
       return NextResponse.json(
         { success: false, error: "Failed to record vote" },
         { status: 500 }
@@ -92,35 +85,35 @@ export async function POST(
     }
 
     // Get updated helpful count
-    const { data: updatedReview, error: _countError } = await supabase
-      .from("reviews")
-      .select("helpful_count")
-      .eq("id", parsedReviewId)
-      .single();
+    const { rows: updatedRows } = await query(
+      `SELECT helpful_count FROM reviews WHERE id = $1`,
+      [parsedReviewId]
+    );
+    const updatedReview = updatedRows[0];
 
     // Award XP for reacting to a review (max 10/day per activity rules)
     try {
       const { awardXP } = await import("@/lib/gamification");
       const xpResult = await awardXP(
-        user.id,
+        session.userId,
         "react_review",
         parsedReviewId
       );
 
       if ("error" in xpResult) {
         console.error(
-          `[REVIEW REACTION XP] Failed for user ${user.id} on review ${reviewId}:`,
+          `[REVIEW REACTION XP] Failed for user ${session.userId} on review ${reviewId}:`,
           xpResult.error,
           xpResult.details
         );
       } else {
         console.log(
-          `[REVIEW REACTION XP] Awarded ${xpResult.xp_awarded} XP to user ${user.id}`
+          `[REVIEW REACTION XP] Awarded ${xpResult.xp_awarded} XP to user ${session.userId}`
         );
       }
     } catch (xpError) {
       console.error(
-        `[REVIEW REACTION XP] Exception for user ${user.id} on review ${reviewId}:`,
+        `[REVIEW REACTION XP] Exception for user ${session.userId} on review ${reviewId}:`,
         xpError
       );
     }
@@ -146,7 +139,6 @@ export async function DELETE(
   { params }: { params: Promise<{ reviewId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { reviewId } = await params;
     const parsedReviewId = parseInt(reviewId, 10);
     if (isNaN(parsedReviewId)) {
@@ -157,12 +149,9 @@ export async function DELETE(
     }
 
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -170,14 +159,13 @@ export async function DELETE(
     }
 
     // Remove helpful vote
-    const { error: deleteError } = await supabase
-      .from("helpful_reviews")
-      .delete()
-      .eq("user_id", user.id)
-      .eq("review_id", parsedReviewId);
-
-    if (deleteError) {
-      console.error("Error removing helpful vote:", deleteError);
+    try {
+      await query(
+        `DELETE FROM helpful_reviews WHERE user_id = $1 AND review_id = $2`,
+        [session.userId, parsedReviewId]
+      );
+    } catch (error) {
+      console.error("Error removing helpful vote:", error);
       return NextResponse.json(
         { success: false, error: "Failed to remove vote" },
         { status: 500 }
@@ -185,11 +173,11 @@ export async function DELETE(
     }
 
     // Get updated helpful count
-    const { data: updatedReview, error: _countError } = await supabase
-      .from("reviews")
-      .select("helpful_count")
-      .eq("id", parsedReviewId)
-      .single();
+    const { rows: updatedRows } = await query(
+      `SELECT helpful_count FROM reviews WHERE id = $1`,
+      [parsedReviewId]
+    );
+    const updatedReview = updatedRows[0];
 
     return NextResponse.json({
       success: true,
@@ -212,7 +200,6 @@ export async function GET(
   { params }: { params: Promise<{ reviewId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { reviewId } = await params;
     const parsedReviewId = parseInt(reviewId, 10);
     if (isNaN(parsedReviewId)) {
@@ -223,19 +210,16 @@ export async function GET(
     }
 
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
     // Get review with helpful count (this doesn't require authentication)
-    const { data: review, error: reviewError } = await supabase
-      .from("reviews")
-      .select("helpful_count")
-      .eq("id", parsedReviewId)
-      .single();
+    const { rows: reviewRows } = await query(
+      `SELECT helpful_count FROM reviews WHERE id = $1`,
+      [parsedReviewId]
+    );
+    const review = reviewRows[0];
 
-    if (reviewError || !review) {
+    if (!review) {
       return NextResponse.json(
         { success: false, error: "Review not found" },
         { status: 404 }
@@ -243,7 +227,7 @@ export async function GET(
     }
 
     // If user is not authenticated, return helpful count with user_voted: false
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({
         success: true,
         data: {
@@ -254,18 +238,16 @@ export async function GET(
     }
 
     // Check if authenticated user already voted
-    const { data: userVote, error: _voteError } = await supabase
-      .from("helpful_reviews")
-      .select("user_id")
-      .eq("user_id", user.id)
-      .eq("review_id", parsedReviewId)
-      .maybeSingle();
+    const { rows: userVoteRows } = await query(
+      `SELECT user_id FROM helpful_reviews WHERE user_id = $1 AND review_id = $2`,
+      [session.userId, parsedReviewId]
+    );
 
     return NextResponse.json({
       success: true,
       data: {
         helpful_count: review.helpful_count || 0,
-        user_voted: !!userVote,
+        user_voted: userVoteRows.length > 0,
       },
     });
   } catch (error) {

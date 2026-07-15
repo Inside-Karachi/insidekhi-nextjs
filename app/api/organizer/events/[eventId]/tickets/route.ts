@@ -1,8 +1,59 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 // Force dynamic to ensure fresh ticket data
 export const dynamic = "force-dynamic";
+
+const PRIVILEGED_ROLES = ["admin", "super_admin", "lister"];
+
+const TICKET_TYPE_COLUMNS =
+  "id, event_id, name, description, price, quantity_available, " +
+  "to_json(sale_starts_at) #>> '{}' AS sale_starts_at, " +
+  "to_json(sale_ends_at) #>> '{}' AS sale_ends_at, " +
+  "max_per_person";
+
+function toNumericTicketType<T extends { id: unknown; event_id: unknown; price: unknown }>(
+  row: T
+) {
+  return {
+    ...row,
+    id: Number(row.id),
+    event_id: Number(row.event_id),
+    price: row.price !== null ? Number(row.price) : null,
+  };
+}
+
+async function verifyEventAccess(userId: string, eventIdNum: number) {
+  const { rows: profileRows } = await query(
+    `SELECT role FROM profiles WHERE id = $1`,
+    [userId]
+  );
+  const profile = profileRows[0];
+
+  if (!profile) {
+    return { error: "Profile not found", status: 404 } as const;
+  }
+
+  const { rows: eventRows } = await query(
+    `SELECT id, organizer_id FROM events WHERE id = $1`,
+    [eventIdNum]
+  );
+  const event = eventRows[0];
+
+  if (!event) {
+    return { error: "Event not found", status: 404 } as const;
+  }
+
+  const isOwner = event.organizer_id === userId;
+  const isAdmin = PRIVILEGED_ROLES.includes(profile.role);
+
+  if (!isOwner && !isAdmin) {
+    return { error: "Access denied", status: 403 } as const;
+  }
+
+  return { ok: true } as const;
+}
 
 // GET /api/organizer/events/[eventId]/tickets - Get tickets for an event owned by the organizer
 export async function GET(
@@ -11,71 +62,35 @@ export async function GET(
 ) {
   try {
     const { eventId } = await params;
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Verify user owns this event or is admin/lister
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (!profile) {
-      return NextResponse.json(
-        { success: false, error: "Profile not found" },
-        { status: 404 }
-      );
-    }
-
     const eventIdNum = parseInt(eventId, 10);
 
-    // Check event ownership
-    const { data: event, error: eventError } = await adminSupabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", eventIdNum)
-      .single();
-
-    if (eventError || !event) {
+    const access = await verifyEventAccess(session.userId, eventIdNum);
+    if (!access.ok) {
       return NextResponse.json(
-        { success: false, error: "Event not found" },
-        { status: 404 }
-      );
-    }
-
-    const isOwner = event.organizer_id === user.id;
-    const isAdmin = ["admin", "super_admin", "lister"].includes(profile.role);
-
-    if (!isOwner && !isAdmin) {
-      return NextResponse.json(
-        { success: false, error: "Access denied" },
-        { status: 403 }
+        { success: false, error: access.error },
+        { status: access.status }
       );
     }
 
     // Fetch ticket types
-    const { data: ticketTypes, error: ticketsError } = await adminSupabase
-      .from("ticket_types")
-      .select("*")
-      .eq("event_id", eventIdNum)
-      .order("id", { ascending: true });
-
-    if (ticketsError) {
-      console.error("Error fetching tickets:", ticketsError);
+    let ticketTypes;
+    try {
+      const { rows } = await query(
+        `SELECT ${TICKET_TYPE_COLUMNS} FROM ticket_types WHERE event_id = $1 ORDER BY id ASC`,
+        [eventIdNum]
+      );
+      ticketTypes = rows.map(toNumericTicketType);
+    } catch (error) {
+      console.error("Error fetching tickets:", error);
       return NextResponse.json(
         { success: false, error: "Failed to fetch tickets" },
         { status: 500 }
@@ -105,58 +120,22 @@ export async function POST(
   try {
     const { eventId } = await params;
     const body = await request.json();
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (!profile) {
-      return NextResponse.json(
-        { success: false, error: "Profile not found" },
-        { status: 404 }
-      );
-    }
-
     const eventIdNum = parseInt(eventId, 10);
 
-    // Verify ownership
-    const { data: event } = await adminSupabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", eventIdNum)
-      .single();
-
-    if (!event) {
+    const access = await verifyEventAccess(session.userId, eventIdNum);
+    if (!access.ok) {
       return NextResponse.json(
-        { success: false, error: "Event not found" },
-        { status: 404 }
-      );
-    }
-
-    const isOwner = event.organizer_id === user.id;
-    const isAdmin = ["admin", "super_admin", "lister"].includes(profile.role);
-
-    if (!isOwner && !isAdmin) {
-      return NextResponse.json(
-        { success: false, error: "Access denied" },
-        { status: 403 }
+        { success: false, error: access.error },
+        { status: access.status }
       );
     }
 
@@ -173,25 +152,26 @@ export async function POST(
     }
 
     // Create ticket type
-    const { data: ticketType, error: createError } = await adminSupabase
-      .from("ticket_types")
-      .insert({
-        event_id: eventIdNum,
-        name: body.name,
-        description: body.description || null,
-        price: parseFloat(body.price),
-        quantity_available: parseInt(body.quantity_available, 10),
-        sale_starts_at: body.sale_starts_at || null,
-        sale_ends_at: body.sale_ends_at || null,
-        max_per_person: body.max_per_person
-          ? parseInt(body.max_per_person, 10)
-          : 10,
-      })
-      .select()
-      .single();
-
-    if (createError) {
-      console.error("Error creating ticket:", createError);
+    let ticketType;
+    try {
+      const { rows } = await query(
+        `INSERT INTO ticket_types (event_id, name, description, price, quantity_available, sale_starts_at, sale_ends_at, max_per_person)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING ${TICKET_TYPE_COLUMNS}`,
+        [
+          eventIdNum,
+          body.name,
+          body.description || null,
+          parseFloat(body.price),
+          parseInt(body.quantity_available, 10),
+          body.sale_starts_at || null,
+          body.sale_ends_at || null,
+          body.max_per_person ? parseInt(body.max_per_person, 10) : 10,
+        ]
+      );
+      ticketType = toNumericTicketType(rows[0]);
+    } catch (error) {
+      console.error("Error creating ticket:", error);
       return NextResponse.json(
         { success: false, error: "Failed to create ticket type" },
         { status: 500 }
@@ -229,88 +209,84 @@ export async function PATCH(
       );
     }
 
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (!profile) {
-      return NextResponse.json(
-        { success: false, error: "Profile not found" },
-        { status: 404 }
-      );
-    }
-
     const eventIdNum = parseInt(eventId, 10);
     const ticketIdNum = parseInt(ticketId, 10);
 
-    // Verify ownership
-    const { data: event } = await adminSupabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", eventIdNum)
-      .single();
-
-    if (!event) {
+    const access = await verifyEventAccess(session.userId, eventIdNum);
+    if (!access.ok) {
       return NextResponse.json(
-        { success: false, error: "Event not found" },
-        { status: 404 }
+        { success: false, error: access.error },
+        { status: access.status }
       );
     }
 
-    const isOwner = event.organizer_id === user.id;
-    const isAdmin = ["admin", "super_admin", "lister"].includes(profile.role);
+    // Build update
+    const setClauses: string[] = [];
+    const updateParams: unknown[] = [];
 
-    if (!isOwner && !isAdmin) {
-      return NextResponse.json(
-        { success: false, error: "Access denied" },
-        { status: 403 }
-      );
+    if (body.name !== undefined) {
+      updateParams.push(body.name);
+      setClauses.push(`name = $${updateParams.length}`);
     }
-
-    // Build update object
-    const updateData: Record<string, unknown> = {};
-    if (body.name !== undefined) updateData.name = body.name;
-    if (body.description !== undefined)
-      updateData.description = body.description || null;
-    if (body.price !== undefined) updateData.price = parseFloat(body.price);
+    if (body.description !== undefined) {
+      updateParams.push(body.description || null);
+      setClauses.push(`description = $${updateParams.length}`);
+    }
+    if (body.price !== undefined) {
+      updateParams.push(parseFloat(body.price));
+      setClauses.push(`price = $${updateParams.length}`);
+    }
     if (body.quantity_available !== undefined) {
-      updateData.quantity_available = parseInt(body.quantity_available, 10);
+      updateParams.push(parseInt(body.quantity_available, 10));
+      setClauses.push(`quantity_available = $${updateParams.length}`);
     }
-    if (body.sale_starts_at !== undefined)
-      updateData.sale_starts_at = body.sale_starts_at || null;
-    if (body.sale_ends_at !== undefined)
-      updateData.sale_ends_at = body.sale_ends_at || null;
+    if (body.sale_starts_at !== undefined) {
+      updateParams.push(body.sale_starts_at || null);
+      setClauses.push(`sale_starts_at = $${updateParams.length}`);
+    }
+    if (body.sale_ends_at !== undefined) {
+      updateParams.push(body.sale_ends_at || null);
+      setClauses.push(`sale_ends_at = $${updateParams.length}`);
+    }
     if (body.max_per_person !== undefined) {
-      updateData.max_per_person = parseInt(body.max_per_person, 10);
+      updateParams.push(parseInt(body.max_per_person, 10));
+      setClauses.push(`max_per_person = $${updateParams.length}`);
     }
 
-    const { data: ticketType, error: updateError } = await adminSupabase
-      .from("ticket_types")
-      .update(updateData)
-      .eq("id", ticketIdNum)
-      .eq("event_id", eventIdNum)
-      .select()
-      .single();
+    if (setClauses.length === 0) {
+      return NextResponse.json(
+        { success: false, error: "No fields provided to update" },
+        { status: 400 }
+      );
+    }
 
-    if (updateError) {
-      console.error("Error updating ticket:", updateError);
+    updateParams.push(ticketIdNum, eventIdNum);
+    const idIdx = updateParams.length - 1;
+    const eventIdIdx = updateParams.length;
+
+    let ticketType;
+    try {
+      const { rows } = await query(
+        `UPDATE ticket_types SET ${setClauses.join(", ")}
+         WHERE id = $${idIdx} AND event_id = $${eventIdIdx}
+         RETURNING ${TICKET_TYPE_COLUMNS}`,
+        updateParams
+      );
+      if (!rows[0]) {
+        throw new Error("No matching ticket type row after update");
+      }
+      ticketType = toNumericTicketType(rows[0]);
+    } catch (error) {
+      console.error("Error updating ticket:", error);
       return NextResponse.json(
         { success: false, error: "Failed to update ticket type" },
         { status: 500 }
@@ -347,68 +323,34 @@ export async function DELETE(
       );
     }
 
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (!profile) {
-      return NextResponse.json(
-        { success: false, error: "Profile not found" },
-        { status: 404 }
-      );
-    }
-
     const eventIdNum = parseInt(eventId, 10);
     const ticketIdNum = parseInt(ticketId, 10);
 
-    // Verify ownership
-    const { data: event } = await adminSupabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", eventIdNum)
-      .single();
-
-    if (!event) {
+    const access = await verifyEventAccess(session.userId, eventIdNum);
+    if (!access.ok) {
       return NextResponse.json(
-        { success: false, error: "Event not found" },
-        { status: 404 }
-      );
-    }
-
-    const isOwner = event.organizer_id === user.id;
-    const isAdmin = ["admin", "super_admin", "lister"].includes(profile.role);
-
-    if (!isOwner && !isAdmin) {
-      return NextResponse.json(
-        { success: false, error: "Access denied" },
-        { status: 403 }
+        { success: false, error: access.error },
+        { status: access.status }
       );
     }
 
     // Check if ticket has any bookings
-    const { count: bookingCount } = await adminSupabase
-      .from("booking_items")
-      .select("*", { count: "exact", head: true })
-      .eq("ticket_type_id", ticketIdNum);
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM booking_items WHERE ticket_type_id = $1`,
+      [ticketIdNum]
+    );
+    const bookingCount = parseInt(countRows[0].count, 10);
 
-    if (bookingCount && bookingCount > 0) {
+    if (bookingCount > 0) {
       return NextResponse.json(
         {
           success: false,
@@ -418,14 +360,13 @@ export async function DELETE(
       );
     }
 
-    const { error: deleteError } = await adminSupabase
-      .from("ticket_types")
-      .delete()
-      .eq("id", ticketIdNum)
-      .eq("event_id", eventIdNum);
-
-    if (deleteError) {
-      console.error("Error deleting ticket:", deleteError);
+    try {
+      await query(
+        `DELETE FROM ticket_types WHERE id = $1 AND event_id = $2`,
+        [ticketIdNum, eventIdNum]
+      );
+    } catch (error) {
+      console.error("Error deleting ticket:", error);
       return NextResponse.json(
         { success: false, error: "Failed to delete ticket type" },
         { status: 500 }

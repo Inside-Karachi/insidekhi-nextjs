@@ -21,6 +21,14 @@ function toNumericEvent(row: Record<string, unknown>) {
     ...row,
     event_id: Number(row.event_id),
     category_id: row.category_id !== null ? Number(row.category_id) : null,
+    // latitude/longitude/commission_rate are numeric columns; node-pg
+    // returns them as strings by default (no custom type parser
+    // configured), unlike the old PostgREST path which serialized them
+    // as JSON numbers.
+    latitude: row.latitude !== null ? Number(row.latitude) : null,
+    longitude: row.longitude !== null ? Number(row.longitude) : null,
+    commission_rate:
+      row.commission_rate !== null ? Number(row.commission_rate) : null,
   };
 }
 
@@ -238,6 +246,10 @@ export async function POST(request: NextRequest) {
         ...row,
         id: Number(row.id),
         category_id: row.category_id !== null ? Number(row.category_id) : null,
+        latitude: row.latitude !== null ? Number(row.latitude) : null,
+        longitude: row.longitude !== null ? Number(row.longitude) : null,
+        commission_rate:
+          row.commission_rate !== null ? Number(row.commission_rate) : null,
       };
     } catch (error) {
       console.error("Error creating event:", error);

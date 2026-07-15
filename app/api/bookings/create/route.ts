@@ -1,21 +1,19 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { createNotification } from "@/lib/notifications/service";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 import crypto from "crypto";
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
     // Check Auth
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+    const user = { id: session.userId };
 
     const body = await request.json();
     const { buyerDetails, items } = body;
@@ -52,17 +50,17 @@ export async function POST(request: Request) {
       .toUpperCase();
     const bookingReference = `IK-${timestampPart}-${randomPart}`;
 
-    // Use service role for transaction to ensure all writes succeed
+    // Use service role for the notification call at the end (shared lib still requires it).
     const adminSupabase = await createServerSupabase({ useServiceRole: true });
 
     // Re-fetch ticket prices server-side; never trust client-supplied prices.
     const ticketTypeIds = items.map(
       (i: { ticketTypeId: number }) => i.ticketTypeId,
     );
-    const { data: ticketTypes } = await adminSupabase
-      .from("ticket_types")
-      .select("id, price, event_id")
-      .in("id", ticketTypeIds);
+    const { rows: ticketTypes } = await query(
+      `SELECT id, price, event_id FROM ticket_types WHERE id = ANY($1::int[])`,
+      [ticketTypeIds],
+    );
 
     if (!ticketTypes) {
       return NextResponse.json({ error: "Invalid tickets" }, { status: 400 });
@@ -93,15 +91,17 @@ export async function POST(request: Request) {
     }
 
     // Fetch platform and payment fees from server config (never trust client-supplied fees)
-    const { data: feeConfigs } = await adminSupabase
-      .from("system_config")
-      .select("config_key, config_value")
-      .in("config_key", [
-        "fees.platform_fee_fixed",
-        "fees.platform_fee_percentage",
-        "fees.payment_processing_fee_fixed",
-        "fees.payment_processing_fee_percentage",
-      ]);
+    const { rows: feeConfigs } = await query(
+      `SELECT config_key, config_value FROM system_config WHERE config_key = ANY($1::text[])`,
+      [
+        [
+          "fees.platform_fee_fixed",
+          "fees.platform_fee_percentage",
+          "fees.payment_processing_fee_fixed",
+          "fees.payment_processing_fee_percentage",
+        ],
+      ],
+    );
 
     const feeMap: Record<string, number> = {};
     for (const row of feeConfigs ?? []) {
@@ -139,45 +139,55 @@ export async function POST(request: Request) {
     );
 
     // create_booking_atomic is defined in sql/migrations/20260311_security_atomic_booking_rpc.sql.
-    // Cast through unknown because the function is not yet in the generated Supabase types.
-    // Re-generate types with `npx supabase gen types typescript` after running the migration.
+    // It wraps both inserts (booking + booking_items) in a single PL/pgSQL transaction -
+    // if booking_items insertion fails, the booking row is also rolled back.
     interface BookingAtomicResult {
       booking_id: number;
       booking_reference: string;
     }
-    const typedRpc = adminSupabase as unknown as {
-      rpc: (
-        fn: string,
-        args: Record<string, unknown>,
-      ) => Promise<{
-        data: BookingAtomicResult | null;
-        error: { message: string } | null;
-      }>;
-    };
 
-    const { data: rpcResult, error: bookingError } = await typedRpc.rpc(
-      "create_booking_atomic",
-      {
-        p_user_id: user.id,
-        p_event_id: verifiedItems[0].eventId,
-        p_total_amount: totalAmount,
-        p_basket_id: bookingReference,
-        p_booking_reference: bookingReference,
-        p_verification_seed: verificationSeed,
-        p_expires_at: expiresAt,
-        p_cnic_hash: cnicHash,
-        p_cnic_last4: cnicLast4,
-        p_customer_name: buyerDetails.name,
-        p_customer_email: buyerDetails.email,
-        p_customer_phone: buyerDetails.phone,
-        p_items: rpcItems,
-      },
-    );
-
-    if (bookingError || !rpcResult) {
+    let bookingId: number | undefined;
+    try {
+      const { rows: rpcRows } = await query(
+        `SELECT create_booking_atomic(
+           p_user_id => $1,
+           p_event_id => $2,
+           p_total_amount => $3,
+           p_basket_id => $4,
+           p_booking_reference => $5,
+           p_verification_seed => $6,
+           p_expires_at => $7,
+           p_cnic_hash => $8,
+           p_cnic_last4 => $9,
+           p_customer_name => $10,
+           p_customer_email => $11,
+           p_customer_phone => $12,
+           p_items => $13::jsonb
+         ) AS result`,
+        [
+          user.id,
+          verifiedItems[0].eventId,
+          totalAmount,
+          bookingReference,
+          bookingReference,
+          verificationSeed,
+          expiresAt,
+          cnicHash,
+          cnicLast4,
+          buyerDetails.name,
+          buyerDetails.email,
+          buyerDetails.phone,
+          JSON.stringify(rpcItems),
+        ],
+      );
+      const rpcResult = rpcRows[0]?.result as BookingAtomicResult | null;
+      bookingId = rpcResult?.booking_id;
+    } catch (bookingError) {
       console.error("Booking creation failed:", bookingError);
       captureRouteError(
-        bookingError ?? new Error("Booking RPC returned no result"),
+        bookingError instanceof Error
+          ? bookingError
+          : new Error("Booking RPC returned no result"),
         {
           route: "/api/bookings/create",
           method: "POST",
@@ -189,7 +199,17 @@ export async function POST(request: Request) {
       );
     }
 
-    const bookingId = (rpcResult as { booking_id: number }).booking_id;
+    if (!bookingId) {
+      console.error("Booking creation failed: no booking id returned");
+      captureRouteError(new Error("Booking RPC returned no result"), {
+        route: "/api/bookings/create",
+        method: "POST",
+      });
+      return NextResponse.json(
+        { error: "Failed to create booking" },
+        { status: 500 },
+      );
+    }
 
     // 3. Create Ticket Passes (non-fatal - will be regenerated by payment callback if needed)
     const ticketPasses = [];
@@ -239,11 +259,32 @@ export async function POST(request: Request) {
 
     // Insert ticket passes (non-fatal)
     if (ticketPasses.length > 0) {
-      const { error: passesError } = await adminSupabase
-        .from("ticket_passes")
-        .insert(ticketPasses);
-
-      if (passesError) {
+      try {
+        const values: unknown[] = [];
+        const placeholders = ticketPasses
+          .map((p, idx) => {
+            const base = idx * 9;
+            values.push(
+              p.booking_id,
+              p.event_id,
+              p.ticket_type_id,
+              p.code,
+              p.signature,
+              p.status,
+              p.quantity_index,
+              p.guest_name,
+              p.cnic_last4,
+            );
+            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9})`;
+          })
+          .join(", ");
+        await query(
+          `INSERT INTO ticket_passes
+             (booking_id, event_id, ticket_type_id, code, signature, status, quantity_index, guest_name, cnic_last4)
+           VALUES ${placeholders}`,
+          values,
+        );
+      } catch (passesError) {
         console.error("Ticket passes creation failed:", passesError);
         // Non-fatal - passes will be regenerated by payment callback
       }
@@ -251,11 +292,11 @@ export async function POST(request: Request) {
 
     // === SEND NOTIFICATION: Booking Created (Pending Payment) ===
     try {
-      const { data: event } = await adminSupabase
-        .from("events")
-        .select("name")
-        .eq("id", verifiedItems[0].eventId)
-        .single();
+      const { rows: eventRows } = await query(
+        `SELECT name FROM events WHERE id = $1`,
+        [verifiedItems[0].eventId],
+      );
+      const event = eventRows[0];
 
       const eventName = event?.name || "your event";
 

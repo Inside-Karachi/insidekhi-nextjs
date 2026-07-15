@@ -4,7 +4,7 @@ import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { createMobilePublicClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import { USERNAME_RE } from "@/lib/mobile/profile";
 
 export const dynamic = "force-dynamic";
@@ -41,14 +41,17 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const supabase = createMobilePublicClient();
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("id")
-    .ilike("username", username)
-    .maybeSingle();
-  if (error) {
-    console.error("[mobile-api] username-check failed:", error.message);
+  let rows;
+  try {
+    ({ rows } = await query(
+      `SELECT id FROM profiles WHERE username ILIKE $1 LIMIT 1`,
+      [username],
+    ));
+  } catch (error) {
+    console.error(
+      "[mobile-api] username-check failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError(
       "internal_error",
       "Could not check the username.",
@@ -56,5 +59,5 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  return ok({ available: data == null });
+  return ok({ available: rows[0] == null });
 });

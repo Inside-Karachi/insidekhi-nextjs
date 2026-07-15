@@ -268,14 +268,24 @@ export async function PUT(
       );
     }
 
+    // The old Supabase `.update().select().single()` threw (surfacing as a
+    // 500) if the row vanished between the existence check above and this
+    // UPDATE (e.g. a concurrent delete) - the CTE above would otherwise
+    // return zero rows silently, so fail the same way explicitly here.
+    if (!updatedComment) {
+      console.error("Error updating comment: no matching row after update");
+      return NextResponse.json(
+        { error: "Failed to update comment" },
+        { status: 500 }
+      );
+    }
+
     // Transform the response data
-    const transformedComment = updatedComment
-      ? {
-          ...toNumericComment(updatedComment),
-          author_name: updatedComment.profiles?.full_name || null,
-          author_avatar: updatedComment.profiles?.avatar_url || null,
-        }
-      : null;
+    const transformedComment = {
+      ...toNumericComment(updatedComment),
+      author_name: updatedComment.profiles?.full_name || null,
+      author_avatar: updatedComment.profiles?.avatar_url || null,
+    };
 
     return NextResponse.json({
       comment: transformedComment as CommentWithAuthor,

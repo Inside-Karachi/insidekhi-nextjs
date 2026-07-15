@@ -151,6 +151,23 @@ export async function POST(
       );
     }
 
+    const price = parseFloat(body.price);
+    const quantityAvailable = parseInt(body.quantity_available, 10);
+    const maxPerPerson = body.max_per_person
+      ? parseInt(body.max_per_person, 10)
+      : 10;
+
+    if (
+      !Number.isFinite(price) ||
+      !Number.isFinite(quantityAvailable) ||
+      !Number.isFinite(maxPerPerson)
+    ) {
+      return NextResponse.json(
+        { success: false, error: "Invalid numeric field value" },
+        { status: 400 }
+      );
+    }
+
     // Create ticket type
     let ticketType;
     try {
@@ -162,11 +179,11 @@ export async function POST(
           eventIdNum,
           body.name,
           body.description || null,
-          parseFloat(body.price),
-          parseInt(body.quantity_available, 10),
+          price,
+          quantityAvailable,
           body.sale_starts_at || null,
           body.sale_ends_at || null,
-          body.max_per_person ? parseInt(body.max_per_person, 10) : 10,
+          maxPerPerson,
         ]
       );
       ticketType = toNumericTicketType(rows[0]);
@@ -242,11 +259,25 @@ export async function PATCH(
       setClauses.push(`description = $${updateParams.length}`);
     }
     if (body.price !== undefined) {
-      updateParams.push(parseFloat(body.price));
+      const price = parseFloat(body.price);
+      if (!Number.isFinite(price)) {
+        return NextResponse.json(
+          { success: false, error: "Invalid numeric field value" },
+          { status: 400 }
+        );
+      }
+      updateParams.push(price);
       setClauses.push(`price = $${updateParams.length}`);
     }
     if (body.quantity_available !== undefined) {
-      updateParams.push(parseInt(body.quantity_available, 10));
+      const quantityAvailable = parseInt(body.quantity_available, 10);
+      if (!Number.isFinite(quantityAvailable)) {
+        return NextResponse.json(
+          { success: false, error: "Invalid numeric field value" },
+          { status: 400 }
+        );
+      }
+      updateParams.push(quantityAvailable);
       setClauses.push(`quantity_available = $${updateParams.length}`);
     }
     if (body.sale_starts_at !== undefined) {
@@ -258,7 +289,14 @@ export async function PATCH(
       setClauses.push(`sale_ends_at = $${updateParams.length}`);
     }
     if (body.max_per_person !== undefined) {
-      updateParams.push(parseInt(body.max_per_person, 10));
+      const maxPerPerson = parseInt(body.max_per_person, 10);
+      if (!Number.isFinite(maxPerPerson)) {
+        return NextResponse.json(
+          { success: false, error: "Invalid numeric field value" },
+          { status: 400 }
+        );
+      }
+      updateParams.push(maxPerPerson);
       setClauses.push(`max_per_person = $${updateParams.length}`);
     }
 
@@ -282,7 +320,10 @@ export async function PATCH(
         updateParams
       );
       if (!rows[0]) {
-        throw new Error("No matching ticket type row after update");
+        return NextResponse.json(
+          { success: false, error: "Ticket type not found for this event" },
+          { status: 404 }
+        );
       }
       ticketType = toNumericTicketType(rows[0]);
     } catch (error) {

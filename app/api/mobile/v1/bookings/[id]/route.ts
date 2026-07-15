@@ -5,6 +5,7 @@ import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePathId } from "@/lib/mobile/params";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -18,24 +19,19 @@ export const dynamic = "force-dynamic";
  * `customer_phone` (see mobile API section 1.1).
  */
 export const GET = mobileRoute(async (request: NextRequest, { params }) => {
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
   const bookingId = parsePathId((await params).id, "id");
 
-  const { data: booking, error } = await supabase
-    .from("bookings")
-    .select(
-      "id, booking_reference, event_id, total_amount, payment_status, status, customer_name, cnic_last4, expires_at, created_at",
-    )
-    .eq("id", bookingId)
-    .eq("user_id", user.id)
-    .maybeSingle();
-
-  if (error) {
-    console.error("[mobile-api] booking query failed:", error.message);
-    throw new MobileApiError("internal_error", "Failed to load booking.", 500);
-  }
+  const { rows } = await query(
+    `SELECT id, booking_reference, event_id, total_amount, payment_status, status,
+            customer_name, cnic_last4, expires_at, created_at
+     FROM bookings
+     WHERE id = $1 AND user_id = $2`,
+    [bookingId, user.id],
+  );
+  const booking = rows[0];
 
   if (!booking) {
     throw new MobileApiError("not_found", "Booking not found.", 404);

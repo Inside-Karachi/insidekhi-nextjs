@@ -1,5 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { deleteFile, uploadFile } from "@/lib/storage/spaces";
+
+const ADMIN_ROLES = ["admin", "super_admin", "lister"];
+
+const EVENT_IMAGE_COLUMNS =
+  "id, event_id, url, alt_text, is_primary, display_order, " +
+  "to_json(created_at) #>> '{}' AS created_at";
+
+function toNumericEventImage(row: Record<string, unknown>) {
+  return {
+    ...row,
+    id: Number(row.id),
+    event_id: Number(row.event_id),
+  };
+}
 
 // GET /api/admin/events/[id]/images - Get all images for an event
 export async function GET(
@@ -7,16 +23,10 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { id } = await params;
+    const session = await getSession(request);
 
-    // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -24,13 +34,13 @@ export async function GET(
     }
 
     // Get user profile with role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -38,7 +48,7 @@ export async function GET(
     }
 
     // Check if user has admin or lister role
-    if (!["admin", "super_admin", "lister"].includes(profile.role)) {
+    if (!ADMIN_ROLES.includes(profile.role)) {
       return NextResponse.json(
         { success: false, error: "Access denied" },
         { status: 403 }
@@ -54,13 +64,14 @@ export async function GET(
     }
 
     // Get event images
-    const { data: images, error } = await supabase
-      .from("event_images")
-      .select("*")
-      .eq("event_id", eventId)
-      .order("display_order", { ascending: true });
-
-    if (error) {
+    let images;
+    try {
+      const { rows } = await query(
+        `SELECT ${EVENT_IMAGE_COLUMNS} FROM event_images WHERE event_id = $1 ORDER BY display_order ASC`,
+        [eventId]
+      );
+      images = rows.map(toNumericEventImage);
+    } catch (error) {
       console.error("Error fetching event images:", error);
       return NextResponse.json(
         { success: false, error: "Failed to fetch images" },
@@ -87,33 +98,24 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { id } = await params;
+    const session = await getSession(request);
 
-    // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Use service role client for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     // Get user profile with role
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -141,13 +143,11 @@ export async function POST(
     }
 
     // Verify event exists
-    const { data: event, error: eventError } = await adminSupabase
-      .from("events")
-      .select("id")
-      .eq("id", eventId)
-      .single();
-
-    if (eventError || !event) {
+    const { rows: eventRows } = await query(
+      `SELECT id FROM events WHERE id = $1`,
+      [eventId]
+    );
+    if (!eventRows[0]) {
       return NextResponse.json(
         { success: false, error: "Event not found" },
         { status: 404 }
@@ -186,20 +186,13 @@ export async function POST(
     }
 
     // Check current image count
-    const { count: imageCount, error: countError } = await adminSupabase
-      .from("event_images")
-      .select("*", { count: "exact", head: true })
-      .eq("event_id", eventId);
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) AS count FROM event_images WHERE event_id = $1`,
+      [eventId]
+    );
+    const imageCount = Number(countRows[0]?.count || 0);
 
-    if (countError) {
-      console.error("Error counting images:", countError);
-      return NextResponse.json(
-        { success: false, error: "Failed to check image count" },
-        { status: 500 }
-      );
-    }
-
-    if ((imageCount || 0) >= 10) {
+    if (imageCount >= 10) {
       return NextResponse.json(
         { success: false, error: "Maximum 8 images allowed per event" },
         { status: 400 }
@@ -208,17 +201,17 @@ export async function POST(
 
     // Generate unique filename
     const fileExt = file.name.split(".").pop();
-    const fileName = `event-${eventId}-${Date.now()}.${fileExt}`;
+    const fileName = `event-images/event-${eventId}-${Date.now()}.${fileExt}`;
 
-    // Upload to Supabase Storage
-    const { error: uploadError } = await adminSupabase.storage
-      .from("event-images")
-      .upload(fileName, file, {
-        cacheControl: "3600",
-        upsert: false,
+    // Upload to DigitalOcean Spaces
+    let publicUrl: string;
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const uploaded = await uploadFile(fileName, Buffer.from(arrayBuffer), {
+        contentType: file.type,
       });
-
-    if (uploadError) {
+      publicUrl = uploaded.publicUrl;
+    } catch (uploadError) {
       console.error("Error uploading to storage:", uploadError);
       return NextResponse.json(
         { success: false, error: "Failed to upload image" },
@@ -226,39 +219,31 @@ export async function POST(
       );
     }
 
-    // Get public URL
-    const {
-      data: { publicUrl },
-    } = adminSupabase.storage.from("event-images").getPublicUrl(fileName);
-
     // Get next display order
-    const { data: maxOrder } = await adminSupabase
-      .from("event_images")
-      .select("display_order")
-      .eq("event_id", eventId)
-      .order("display_order", { ascending: false })
-      .limit(1)
-      .single();
-
-    const nextOrder = (maxOrder?.display_order || 0) + 1;
+    const { rows: maxOrderRows } = await query(
+      `SELECT MAX(display_order) AS max_order FROM event_images WHERE event_id = $1`,
+      [eventId]
+    );
+    const nextOrder = Number(maxOrderRows[0]?.max_order || 0) + 1;
 
     // Save to database
-    const { data: imageData, error: dbError } = await adminSupabase
-      .from("event_images")
-      .insert({
-        event_id: eventId,
-        url: publicUrl,
-        alt_text: file.name,
-        display_order: nextOrder,
-        is_primary: nextOrder === 1, // First image is primary by default
-      })
-      .select()
-      .single();
-
-    if (dbError) {
+    let imageData;
+    try {
+      const { rows } = await query(
+        `INSERT INTO event_images (event_id, url, alt_text, display_order, is_primary)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING ${EVENT_IMAGE_COLUMNS}`,
+        [eventId, publicUrl, file.name, nextOrder, nextOrder === 1]
+      );
+      imageData = toNumericEventImage(rows[0]);
+    } catch (dbError) {
       console.error("Error saving image to database:", dbError);
       // Try to clean up uploaded file
-      await adminSupabase.storage.from("event-images").remove([fileName]);
+      try {
+        await deleteFile(fileName);
+      } catch {
+        // best-effort cleanup
+      }
       return NextResponse.json(
         { success: false, error: "Failed to save image data" },
         { status: 500 }

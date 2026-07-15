@@ -1,7 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { deleteFile, getKeyFromPublicUrl, uploadFile } from "@/lib/storage/spaces";
 
 export const dynamic = "force-dynamic";
+
+const ADMIN_ROLES = ["admin", "super_admin", "lister"];
+
+const EVENT_IMAGE_COLUMNS =
+  "id, event_id, url, alt_text, is_primary, display_order, " +
+  "to_json(created_at) #>> '{}' AS created_at";
+
+function toNumericEventImage(row: Record<string, unknown>) {
+  return {
+    ...row,
+    id: Number(row.id),
+    event_id: Number(row.event_id),
+  };
+}
 
 // GET /api/organizer/events/[eventId]/images - Get images for an event owned by the organizer
 export async function GET(
@@ -10,14 +26,9 @@ export async function GET(
 ) {
   try {
     const { eventId } = await params;
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -25,11 +36,11 @@ export async function GET(
     }
 
     // Verify user owns this event or is admin/lister
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
     if (!profile) {
       return NextResponse.json(
@@ -39,13 +50,14 @@ export async function GET(
     }
 
     // Check event ownership
-    const { data: event, error: eventError } = await supabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", parseInt(eventId, 10))
-      .single();
+    const eventIdNum = parseInt(eventId, 10);
+    const { rows: eventRows } = await query(
+      `SELECT id, organizer_id FROM events WHERE id = $1`,
+      [eventIdNum]
+    );
+    const event = eventRows[0];
 
-    if (eventError || !event) {
+    if (!event) {
       return NextResponse.json(
         { success: false, error: "Event not found" },
         { status: 404 }
@@ -53,8 +65,8 @@ export async function GET(
     }
 
     // Only allow organizer who owns the event or admin/lister
-    const isOwner = event.organizer_id === user.id;
-    const isAdmin = ["admin", "super_admin", "lister"].includes(profile.role);
+    const isOwner = event.organizer_id === session.userId;
+    const isAdmin = ADMIN_ROLES.includes(profile.role);
 
     if (!isOwner && !isAdmin) {
       return NextResponse.json(
@@ -63,16 +75,15 @@ export async function GET(
       );
     }
 
-    // Fetch images using correct column names
-    const { data: images, error: imagesError } = await supabase
-      .from("event_images")
-      .select(
-        "id, event_id, url, alt_text, is_primary, display_order, created_at"
-      )
-      .eq("event_id", parseInt(eventId, 10))
-      .order("display_order", { ascending: true });
-
-    if (imagesError) {
+    // Fetch images
+    let images;
+    try {
+      const { rows } = await query(
+        `SELECT ${EVENT_IMAGE_COLUMNS} FROM event_images WHERE event_id = $1 ORDER BY display_order ASC`,
+        [eventIdNum]
+      );
+      images = rows.map(toNumericEventImage);
+    } catch (imagesError) {
       console.error("Error fetching event images:", imagesError);
       return NextResponse.json(
         { success: false, error: "Failed to fetch images" },
@@ -99,33 +110,24 @@ export async function POST(
   { params }: { params: Promise<{ eventId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { eventId } = await params;
+    const session = await getSession(request);
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Use service role client for storage operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     // Get user profile with role
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -141,13 +143,13 @@ export async function POST(
     }
 
     // Verify event exists and user owns it (or is admin/lister)
-    const { data: event, error: eventError } = await adminSupabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", eventIdNum)
-      .single();
+    const { rows: eventRows } = await query(
+      `SELECT id, organizer_id FROM events WHERE id = $1`,
+      [eventIdNum]
+    );
+    const event = eventRows[0];
 
-    if (eventError || !event) {
+    if (!event) {
       return NextResponse.json(
         { success: false, error: "Event not found" },
         { status: 404 }
@@ -155,8 +157,8 @@ export async function POST(
     }
 
     // Check access: owner, organizer role, or admin/lister
-    const isOwner = event.organizer_id === user.id;
-    const isAdmin = ["admin", "super_admin", "lister"].includes(profile.role);
+    const isOwner = event.organizer_id === session.userId;
+    const isAdmin = ADMIN_ROLES.includes(profile.role);
 
     if (!isOwner && !isAdmin) {
       return NextResponse.json(
@@ -200,20 +202,13 @@ export async function POST(
     }
 
     // Check current image count
-    const { count: imageCount, error: countError } = await adminSupabase
-      .from("event_images")
-      .select("*", { count: "exact", head: true })
-      .eq("event_id", eventIdNum);
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) AS count FROM event_images WHERE event_id = $1`,
+      [eventIdNum]
+    );
+    const imageCount = Number(countRows[0]?.count || 0);
 
-    if (countError) {
-      console.error("Error counting images:", countError);
-      return NextResponse.json(
-        { success: false, error: "Failed to check image count" },
-        { status: 500 }
-      );
-    }
-
-    if ((imageCount || 0) >= 8) {
+    if (imageCount >= 8) {
       return NextResponse.json(
         { success: false, error: "Maximum 8 images allowed per event" },
         { status: 400 }
@@ -222,17 +217,17 @@ export async function POST(
 
     // Generate unique filename
     const fileExt = file.name.split(".").pop();
-    const fileName = `event-${eventIdNum}-${Date.now()}.${fileExt}`;
+    const fileName = `event-images/event-${eventIdNum}-${Date.now()}.${fileExt}`;
 
-    // Upload to Supabase Storage
-    const { error: uploadError } = await adminSupabase.storage
-      .from("event-images")
-      .upload(fileName, file, {
-        cacheControl: "3600",
-        upsert: false,
+    // Upload to DigitalOcean Spaces
+    let publicUrl: string;
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const uploaded = await uploadFile(fileName, Buffer.from(arrayBuffer), {
+        contentType: file.type,
       });
-
-    if (uploadError) {
+      publicUrl = uploaded.publicUrl;
+    } catch (uploadError) {
       console.error("Error uploading to storage:", uploadError);
       return NextResponse.json(
         { success: false, error: "Failed to upload image" },
@@ -240,39 +235,31 @@ export async function POST(
       );
     }
 
-    // Get public URL
-    const {
-      data: { publicUrl },
-    } = adminSupabase.storage.from("event-images").getPublicUrl(fileName);
-
     // Get next display order
-    const { data: maxOrder } = await adminSupabase
-      .from("event_images")
-      .select("display_order")
-      .eq("event_id", eventIdNum)
-      .order("display_order", { ascending: false })
-      .limit(1)
-      .single();
-
-    const nextOrder = (maxOrder?.display_order || 0) + 1;
+    const { rows: maxOrderRows } = await query(
+      `SELECT MAX(display_order) AS max_order FROM event_images WHERE event_id = $1`,
+      [eventIdNum]
+    );
+    const nextOrder = Number(maxOrderRows[0]?.max_order || 0) + 1;
 
     // Save to database
-    const { data: imageData, error: dbError } = await adminSupabase
-      .from("event_images")
-      .insert({
-        event_id: eventIdNum,
-        url: publicUrl,
-        alt_text: file.name,
-        display_order: nextOrder,
-        is_primary: nextOrder === 1,
-      })
-      .select()
-      .single();
-
-    if (dbError) {
+    let imageData;
+    try {
+      const { rows } = await query(
+        `INSERT INTO event_images (event_id, url, alt_text, display_order, is_primary)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING ${EVENT_IMAGE_COLUMNS}`,
+        [eventIdNum, publicUrl, file.name, nextOrder, nextOrder === 1]
+      );
+      imageData = toNumericEventImage(rows[0]);
+    } catch (dbError) {
       console.error("Error saving image to database:", dbError);
       // Clean up uploaded file
-      await adminSupabase.storage.from("event-images").remove([fileName]);
+      try {
+        await deleteFile(fileName);
+      } catch {
+        // best-effort cleanup
+      }
       return NextResponse.json(
         { success: false, error: "Failed to save image data" },
         { status: 500 }
@@ -298,7 +285,6 @@ export async function PATCH(
   { params }: { params: Promise<{ eventId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { eventId } = await params;
     const { searchParams } = new URL(request.url);
     const imageId = searchParams.get("imageId");
@@ -311,25 +297,19 @@ export async function PATCH(
       );
     }
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
     if (!profile) {
       return NextResponse.json(
@@ -341,11 +321,11 @@ export async function PATCH(
     const eventIdNum = parseInt(eventId);
     const imageIdNum = parseInt(imageId);
 
-    const { data: event } = await adminSupabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", eventIdNum)
-      .single();
+    const { rows: eventRows } = await query(
+      `SELECT id, organizer_id FROM events WHERE id = $1`,
+      [eventIdNum]
+    );
+    const event = eventRows[0];
 
     if (!event) {
       return NextResponse.json(
@@ -354,8 +334,8 @@ export async function PATCH(
       );
     }
 
-    const isOwner = event.organizer_id === user.id;
-    const isAdmin = ["admin", "super_admin", "lister"].includes(profile.role);
+    const isOwner = event.organizer_id === session.userId;
+    const isAdmin = ADMIN_ROLES.includes(profile.role);
 
     if (!isOwner && !isAdmin) {
       return NextResponse.json(
@@ -366,22 +346,28 @@ export async function PATCH(
 
     // If setting as primary, first reset all other images
     if (body.is_primary === true) {
-      await adminSupabase
-        .from("event_images")
-        .update({ is_primary: false })
-        .eq("event_id", eventIdNum);
+      await query(
+        `UPDATE event_images SET is_primary = false WHERE event_id = $1`,
+        [eventIdNum]
+      );
     }
 
     // Update the target image
-    const { data: updatedImage, error: updateError } = await adminSupabase
-      .from("event_images")
-      .update({ is_primary: body.is_primary })
-      .eq("id", imageIdNum)
-      .eq("event_id", eventIdNum)
-      .select()
-      .single();
-
-    if (updateError) {
+    let updatedImage;
+    try {
+      const { rows } = await query(
+        `UPDATE event_images SET is_primary = COALESCE($1, is_primary) WHERE id = $2 AND event_id = $3
+         RETURNING ${EVENT_IMAGE_COLUMNS}`,
+        [body.is_primary, imageIdNum, eventIdNum]
+      );
+      if (!rows[0]) {
+        return NextResponse.json(
+          { success: false, error: "Failed to update image" },
+          { status: 500 }
+        );
+      }
+      updatedImage = toNumericEventImage(rows[0]);
+    } catch (updateError) {
       console.error("Error updating image:", updateError);
       return NextResponse.json(
         { success: false, error: "Failed to update image" },
@@ -408,7 +394,6 @@ export async function DELETE(
   { params }: { params: Promise<{ eventId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { eventId } = await params;
     const { searchParams } = new URL(request.url);
     const imageId = searchParams.get("imageId");
@@ -420,25 +405,19 @@ export async function DELETE(
       );
     }
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
     if (!profile) {
       return NextResponse.json(
@@ -450,11 +429,11 @@ export async function DELETE(
     const eventIdNum = parseInt(eventId);
     const imageIdNum = parseInt(imageId);
 
-    const { data: event } = await adminSupabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", eventIdNum)
-      .single();
+    const { rows: eventRows } = await query(
+      `SELECT id, organizer_id FROM events WHERE id = $1`,
+      [eventIdNum]
+    );
+    const event = eventRows[0];
 
     if (!event) {
       return NextResponse.json(
@@ -463,8 +442,8 @@ export async function DELETE(
       );
     }
 
-    const isOwner = event.organizer_id === user.id;
-    const isAdmin = ["admin", "super_admin", "lister"].includes(profile.role);
+    const isOwner = event.organizer_id === session.userId;
+    const isAdmin = ADMIN_ROLES.includes(profile.role);
 
     if (!isOwner && !isAdmin) {
       return NextResponse.json(
@@ -474,12 +453,11 @@ export async function DELETE(
     }
 
     // Get image URL for storage cleanup
-    const { data: image } = await adminSupabase
-      .from("event_images")
-      .select("url")
-      .eq("id", imageIdNum)
-      .eq("event_id", eventIdNum)
-      .single();
+    const { rows: imageRows } = await query(
+      `SELECT url FROM event_images WHERE id = $1 AND event_id = $2`,
+      [imageIdNum, eventIdNum]
+    );
+    const image = imageRows[0];
 
     if (!image) {
       return NextResponse.json(
@@ -489,12 +467,9 @@ export async function DELETE(
     }
 
     // Delete from database
-    const { error: deleteError } = await adminSupabase
-      .from("event_images")
-      .delete()
-      .eq("id", imageIdNum);
-
-    if (deleteError) {
+    try {
+      await query(`DELETE FROM event_images WHERE id = $1`, [imageIdNum]);
+    } catch (deleteError) {
       console.error("Error deleting image:", deleteError);
       return NextResponse.json(
         { success: false, error: "Failed to delete image" },
@@ -504,9 +479,10 @@ export async function DELETE(
 
     // Try to delete from storage
     try {
-      const urlParts = image.url.split("/");
-      const fileName = urlParts[urlParts.length - 1];
-      await adminSupabase.storage.from("event-images").remove([fileName]);
+      const key = getKeyFromPublicUrl(image.url);
+      if (key) {
+        await deleteFile(key);
+      }
     } catch (storageError) {
       console.error("Error deleting from storage:", storageError);
     }

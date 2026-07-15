@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command, CopyObjectCommand } from "@aws-sdk/client-s3";
 
 const region = process.env.DO_SPACES_REGION || "sgp1";
 const endpoint = process.env.DO_SPACES_ENDPOINT || `https://${region}.digitaloceanspaces.com`;
@@ -92,6 +92,55 @@ export function getPublicUrl(path: string, bucket?: string): string {
 
   // Otherwise construct standard spaces URL
   return `https://${targetBucket}.${region}.digitaloceanspaces.com/${cleanPath}`;
+}
+
+/**
+ * Copies a file within the same bucket to a new key (server-side, no data
+ * transfer through this process). There is no native "move" in the S3 API -
+ * callers wanting move semantics should call this then deleteFile() on the
+ * source path.
+ */
+export async function copyFile(
+  fromPath: string,
+  toPath: string,
+  bucket?: string
+): Promise<void> {
+  const targetBucket = bucket || defaultBucket;
+  const cleanFrom = fromPath.startsWith("/") ? fromPath.substring(1) : fromPath;
+  const cleanTo = toPath.startsWith("/") ? toPath.substring(1) : toPath;
+
+  await s3Client.send(
+    new CopyObjectCommand({
+      Bucket: targetBucket,
+      CopySource: `/${targetBucket}/${encodeURIComponent(cleanFrom)}`,
+      Key: cleanTo,
+      ACL: "public-read",
+    })
+  );
+}
+
+/**
+ * Recovers the object key from a public URL previously produced by
+ * getPublicUrl(). Returns null if the URL doesn't match this bucket's CDN or
+ * standard endpoint (e.g. a legacy URL from a different storage provider) -
+ * callers should treat that as "nothing to delete" rather than an error.
+ */
+export function getKeyFromPublicUrl(url: string, bucket?: string): string | null {
+  const targetBucket = bucket || defaultBucket;
+
+  if (targetBucket === defaultBucket && cdnEndpoint) {
+    const baseCdn = cdnEndpoint.endsWith("/") ? cdnEndpoint : `${cdnEndpoint}/`;
+    if (url.startsWith(baseCdn)) {
+      return url.substring(baseCdn.length);
+    }
+  }
+
+  const standardBase = `https://${targetBucket}.${region}.digitaloceanspaces.com/`;
+  if (url.startsWith(standardBase)) {
+    return url.substring(standardBase.length);
+  }
+
+  return null;
 }
 
 /**

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { deleteFile, listFiles } from "@/lib/storage/spaces";
 
 // POST: Delete all images in a temp session folder
 export async function POST(request: NextRequest) {
@@ -13,22 +15,18 @@ export async function POST(request: NextRequest) {
     }
 
     // Auth check (lister/admin/super_admin)
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Get user profile
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 404 });
     }
 
@@ -37,32 +35,31 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    // Use service_role only for super_admin
-    let storageClient = supabase;
-    if (profile.role === "super_admin") {
-      storageClient = await createServerSupabase({ useServiceRole: true });
-    }
-
     // List all files in temp folder
-    const tempFolder = `temp/${tempSessionId}`;
-    const { data: files, error: listError } = await storageClient.storage
-      .from("event-images")
-      .list(tempFolder);
-    if (listError) {
-      return NextResponse.json({ error: listError.message }, { status: 500 });
+    const tempFolder = `event-images/temp/${tempSessionId}/`;
+    let tempKeys: string[];
+    try {
+      tempKeys = await listFiles(tempFolder);
+    } catch (listError) {
+      return NextResponse.json(
+        { error: (listError as Error).message },
+        { status: 500 }
+      );
     }
-    if (!files || files.length === 0) {
+    if (!tempKeys || tempKeys.length === 0) {
       return NextResponse.json({ success: true, deleted: 0 });
     }
+
     // Remove all files
-    const paths = files.map((f: { name: string }) => `${tempFolder}/${f.name}`);
-    const { error: removeError } = await storageClient.storage
-      .from("event-images")
-      .remove(paths);
-    if (removeError) {
-      return NextResponse.json({ error: removeError.message }, { status: 500 });
+    try {
+      await Promise.all(tempKeys.map((key) => deleteFile(key)));
+    } catch (removeError) {
+      return NextResponse.json(
+        { error: (removeError as Error).message },
+        { status: 500 }
+      );
     }
-    return NextResponse.json({ success: true, deleted: paths.length });
+    return NextResponse.json({ success: true, deleted: tempKeys.length });
   } catch (_err) {
     return NextResponse.json(
       { error: "Internal server error" },

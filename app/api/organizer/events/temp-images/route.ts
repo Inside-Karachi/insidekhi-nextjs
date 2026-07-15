@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
 import { v4 as uuidv4 } from "uuid";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { uploadFile } from "@/lib/storage/spaces";
+
+const ALLOWED_ROLES = ["organizer", "lister", "admin", "super_admin"];
 
 // POST: Upload image to temp folder (for organizers creating new events)
 export async function POST(request: NextRequest) {
@@ -17,35 +21,24 @@ export async function POST(request: NextRequest) {
     }
 
     // Auth check
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Verify user is organizer, lister, or admin
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (
-      !profile ||
-      !["organizer", "lister", "admin", "super_admin"].includes(profile.role)
-    ) {
+    if (!profile || !ALLOWED_ROLES.includes(profile.role)) {
       return NextResponse.json(
         { error: "Only organizers can upload event images" },
         { status: 403 }
       );
     }
-
-    // Use service role for storage operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
 
     // Validate file type
     const allowedTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
@@ -68,28 +61,29 @@ export async function POST(request: NextRequest) {
     // Generate unique filename
     const ext = file.name.split(".").pop();
     const filename = `${uuidv4()}.${ext}`;
-    const path = `temp/${tempSessionId}/${filename}`;
+    const path = `event-images/temp/${tempSessionId}/${filename}`;
 
-    // Upload to Supabase Storage
+    // Upload to DigitalOcean Spaces
     const arrayBuffer = await file.arrayBuffer();
-    const { error: uploadError } = await adminSupabase.storage
-      .from("event-images")
-      .upload(path, arrayBuffer, {
+    let publicUrl: string;
+    try {
+      const uploaded = await uploadFile(path, Buffer.from(arrayBuffer), {
         contentType: file.type,
-        upsert: false,
       });
-
-    if (uploadError) {
+      publicUrl = uploaded.publicUrl;
+    } catch (uploadError) {
       console.error("Upload error:", uploadError);
-      return NextResponse.json({ error: uploadError.message }, { status: 500 });
+      return NextResponse.json(
+        { error: "Failed to upload image" },
+        { status: 500 }
+      );
     }
 
     // Return image info (simulate EventImage for consistency with gallery component)
-    const imageUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/event-images/${path}`;
     const newImage = {
       id: Date.now(), // temp id, not persisted to DB yet
       event_id: null,
-      url: imageUrl,
+      url: publicUrl,
       alt_text: file.name,
       is_primary: false,
       display_order: 0,

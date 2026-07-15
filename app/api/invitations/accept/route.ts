@@ -45,10 +45,12 @@ export async function POST(request: NextRequest) {
     let result: { success: boolean; message?: string; error?: string };
     try {
       const { rows } = await query(
+        // Positional args must match accept_invitation(p_invite_token,
+        // p_invitee_ip, p_invitee_id) - reorder here if that signature changes.
         `SELECT accept_invitation($1, $2::inet, $3) AS result`,
         [invite_token, ip, session.userId]
       );
-      result = rows[0].result;
+      result = rows[0].result ?? { success: false, error: "Failed to accept invitation" };
     } catch (error) {
       console.error("Error accepting invitation:", error);
       const message =

@@ -57,10 +57,12 @@ export async function POST(request: NextRequest) {
     let result: CreateInvitationRpcResult;
     try {
       const { rows } = await query(
+        // Positional args must match create_invitation(p_invitee_email,
+        // p_inviter_ip, p_inviter_id) - reorder here if that signature changes.
         `SELECT create_invitation($1, $2::inet, $3) AS result`,
         [invitee_email, ip, session.userId]
       );
-      result = rows[0].result;
+      result = rows[0].result ?? { success: false, error: "Failed to create invitation" };
     } catch (error) {
       console.error("Error creating invitation:", error);
 

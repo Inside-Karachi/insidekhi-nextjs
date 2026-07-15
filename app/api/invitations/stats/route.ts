@@ -1,51 +1,70 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
         { status: 401 }
       );
     }
 
-    // Fetch invite statistics
-    const [invitesResult, sharesResult, xpResult] = await Promise.all([
-      // Count invitations
-      supabase
-        .from("invitations")
-        .select("status", { count: "exact", head: false })
-        .eq("inviter_id", user.id),
+    let stats;
+    try {
+      const [invitesResult, sharesResult, xpResult] = await Promise.all([
+        query(
+          `SELECT
+             COUNT(*) AS total_invitations_sent,
+             COUNT(*) FILTER (WHERE status = 'accepted') AS total_invitations_accepted,
+             COUNT(*) FILTER (WHERE status = 'pending') AS pending_invitations
+           FROM invitations WHERE inviter_id = $1`,
+          [session.userId]
+        ),
+        query(
+          `SELECT
+             COUNT(*) AS total_shares_created,
+             COUNT(*) FILTER (WHERE verification_status = 'verified') AS total_shares_verified,
+             COUNT(*) FILTER (WHERE verification_status = 'rejected') AS total_shares_rejected,
+             COUNT(*) FILTER (WHERE verification_status = 'pending') AS pending_shares
+           FROM social_shares WHERE user_id = $1`,
+          [session.userId]
+        ),
+        // Uses 'reason' column not 'activity'; a row's reason can match both
+        // patterns (e.g. "invitation share bonus"), in which case it counts
+        // toward both sums - matches the original per-row substring checks.
+        query(
+          `SELECT
+             COALESCE(SUM(points) FILTER (WHERE reason ILIKE '%invitation%'), 0) AS total_xp_from_invites,
+             COALESCE(SUM(points) FILTER (WHERE reason ILIKE '%share%'), 0) AS total_xp_from_shares
+           FROM points_log WHERE user_id = $1`,
+          [session.userId]
+        ),
+      ]);
 
-      // Count shares
-      supabase
-        .from("social_shares")
-        .select("verification_status", { count: "exact", head: false })
-        .eq("user_id", user.id),
+      const invites = invitesResult.rows[0];
+      const shares = sharesResult.rows[0];
+      const xp = xpResult.rows[0];
 
-      // Get XP from points_log (uses 'reason' column not 'activity')
-      supabase
-        .from("points_log")
-        .select("points, reason")
-        .eq("user_id", user.id)
-        .or("reason.ilike.%invitation%,reason.ilike.%share%"),
-    ]);
-
-    if (invitesResult.error || sharesResult.error || xpResult.error) {
-      console.error("Error fetching stats:", {
-        invitesResult,
-        sharesResult,
-        xpResult,
-      });
+      stats = {
+        total_invitations_sent: parseInt(invites.total_invitations_sent, 10),
+        total_invitations_accepted: parseInt(
+          invites.total_invitations_accepted,
+          10
+        ),
+        total_xp_from_invites: parseInt(xp.total_xp_from_invites, 10),
+        total_shares_created: parseInt(shares.total_shares_created, 10),
+        total_shares_verified: parseInt(shares.total_shares_verified, 10),
+        total_shares_rejected: parseInt(shares.total_shares_rejected, 10),
+        total_xp_from_shares: parseInt(xp.total_xp_from_shares, 10),
+        pending_invitations: parseInt(invites.pending_invitations, 10),
+        pending_shares: parseInt(shares.pending_shares, 10),
+      };
+    } catch (error) {
+      console.error("Error fetching stats:", error);
       return NextResponse.json(
         {
           success: false,
@@ -55,53 +74,9 @@ export async function GET(_request: NextRequest) {
       );
     }
 
-    const invitations = invitesResult.data || [];
-    const shares = sharesResult.data || [];
-    const xpLogs = xpResult.data || [];
-
-    // Calculate statistics
-    const total_invitations_sent = invitations.length;
-    const total_invitations_accepted = invitations.filter(
-      (inv) => inv.status === "accepted"
-    ).length;
-    const pending_invitations = invitations.filter(
-      (inv) => inv.status === "pending"
-    ).length;
-
-    const total_shares_created = shares.length;
-    const total_shares_verified = shares.filter(
-      (share) => share.verification_status === "verified"
-    ).length;
-    const total_shares_rejected = shares.filter(
-      (share) => share.verification_status === "rejected"
-    ).length;
-    const pending_shares = shares.filter(
-      (share) => share.verification_status === "pending"
-    ).length;
-
-    const total_xp_from_invites = xpLogs
-      .filter(
-        (log) => log.reason?.toLowerCase().includes("invitation") || false
-      )
-      .reduce((sum, log) => sum + (log.points || 0), 0);
-
-    const total_xp_from_shares = xpLogs
-      .filter((log) => log.reason?.toLowerCase().includes("share") || false)
-      .reduce((sum, log) => sum + (log.points || 0), 0);
-
     return NextResponse.json({
       success: true,
-      stats: {
-        total_invitations_sent,
-        total_invitations_accepted,
-        total_xp_from_invites,
-        total_shares_created,
-        total_shares_verified,
-        total_shares_rejected,
-        total_xp_from_shares,
-        pending_invitations,
-        pending_shares,
-      },
+      stats,
     });
   } catch (error) {
     console.error("Unexpected error in invite stats:", error);

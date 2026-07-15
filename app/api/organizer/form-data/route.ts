@@ -1,20 +1,16 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
 
 // GET /api/organizer/form-data - Get categories for event forms
 // Accessible by organizers, listers, and admins
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
@@ -22,13 +18,13 @@ export async function GET() {
     }
 
     // Verify user has organizer role or higher
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
@@ -51,15 +47,16 @@ export async function GET() {
       categories?: { id: number; name: string; slug: string }[];
     } = { success: true };
 
-    const { data: categories, error: categoriesError } = await supabase
-      .from("categories")
-      .select("id, name, slug")
-      .order("name", { ascending: true });
-
-    if (categoriesError) {
-      console.error("Error fetching categories:", categoriesError);
-    } else {
-      result.categories = categories || [];
+    try {
+      const { rows: categoryRows } = await query(
+        `SELECT id, name, slug FROM categories ORDER BY name ASC`
+      );
+      result.categories = categoryRows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+      }));
+    } catch (error) {
+      console.error("Error fetching categories:", error);
     }
 
     return NextResponse.json(result);

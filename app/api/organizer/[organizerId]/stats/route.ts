@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 // Force dynamic to ensure fresh data
 export const dynamic = "force-dynamic";
@@ -10,19 +10,17 @@ export async function GET(
   { params }: { params: Promise<{ organizerId: string }> },
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { organizerId } = await params;
 
     // Fetch organizer profile
-    const { data: organizer, error: organizerError } = await supabase
-      .from("profiles")
-      .select(
-        "id, full_name, avatar_url, username, phone, role, is_verified_organizer, organizer_bio, organizer_company, organizer_website",
-      )
-      .eq("id", organizerId)
-      .single();
+    const { rows: organizerRows } = await query(
+      `SELECT id, full_name, avatar_url, username, phone, role, is_verified_organizer, organizer_bio, organizer_company, organizer_website
+       FROM profiles WHERE id = $1`,
+      [organizerId]
+    );
+    const organizer = organizerRows[0];
 
-    if (organizerError || !organizer) {
+    if (!organizer) {
       return NextResponse.json(
         { success: false, error: "Organizer not found" },
         { status: 404 },
@@ -30,43 +28,53 @@ export async function GET(
     }
 
     // Get all events by organizer
-    const { data: events, error: eventsError } = await supabase
-      .from("events")
-      .select("id, name, slug, start_time, end_time, status")
-      .eq("organizer_id", organizerId)
-      .eq("status", "published")
-      .order("start_time", { ascending: false });
-
-    if (eventsError) {
-      console.error("Error fetching events:", eventsError);
+    let allEvents: {
+      id: number;
+      name: string;
+      slug: string;
+      start_time: string;
+      end_time: string;
+      status: string;
+    }[] = [];
+    try {
+      const { rows: eventRows } = await query(
+        `SELECT id, name, slug,
+           to_json(start_time) #>> '{}' AS start_time,
+           to_json(end_time) #>> '{}' AS end_time,
+           status
+         FROM events
+         WHERE organizer_id = $1 AND status = 'published'
+         ORDER BY start_time DESC`,
+        [organizerId]
+      );
+      allEvents = eventRows.map((row) => ({ ...row, id: Number(row.id) }));
+    } catch (error) {
+      console.error("Error fetching events:", error);
     }
 
-    const allEvents = events || [];
     const eventsOrganized = allEvents.length;
 
     // Get recent 3 events (already sorted by start_time descending)
     // This includes both ongoing and past events
     const recentEvents = allEvents.slice(0, 3);
 
-    // Get total attendees (sum of booking item quantities)
-    const { data: bookingIds } = await supabase
-      .from("bookings")
-      .select("id")
-      .eq("organizer_id", organizerId)
-      .eq("status", "completed");
-
+    // Get total attendees (sum of booking item quantities). The old
+    // Supabase version filtered bookings by a bookings.organizer_id column
+    // that doesn't exist (only events.organizer_id does), so it always
+    // silently failed and showed 0 - fixed here to join through events.
     let totalAttendees = 0;
-    if (bookingIds && bookingIds.length > 0) {
-      const { data: ticketData } = await supabase
-        .from("booking_items")
-        .select("quantity")
-        .in(
-          "booking_id",
-          bookingIds.map((b) => b.id),
-        );
-
-      totalAttendees =
-        ticketData?.reduce((sum, item) => sum + item.quantity, 0) || 0;
+    try {
+      const { rows: attendeeRows } = await query(
+        `SELECT COALESCE(SUM(bi.quantity), 0) AS total_attendees
+         FROM bookings b
+         JOIN booking_items bi ON bi.booking_id = b.id
+         JOIN events e ON e.id = b.event_id
+         WHERE e.organizer_id = $1 AND b.status = 'completed'`,
+        [organizerId]
+      );
+      totalAttendees = parseInt(attendeeRows[0].total_attendees, 10);
+    } catch (error) {
+      console.error("Error fetching attendee count:", error);
     }
 
     // Events are self-contained and carry no reviews, so there is no organizer

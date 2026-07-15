@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
 
@@ -44,49 +45,37 @@ interface TicketPassRecord {
 
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
     const eventId = searchParams.get("eventId");
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (!user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Get user's events with stats
-    let eventsQuery = supabase
-      .from("events")
-      .select(
-        `
-        id,
-        name,
-        slug,
-        description,
-        start_time,
-        end_time,
-        max_capacity,
-        status,
-        is_commission_based,
-        commission_rate,
-        created_at,
-        location_name,
-        address
-      `,
-      )
-      .eq("organizer_id", user.id)
-      .order("start_time", { ascending: false });
+    const eventParams: unknown[] = [session.userId];
+    let eventsSql = `SELECT id, name, slug, description,
+        to_json(start_time) #>> '{}' AS start_time,
+        to_json(end_time) #>> '{}' AS end_time,
+        max_capacity, status, is_commission_based, commission_rate,
+        to_json(created_at) #>> '{}' AS created_at,
+        location_name, address
+      FROM events WHERE organizer_id = $1`;
 
     if (eventId) {
-      eventsQuery = eventsQuery.eq("id", parseInt(eventId, 10));
+      eventParams.push(parseInt(eventId, 10));
+      eventsSql += ` AND id = $${eventParams.length}`;
     }
+    eventsSql += ` ORDER BY start_time DESC`;
 
-    const { data: events, error: eventsError } = await eventsQuery;
-
-    if (eventsError) {
-      console.error("Events fetch error:", eventsError);
+    let events: EventRecord[];
+    try {
+      const { rows } = await query(eventsSql, eventParams);
+      events = rows.map((row) => ({ ...row, id: Number(row.id) }));
+    } catch (error) {
+      console.error("Events fetch error:", error);
       return NextResponse.json(
         { error: "Failed to fetch events" },
         { status: 500 },
@@ -107,55 +96,85 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const eventIds = (events as EventRecord[]).map((e) => e.id);
+    const eventIds = events.map((e) => e.id);
 
     // Get bookings for these events - filter by payment_status = 'paid' for accurate revenue
-    const { data: bookings, error: bookingsError } = await supabase
-      .from("bookings")
-      .select(
-        `
-        id,
-        event_id,
-        total_amount,
-        status,
-        payment_status,
-        created_at
-      `,
-      )
-      .in("event_id", eventIds)
-      .eq("payment_status", "paid");
-
-    if (bookingsError) {
-      console.error("Bookings fetch error:", bookingsError);
+    let bookings: BookingRecord[] = [];
+    try {
+      const { rows } = await query(
+        `SELECT id, event_id, total_amount, status,
+           to_json(created_at) #>> '{}' AS created_at
+         FROM bookings WHERE event_id = ANY($1::bigint[]) AND payment_status = 'paid'`,
+        [eventIds]
+      );
+      bookings = rows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+        event_id: row.event_id !== null ? Number(row.event_id) : null,
+      }));
+    } catch (error) {
+      console.error("Bookings fetch error:", error);
     }
 
     // Get ticket types for capacity info
-    const { data: ticketTypes } = await supabase
-      .from("ticket_types")
-      .select("id, event_id, name, price, quantity_available")
-      .in("event_id", eventIds);
+    let ticketTypes: TicketTypeRecord[] = [];
+    try {
+      const { rows } = await query(
+        `SELECT id, event_id, name, price, quantity_available
+         FROM ticket_types WHERE event_id = ANY($1::bigint[])`,
+        [eventIds]
+      );
+      ticketTypes = rows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+        event_id: Number(row.event_id),
+      }));
+    } catch (error) {
+      console.error("Ticket types fetch error:", error);
+    }
 
     // Get check-in counts (from ticket_passes)
-    const { data: ticketPasses } = await supabase
-      .from("ticket_passes")
-      .select("id, event_id, status, checked_in_at")
-      .in("event_id", eventIds);
+    let ticketPasses: TicketPassRecord[] = [];
+    try {
+      const { rows } = await query(
+        `SELECT id, event_id, status,
+           to_json(checked_in_at) #>> '{}' AS checked_in_at
+         FROM ticket_passes WHERE event_id = ANY($1::bigint[])`,
+        [eventIds]
+      );
+      ticketPasses = rows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+        event_id: Number(row.event_id),
+      }));
+    } catch (error) {
+      console.error("Ticket passes fetch error:", error);
+    }
 
     // Calculate tickets sold from booking_items
-    const { data: bookingItems } = await supabase
-      .from("booking_items")
-      .select("booking_id, ticket_type_id, quantity")
-      .in(
-        "ticket_type_id",
-        ((ticketTypes as TicketTypeRecord[]) || []).map((t) => t.id),
-      );
+    const ticketTypeIds = ticketTypes.map((t) => t.id);
+    let bookingItems: { booking_id: number; ticket_type_id: number; quantity: number }[] = [];
+    if (ticketTypeIds.length > 0) {
+      try {
+        const { rows } = await query(
+          `SELECT booking_id, ticket_type_id, quantity
+           FROM booking_items WHERE ticket_type_id = ANY($1::bigint[])`,
+          [ticketTypeIds]
+        );
+        bookingItems = rows.map((row) => ({
+          booking_id: Number(row.booking_id),
+          ticket_type_id: Number(row.ticket_type_id),
+          quantity: row.quantity,
+        }));
+      } catch (error) {
+        console.error("Booking items fetch error:", error);
+      }
+    }
 
     // Build a map of ticket_type_id -> quantity sold
     const ticketsSoldByType: Record<number, number> = {};
-    const confirmedBookingIds = ((bookings as BookingRecord[]) || []).map(
-      (b) => b.id,
-    );
-    (bookingItems || []).forEach((item) => {
+    const confirmedBookingIds = bookings.map((b) => b.id);
+    bookingItems.forEach((item) => {
       if (confirmedBookingIds.includes(item.booking_id)) {
         ticketsSoldByType[item.ticket_type_id] =
           (ticketsSoldByType[item.ticket_type_id] || 0) + item.quantity;
@@ -163,16 +182,12 @@ export async function GET(request: NextRequest) {
     });
 
     // Calculate per-event stats
-    const eventsWithStats = (events as EventRecord[]).map((event) => {
-      const eventBookings = ((bookings as BookingRecord[]) || []).filter(
-        (b) => b.event_id === event.id,
+    const eventsWithStats = events.map((event) => {
+      const eventBookings = bookings.filter((b) => b.event_id === event.id);
+      const eventTicketTypes = ticketTypes.filter(
+        (t) => t.event_id === event.id,
       );
-      const eventTicketTypes = (
-        (ticketTypes as TicketTypeRecord[]) || []
-      ).filter((t) => t.event_id === event.id);
-      const eventPasses = ((ticketPasses as TicketPassRecord[]) || []).filter(
-        (p) => p.event_id === event.id,
-      );
+      const eventPasses = ticketPasses.filter((p) => p.event_id === event.id);
 
       const ticketsSold = eventTicketTypes.reduce(
         (sum, t) => sum + (ticketsSoldByType[t.id] || 0),
@@ -236,13 +251,10 @@ export async function GET(request: NextRequest) {
         (sum, e) => sum + e.stats.checkIns,
         0,
       ),
-      upcomingEvents: (events as EventRecord[]).filter(
-        (e) => new Date(e.start_time) > now,
-      ).length,
-      pastEvents: (events as EventRecord[]).filter(
-        (e) => new Date(e.end_time) < now,
-      ).length,
-      liveEvents: (events as EventRecord[]).filter(
+      upcomingEvents: events.filter((e) => new Date(e.start_time) > now)
+        .length,
+      pastEvents: events.filter((e) => new Date(e.end_time) < now).length,
+      liveEvents: events.filter(
         (e) => new Date(e.start_time) <= now && new Date(e.end_time) >= now,
       ).length,
     };

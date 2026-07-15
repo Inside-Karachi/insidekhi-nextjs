@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 // NOTE: This legacy endpoint is deprecated for booking creation.
 // New flow: POST /api/tickets/checkout (uses transactional RPC + payment initiation)
@@ -19,45 +20,57 @@ export async function POST() {
 }
 
 // Get user's bookings
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    const { data: bookings, error } = await supabase
-      .from("bookings")
-      .select(
-        `
-        *,
-        events!inner(name, slug, start_time),
-        booking_items(
-          *,
-          ticket_types(name, price)
-        )
-      `
-      )
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false });
+    const { rows: bookings } = await query(
+      `SELECT b.*,
+              json_build_object(
+                'name', e.name,
+                'slug', e.slug,
+                'start_time', e.start_time
+              ) AS events
+       FROM bookings b
+       INNER JOIN events e ON e.id = b.event_id
+       WHERE b.user_id = $1
+       ORDER BY b.created_at DESC`,
+      [session.userId]
+    );
 
-    if (error) {
-      return NextResponse.json(
-        { error: "Failed to fetch bookings" },
-        { status: 500 }
+    const bookingIds = bookings.map((b) => b.id as number);
+    let itemsByBooking = new Map<number, unknown[]>();
+    if (bookingIds.length > 0) {
+      const { rows: items } = await query(
+        `SELECT bi.*,
+                json_build_object('name', tt.name, 'price', tt.price) AS ticket_types
+         FROM booking_items bi
+         INNER JOIN ticket_types tt ON tt.id = bi.ticket_type_id
+         WHERE bi.booking_id = ANY($1::int[])`,
+        [bookingIds]
       );
+      itemsByBooking = items.reduce((map, item) => {
+        const bookingId = item.booking_id as number;
+        const list = map.get(bookingId) ?? [];
+        list.push(item);
+        map.set(bookingId, list);
+        return map;
+      }, new Map<number, unknown[]>());
     }
 
-    return NextResponse.json({ bookings: bookings || [] });
+    const result = bookings.map((b) => ({
+      ...b,
+      booking_items: itemsByBooking.get(b.id as number) ?? [],
+    }));
+
+    return NextResponse.json({ bookings: result });
   } catch (error) {
     console.error("Error fetching bookings:", error);
     return NextResponse.json(

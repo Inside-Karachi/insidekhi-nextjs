@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { z } from "zod";
 import type { CreateInvitationResponse } from "@/types/invite-share.types";
 import {
@@ -11,20 +12,19 @@ const createInvitationSchema = z.object({
   invitee_email: z.string().email("Invalid email address"),
 });
 
+type CreateInvitationRpcResult = {
+  success: boolean;
+  invite_code?: string;
+  invite_token?: string;
+  expires_at?: string;
+  error?: string;
+};
+
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
+    const session = await getSession(request);
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
         { status: 401 }
@@ -51,37 +51,47 @@ export async function POST(request: NextRequest) {
     const forwarded = request.headers.get("x-forwarded-for");
     const ip = forwarded ? forwarded.split(",")[0] : "unknown";
 
-    const { data, error } = await serviceSupabase.rpc("create_invitation", {
-      p_invitee_email: invitee_email,
-      p_inviter_ip: ip,
-      p_inviter_id: user.id,
-    });
-
-    if (error) {
+    // create_invitation() is SECURITY DEFINER and falls back to the
+    // explicit p_inviter_id parameter when auth.uid() is unset (which it
+    // always is over a direct pg connection), so this is safe to call as-is.
+    let result: CreateInvitationRpcResult;
+    try {
+      const { rows } = await query(
+        `SELECT create_invitation($1, $2::inet, $3) AS result`,
+        [invitee_email, ip, session.userId]
+      );
+      result = rows[0].result;
+    } catch (error) {
       console.error("Error creating invitation:", error);
 
       // Translate technical database errors to user-friendly messages
       let userMessage = "Failed to create invitation";
+      const pgError = error as { code?: string; message?: string };
 
       // PostgreSQL error code 23505 = unique constraint violation
-      if (error.code === "23505") {
-        if (error.message?.includes("unique_inviter_email")) {
-          userMessage = "You've already sent an invitation to this email address";
+      if (pgError.code === "23505") {
+        if (pgError.message?.includes("unique_inviter_email")) {
+          userMessage =
+            "You've already sent an invitation to this email address";
         } else {
           userMessage = "This invitation already exists";
         }
       }
       // PostgreSQL error code 23503 = foreign key violation
-      else if (error.code === "23503") {
+      else if (pgError.code === "23503") {
         userMessage = "Invalid user reference";
       }
       // PostgreSQL error code 23502 = not null violation
-      else if (error.code === "23502") {
+      else if (pgError.code === "23502") {
         userMessage = "Missing required information";
       }
       // Use the message from the RPC if it's user-friendly
-      else if (error.message && !error.message.includes("violates") && !error.message.includes("constraint")) {
-        userMessage = error.message;
+      else if (
+        pgError.message &&
+        !pgError.message.includes("violates") &&
+        !pgError.message.includes("constraint")
+      ) {
+        userMessage = pgError.message;
       }
 
       return NextResponse.json(
@@ -92,15 +102,6 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
-
-    // RPC returns JSONB, parse it
-    const result = data as {
-      success: boolean;
-      invite_code?: string;
-      invite_token?: string;
-      expires_at?: string;
-      error?: string;
-    };
 
     if (!result.success) {
       return NextResponse.json(
@@ -116,14 +117,14 @@ export async function POST(request: NextRequest) {
     const inviteUrl = `${process.env.NEXT_PUBLIC_APP_URL}/signup?invite=${result.invite_token}`;
 
     // Get inviter's profile for email
-    const { data: inviterProfile } = await supabase
-      .from("profiles")
-      .select("full_name")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT full_name FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const inviterProfile = profileRows[0];
 
     const inviterName = inviterProfile?.full_name || "A friend";
-    const inviterEmail = user.email || "";
+    const inviterEmail = session.email || "";
 
     // Extract invitee name from email (first part before @)
     const inviteeName =

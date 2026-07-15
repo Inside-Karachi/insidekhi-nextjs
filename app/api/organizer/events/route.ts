@@ -73,7 +73,15 @@ export async function GET(request: NextRequest) {
     let events: EventRecord[];
     try {
       const { rows } = await query(eventsSql, eventParams);
-      events = rows.map((row) => ({ ...row, id: Number(row.id) }));
+      events = rows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+        // commission_rate is a numeric column; node-pg returns it as a
+        // string by default (no custom type parser configured), unlike the
+        // old PostgREST path which serialized it as a JSON number.
+        commission_rate:
+          row.commission_rate !== null ? Number(row.commission_rate) : null,
+      }));
     } catch (error) {
       console.error("Events fetch error:", error);
       return NextResponse.json(

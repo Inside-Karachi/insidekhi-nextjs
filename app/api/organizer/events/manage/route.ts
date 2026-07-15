@@ -244,13 +244,31 @@ export async function POST(request: NextRequest) {
 
         if (action_type === "update" || action_type === "delete") {
           const { rows: eventRows } = await client.query(
-            `SELECT id, organizer_id, name, slug, description, start_time, end_time,
+            `SELECT id, organizer_id, name, slug, description,
+               to_json(start_time) #>> '{}' AS start_time,
+               to_json(end_time) #>> '{}' AS end_time,
                location_name, address, latitude, longitude, category_id, max_capacity,
-               is_featured, is_commission_based, commission_rate, status, require_guest_details
+               is_featured, is_commission_based, commission_rate, status, require_guest_details,
+               to_json(created_at) #>> '{}' AS created_at,
+               to_json(updated_at) #>> '{}' AS updated_at
              FROM events WHERE id = $1`,
             [event_id]
           );
           const existingEvent = eventRows[0];
+          if (existingEvent) {
+            // latitude/longitude/commission_rate are numeric columns; node-pg
+            // returns them as strings by default (no custom type parser is
+            // configured), unlike the old PostgREST path which serialized
+            // them as JSON numbers.
+            existingEvent.latitude =
+              existingEvent.latitude !== null ? Number(existingEvent.latitude) : null;
+            existingEvent.longitude =
+              existingEvent.longitude !== null ? Number(existingEvent.longitude) : null;
+            existingEvent.commission_rate =
+              existingEvent.commission_rate !== null
+                ? Number(existingEvent.commission_rate)
+                : null;
+          }
 
           if (!existingEvent) {
             response = { success: false, error: "Event not found" };
@@ -292,6 +310,8 @@ export async function POST(request: NextRequest) {
           }
 
           originalData = {
+            id: Number(existingEvent.id),
+            organizer_id: existingEvent.organizer_id,
             name: existingEvent.name,
             slug: existingEvent.slug,
             description: existingEvent.description,
@@ -308,6 +328,8 @@ export async function POST(request: NextRequest) {
             commission_rate: existingEvent.commission_rate,
             status: existingEvent.status,
             require_guest_details: existingEvent.require_guest_details,
+            created_at: existingEvent.created_at,
+            updated_at: existingEvent.updated_at,
           };
         }
 

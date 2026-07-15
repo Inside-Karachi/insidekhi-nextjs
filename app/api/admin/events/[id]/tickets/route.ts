@@ -84,7 +84,12 @@ export async function GET(
     let ticketTypes;
     try {
       const { rows } = await query(
-        `SELECT ${TICKET_TYPE_COLUMNS} FROM ticket_types WHERE event_id = $1 ORDER BY sale_starts_at ASC`,
+        // ORDER BY references the underlying table column explicitly (not
+        // the output alias) - Postgres prefers a same-named SELECT-list
+        // alias over the input column for simple ORDER BY names, which
+        // would otherwise sort by the to_json-rendered text instead of the
+        // real timestamptz value.
+        `SELECT ${TICKET_TYPE_COLUMNS} FROM ticket_types t WHERE t.event_id = $1 ORDER BY t.sale_starts_at ASC`,
         [eventId]
       );
       ticketTypes = rows.map(toNumericTicketType);

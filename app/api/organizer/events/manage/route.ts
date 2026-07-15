@@ -1,31 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query, pool } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import type {
   EventFormData,
   SubmitEventChangeResponse,
   OrganizerManagedEvent,
 } from "@/types/event-change-request.types";
-import type { Database } from "@/types/supabase";
 
 export const dynamic = "force-dynamic";
 
-// Type alias for the event_change_requests table row
-type EventChangeRequestRow =
-  Database["public"]["Tables"]["event_change_requests"]["Row"];
+const ORGANIZER_ROLES = ["organizer", "lister", "admin", "super_admin"];
+
+async function getUserRole(userId: string): Promise<string | null> {
+  const { rows } = await query(`SELECT role FROM profiles WHERE id = $1`, [
+    userId,
+  ]);
+  return rows[0]?.role ?? null;
+}
 
 // =============================================================================
 // GET - Get organizer's managed events with pending change status
 // =============================================================================
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -33,36 +33,60 @@ export async function GET(_request: NextRequest) {
     }
 
     // Verify user has organizer role or higher
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const role = await getUserRole(session.userId);
 
-    if (profileError || !profile) {
+    if (!role) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
       );
     }
 
-    if (
-      !["organizer", "lister", "admin", "super_admin"].includes(profile.role)
-    ) {
+    if (!ORGANIZER_ROLES.includes(role)) {
       return NextResponse.json(
         { success: false, error: "Organizer access required" },
         { status: 403 }
       );
     }
 
-    // Use RPC to get managed events with pending status
-    const { data: events, error: eventsError } = await supabase.rpc(
-      "get_organizer_managed_events",
-      { p_user_id: user.id }
-    );
-
-    if (eventsError) {
-      console.error("Error fetching organizer events:", eventsError);
+    // Get managed events with pending status. Replicated directly from
+    // get_organizer_managed_events(): that function's own p_user_id
+    // parameter is dead code - it actually reads auth.uid() internally,
+    // which is always null over a direct pg connection, so it would
+    // always return zero rows if called as-is.
+    let events: OrganizerManagedEvent[] = [];
+    try {
+      const { rows } = await query(
+        `SELECT
+           e.id AS event_id, e.name AS event_name, e.slug AS event_slug,
+           e.description AS event_description, e.status AS event_status,
+           to_json(e.start_time) #>> '{}' AS start_time,
+           to_json(e.end_time) #>> '{}' AS end_time,
+           e.is_featured, e.max_capacity, e.location_name, e.address,
+           to_json(e.created_at) #>> '{}' AS created_at,
+           to_json(e.updated_at) #>> '{}' AS updated_at,
+           ecr.id AS pending_request_id, ecr.action_type AS pending_action_type,
+           (ecr.id IS NOT NULL) AS has_pending_changes
+         FROM events e
+         LEFT JOIN LATERAL (
+           SELECT ecr_inner.id, ecr_inner.action_type
+           FROM event_change_requests ecr_inner
+           WHERE ecr_inner.event_id = e.id AND ecr_inner.status = 'pending'
+           ORDER BY ecr_inner.created_at DESC
+           LIMIT 1
+         ) ecr ON true
+         WHERE e.organizer_id = $1
+         ORDER BY e.start_time DESC`,
+        [session.userId]
+      );
+      events = rows.map((row) => ({
+        ...row,
+        event_id: Number(row.event_id),
+        pending_request_id:
+          row.pending_request_id !== null ? Number(row.pending_request_id) : null,
+      })) as OrganizerManagedEvent[];
+    } catch (error) {
+      console.error("Error fetching organizer events:", error);
       return NextResponse.json(
         { success: false, error: "Failed to fetch events" },
         { status: 500 }
@@ -70,36 +94,61 @@ export async function GET(_request: NextRequest) {
     }
 
     // Also fetch pending create requests (no event_id yet)
-    const { data: pendingCreates, error: pendingError } = await supabase
-      .from("event_change_requests")
-      .select("*")
-      .eq("organizer_id", user.id)
-      .eq("action_type", "create")
-      .eq("status", "pending")
-      .order("created_at", { ascending: false });
-
-    if (pendingError) {
-      console.error("Error fetching pending creates:", pendingError);
+    let pendingCreates;
+    try {
+      const { rows } = await query(
+        `SELECT id, event_id, organizer_id, action_type, proposed_data, original_data,
+           status, reviewed_by,
+           to_json(reviewed_at) #>> '{}' AS reviewed_at,
+           review_notes,
+           to_json(created_at) #>> '{}' AS created_at,
+           to_json(updated_at) #>> '{}' AS updated_at
+         FROM event_change_requests
+         WHERE organizer_id = $1 AND action_type = 'create' AND status = 'pending'
+         ORDER BY created_at DESC`,
+        [session.userId]
+      );
+      pendingCreates = rows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+        event_id: row.event_id !== null ? Number(row.event_id) : null,
+      }));
+    } catch (error) {
+      console.error("Error fetching pending creates:", error);
+      pendingCreates = [];
     }
 
     // Fetch rejected change requests so organizer can edit and resubmit
-    const { data: rejectedRequests, error: rejectedError } = await supabase
-      .from("event_change_requests")
-      .select("*")
-      .eq("organizer_id", user.id)
-      .eq("status", "rejected")
-      .order("updated_at", { ascending: false });
-
-    if (rejectedError) {
-      console.error("Error fetching rejected requests:", rejectedError);
+    let rejectedRequests;
+    try {
+      const { rows } = await query(
+        `SELECT id, event_id, organizer_id, action_type, proposed_data, original_data,
+           status, reviewed_by,
+           to_json(reviewed_at) #>> '{}' AS reviewed_at,
+           review_notes,
+           to_json(created_at) #>> '{}' AS created_at,
+           to_json(updated_at) #>> '{}' AS updated_at
+         FROM event_change_requests
+         WHERE organizer_id = $1 AND status = 'rejected'
+         ORDER BY updated_at DESC`,
+        [session.userId]
+      );
+      rejectedRequests = rows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+        event_id: row.event_id !== null ? Number(row.event_id) : null,
+      }));
+    } catch (error) {
+      console.error("Error fetching rejected requests:", error);
+      rejectedRequests = [];
     }
 
     return NextResponse.json({
       success: true,
       data: {
-        events: (events as OrganizerManagedEvent[]) || [],
-        pendingCreates: pendingCreates || [],
-        rejectedRequests: rejectedRequests || [],
+        events,
+        pendingCreates,
+        rejectedRequests,
       },
     });
   } catch (error) {
@@ -116,14 +165,9 @@ export async function GET(_request: NextRequest) {
 // =============================================================================
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
+    const session = await getSession(request);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -131,22 +175,16 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify user has organizer role or higher
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const role = await getUserRole(session.userId);
 
-    if (profileError || !profile) {
+    if (!role) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
       );
     }
 
-    if (
-      !["organizer", "lister", "admin", "super_admin"].includes(profile.role)
-    ) {
+    if (!ORGANIZER_ROLES.includes(role)) {
       return NextResponse.json(
         { success: false, error: "Organizer access required" },
         { status: 403 }
@@ -164,7 +202,6 @@ export async function POST(request: NextRequest) {
       event_data?: EventFormData;
     } = body;
 
-    // Validate action type
     if (!["create", "update", "delete"].includes(action_type)) {
       return NextResponse.json(
         { success: false, error: "Invalid action type" },
@@ -172,7 +209,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate required fields
     if (action_type === "create" && !event_data) {
       return NextResponse.json(
         { success: false, error: "Event data required for create action" },
@@ -194,27 +230,241 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Use RPC to submit the change request
-    const { data: result, error: rpcError } = await supabase.rpc(
-      "submit_event_change_request",
-      {
-        p_action_type: action_type,
-        p_event_id: event_id,
-        p_proposed_data: event_data
-          ? JSON.parse(JSON.stringify(event_data))
-          : undefined,
+    // Replicated directly from submit_event_change_request(): that function
+    // has no fallback parameter at all and reads auth.uid() exclusively,
+    // which is always null over a direct pg connection - it would always
+    // return {success:false, error:'Authentication required'} if called
+    // as-is, so the entire body is reimplemented here using session.userId.
+    let response: SubmitEventChangeResponse;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      try {
+        let originalData: Record<string, unknown> | null = null;
+
+        if (action_type === "update" || action_type === "delete") {
+          const { rows: eventRows } = await client.query(
+            `SELECT id, organizer_id, name, slug, description,
+               to_json(start_time) #>> '{}' AS start_time,
+               to_json(end_time) #>> '{}' AS end_time,
+               location_name, address, latitude, longitude, category_id, max_capacity,
+               is_featured, is_commission_based, commission_rate, status, require_guest_details,
+               to_json(created_at) #>> '{}' AS created_at,
+               to_json(updated_at) #>> '{}' AS updated_at
+             FROM events WHERE id = $1`,
+            [event_id]
+          );
+          const existingEvent = eventRows[0];
+          if (existingEvent) {
+            // latitude/longitude/commission_rate are numeric columns; node-pg
+            // returns them as strings by default (no custom type parser is
+            // configured), unlike the old PostgREST path which serialized
+            // them as JSON numbers.
+            existingEvent.latitude =
+              existingEvent.latitude !== null ? Number(existingEvent.latitude) : null;
+            existingEvent.longitude =
+              existingEvent.longitude !== null ? Number(existingEvent.longitude) : null;
+            existingEvent.commission_rate =
+              existingEvent.commission_rate !== null
+                ? Number(existingEvent.commission_rate)
+                : null;
+          }
+
+          if (!existingEvent) {
+            response = { success: false, error: "Event not found" };
+            await client.query("ROLLBACK");
+            return NextResponse.json(
+              { success: false, error: response.error },
+              { status: 400 }
+            );
+          }
+
+          if (role === "organizer" && existingEvent.organizer_id !== session.userId) {
+            response = {
+              success: false,
+              error: "You can only modify your own events",
+            };
+            await client.query("ROLLBACK");
+            return NextResponse.json(
+              { success: false, error: response.error },
+              { status: 400 }
+            );
+          }
+
+          const { rows: pendingRows } = await client.query(
+            `SELECT id FROM event_change_requests WHERE event_id = $1 AND status = 'pending' LIMIT 1`,
+            [event_id]
+          );
+
+          if (pendingRows[0]) {
+            response = {
+              success: false,
+              error:
+                "A pending change request already exists for this event. Cancel it first or wait for review.",
+            };
+            await client.query("ROLLBACK");
+            return NextResponse.json(
+              { success: false, error: response.error },
+              { status: 400 }
+            );
+          }
+
+          originalData = {
+            id: Number(existingEvent.id),
+            organizer_id: existingEvent.organizer_id,
+            name: existingEvent.name,
+            slug: existingEvent.slug,
+            description: existingEvent.description,
+            start_time: existingEvent.start_time,
+            end_time: existingEvent.end_time,
+            location_name: existingEvent.location_name,
+            address: existingEvent.address,
+            latitude: existingEvent.latitude,
+            longitude: existingEvent.longitude,
+            category_id: existingEvent.category_id,
+            max_capacity: existingEvent.max_capacity,
+            is_featured: existingEvent.is_featured,
+            is_commission_based: existingEvent.is_commission_based,
+            commission_rate: existingEvent.commission_rate,
+            status: existingEvent.status,
+            require_guest_details: existingEvent.require_guest_details,
+            created_at: existingEvent.created_at,
+            updated_at: existingEvent.updated_at,
+          };
+        }
+
+        const proposedData = event_data
+          ? (event_data as unknown as Record<string, unknown>)
+          : null;
+
+        if (["lister", "admin", "super_admin"].includes(role)) {
+          if (action_type === "create") {
+            const rawName = String(proposedData?.name ?? "");
+            let slug = rawName
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/gi, "-")
+              .replace(/^-+|-+$/g, "");
+            slug = `${slug}-${Math.floor(Date.now() / 1000)}`;
+
+            const { rows: insertedRows } = await client.query(
+              `INSERT INTO events (
+                 name, slug, description, start_time, end_time,
+                 location_name, address, latitude, longitude, category_id, organizer_id, max_capacity,
+                 is_featured, is_commission_based, commission_rate, status, require_guest_details
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+               RETURNING id`,
+              [
+                proposedData?.name ?? null,
+                slug,
+                proposedData?.description ?? null,
+                proposedData?.start_time ?? null,
+                proposedData?.end_time ?? null,
+                proposedData?.location_name ?? null,
+                proposedData?.address ?? null,
+                proposedData?.latitude ?? null,
+                proposedData?.longitude ?? null,
+                proposedData?.category_id ?? null,
+                session.userId,
+                proposedData?.max_capacity ?? null,
+                proposedData?.is_featured ?? false,
+                proposedData?.is_commission_based ?? false,
+                proposedData?.commission_rate ?? null,
+                proposedData?.status ?? "draft",
+                proposedData?.require_guest_details ?? false,
+              ]
+            );
+            await client.query("COMMIT");
+            response = {
+              success: true,
+              event_id: Number(insertedRows[0].id),
+              message: "Event created successfully",
+              requires_approval: false,
+            };
+          } else if (action_type === "update") {
+            await client.query(
+              `UPDATE events SET
+                 name = COALESCE($1, name),
+                 description = COALESCE($2, description),
+                 start_time = COALESCE($3, start_time),
+                 end_time = COALESCE($4, end_time),
+                 location_name = COALESCE($5, location_name),
+                 address = COALESCE($6, address),
+                 latitude = COALESCE($7, latitude),
+                 longitude = COALESCE($8, longitude),
+                 category_id = COALESCE($9, category_id),
+                 max_capacity = COALESCE($10, max_capacity),
+                 is_featured = COALESCE($11, is_featured),
+                 is_commission_based = COALESCE($12, is_commission_based),
+                 commission_rate = COALESCE($13, commission_rate),
+                 status = COALESCE($14, status),
+                 require_guest_details = COALESCE($15, require_guest_details),
+                 updated_at = NOW()
+               WHERE id = $16`,
+              [
+                proposedData?.name ?? null,
+                proposedData?.description ?? null,
+                proposedData?.start_time ?? null,
+                proposedData?.end_time ?? null,
+                proposedData?.location_name ?? null,
+                proposedData?.address ?? null,
+                proposedData?.latitude ?? null,
+                proposedData?.longitude ?? null,
+                proposedData?.category_id ?? null,
+                proposedData?.max_capacity ?? null,
+                proposedData?.is_featured ?? null,
+                proposedData?.is_commission_based ?? null,
+                proposedData?.commission_rate ?? null,
+                proposedData?.status ?? null,
+                proposedData?.require_guest_details ?? null,
+                event_id,
+              ]
+            );
+            await client.query("COMMIT");
+            response = {
+              success: true,
+              event_id: event_id as number,
+              message: "Event updated successfully",
+              requires_approval: false,
+            };
+          } else {
+            await client.query(`DELETE FROM events WHERE id = $1`, [event_id]);
+            await client.query("COMMIT");
+            response = {
+              success: true,
+              event_id: event_id as number,
+              message: "Event deleted successfully",
+              requires_approval: false,
+            };
+          }
+        } else {
+          const { rows: requestRows } = await client.query(
+            `INSERT INTO event_change_requests (event_id, organizer_id, action_type, proposed_data, original_data, status)
+             VALUES ($1, $2, $3, $4, $5, 'pending')
+             RETURNING id`,
+            [
+              event_id ?? null,
+              session.userId,
+              action_type,
+              proposedData ? JSON.stringify(proposedData) : null,
+              originalData ? JSON.stringify(originalData) : null,
+            ]
+          );
+          await client.query("COMMIT");
+          response = {
+            success: true,
+            request_id: Number(requestRows[0].id),
+            event_id: event_id ?? undefined,
+            message: "Change request submitted for approval",
+            requires_approval: true,
+          };
+        }
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
       }
-    );
-
-    if (rpcError) {
-      console.error("Error submitting change request:", rpcError);
-      return NextResponse.json(
-        { success: false, error: "Failed to submit change request" },
-        { status: 500 }
-      );
+    } finally {
+      client.release();
     }
-
-    const response = result as unknown as SubmitEventChangeResponse;
 
     if (!response.success) {
       return NextResponse.json(
@@ -246,7 +496,6 @@ export async function POST(request: NextRequest) {
 // =============================================================================
 export async function DELETE(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
     const requestId = searchParams.get("request_id");
 
@@ -257,12 +506,9 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -270,24 +516,21 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Check if the request exists and belongs to this user
-    const { data: changeRequest, error: fetchError } = await supabase
-      .from("event_change_requests")
-      .select("*")
-      .eq("id", parseInt(requestId, 10))
-      .single();
+    const { rows: changeRequestRows } = await query(
+      `SELECT id, organizer_id, status FROM event_change_requests WHERE id = $1`,
+      [parseInt(requestId, 10)]
+    );
+    const changeRequest = changeRequestRows[0];
 
-    if (fetchError || !changeRequest) {
+    if (!changeRequest) {
       return NextResponse.json(
         { success: false, error: "Change request not found" },
         { status: 404 }
       );
     }
 
-    // Use properly typed request
-    const typedRequest: EventChangeRequestRow = changeRequest;
-
     // Only allow cancellation of own pending or rejected requests
-    if (typedRequest.organizer_id !== user.id) {
+    if (changeRequest.organizer_id !== session.userId) {
       return NextResponse.json(
         { success: false, error: "You can only cancel your own requests" },
         { status: 403 }
@@ -296,8 +539,8 @@ export async function DELETE(request: NextRequest) {
 
     // Allow deleting pending or rejected requests (not approved ones)
     if (
-      typedRequest.status !== "pending" &&
-      typedRequest.status !== "rejected"
+      changeRequest.status !== "pending" &&
+      changeRequest.status !== "rejected"
     ) {
       return NextResponse.json(
         {
@@ -309,13 +552,12 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Delete the request
-    const { error: deleteError } = await supabase
-      .from("event_change_requests")
-      .delete()
-      .eq("id", parseInt(requestId, 10));
-
-    if (deleteError) {
-      console.error("Error deleting change request:", deleteError);
+    try {
+      await query(`DELETE FROM event_change_requests WHERE id = $1`, [
+        parseInt(requestId, 10),
+      ]);
+    } catch (error) {
+      console.error("Error deleting change request:", error);
       return NextResponse.json(
         { success: false, error: "Failed to cancel request" },
         { status: 500 }

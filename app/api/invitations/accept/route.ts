@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { z } from "zod";
 import type { AcceptInvitationResponse } from "@/types/invite-share.types";
 
@@ -9,18 +10,9 @@ const acceptInvitationSchema = z.object({
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
+    const session = await getSession(request);
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
         { status: 401 }
@@ -47,29 +39,30 @@ export async function POST(request: NextRequest) {
     const forwarded = request.headers.get("x-forwarded-for");
     const ip = forwarded ? forwarded.split(",")[0] : "unknown";
 
-    const { data, error } = await serviceSupabase.rpc("accept_invitation", {
-      p_invite_token: invite_token,
-      p_invitee_ip: ip,
-      p_invitee_id: user.id,
-    });
-
-    if (error) {
+    // accept_invitation() is SECURITY DEFINER and falls back to the explicit
+    // p_invitee_id parameter when auth.uid() is unset (which it always is
+    // over a direct pg connection), so this is safe to call as-is.
+    let result: { success: boolean; message?: string; error?: string };
+    try {
+      const { rows } = await query(
+        // Positional args must match accept_invitation(p_invite_token,
+        // p_invitee_ip, p_invitee_id) - reorder here if that signature changes.
+        `SELECT accept_invitation($1, $2::inet, $3) AS result`,
+        [invite_token, ip, session.userId]
+      );
+      result = rows[0].result ?? { success: false, error: "Failed to accept invitation" };
+    } catch (error) {
       console.error("Error accepting invitation:", error);
+      const message =
+        error instanceof Error ? error.message : "Failed to accept invitation";
       return NextResponse.json(
         {
           success: false,
-          error: error.message || "Failed to accept invitation",
+          error: message,
         },
         { status: 400 }
       );
     }
-
-    // RPC returns JSONB
-    const result = data as {
-      success: boolean;
-      message?: string;
-      error?: string;
-    };
 
     if (!result.success) {
       return NextResponse.json(

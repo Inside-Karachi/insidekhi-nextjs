@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 import { z } from "zod";
-import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "@/types/supabase";
 
 // Validation schema for review creation (with branch_id)
 const createReviewSchema = z.object({
@@ -16,13 +15,9 @@ const createReviewSchema = z.object({
 export async function POST(request: NextRequest) {
   try {
     // Get authenticated user
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 },
@@ -46,14 +41,13 @@ export async function POST(request: NextRequest) {
     const { listing_id, branch_id, rating, comment } = validationResult.data;
 
     // Verify that the listing exists and is published
-    const { data: listing, error: listingError } = await supabase
-      .from("listings_with_details")
-      .select("id, name, status")
-      .eq("id", listing_id)
-      .eq("status", "published")
-      .single();
+    const { rows: listingRows } = await query(
+      `SELECT id, name, status FROM listings_with_details WHERE id = $1 AND status = 'published'`,
+      [listing_id]
+    );
+    const listing = listingRows[0];
 
-    if (listingError || !listing) {
+    if (!listing) {
       return NextResponse.json(
         { error: "Listing not found or not available for reviews" },
         { status: 404 },
@@ -61,71 +55,87 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify branch belongs to this listing
-    const { data: branch, error: branchError } = await supabase
-      .from("listing_branches")
-      .select("id, name")
-      .eq("id", branch_id)
-      .eq("listing_id", listing_id)
-      .single();
+    const { rows: branchRows } = await query(
+      `SELECT id, name FROM listing_branches WHERE id = $1 AND listing_id = $2`,
+      [branch_id, listing_id]
+    );
+    const branch = branchRows[0];
 
-    if (branchError || !branch) {
+    if (!branch) {
       return NextResponse.json(
         { error: "Branch not found for this listing" },
         { status: 404 },
       );
     }
 
-    // Check if user has reviewed this branch before (for image requirement)
-    const { data: reviewCountData, error: countError } = await supabase.rpc(
-      "get_user_branch_review_count",
-      {
-        p_user_id: user.id,
-        p_branch_id: branch_id,
-      },
-    );
-
-    if (countError) {
-      console.error("Review count check error:", countError);
-      // Non-critical - continue with submission
+    // Check if user has reviewed this branch before (for image requirement).
+    // Replicated directly from get_user_branch_review_count(): that RPC's
+    // own `p_user_id IS DISTINCT FROM auth.uid()` self-check always fails
+    // over a direct pg connection (auth.uid() is never set), so it can't be
+    // called as-is. Non-critical - continue with submission on any failure.
+    try {
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*) > 0 AS requires_image FROM reviews WHERE user_id = $1 AND branch_id = $2`,
+        [session.userId, branch_id]
+      );
+      // Image requirement: First review = optional, 2nd+ = REQUIRED
+      // Note: Enforced client-side. Admin moderation catches violations.
+      void (countRows[0]?.requires_image ?? false);
+    } catch (error) {
+      console.error("Review count check error:", error);
     }
 
-    // Type assertion for RPC return
-    const reviewCount = Array.isArray(reviewCountData)
-      ? (reviewCountData[0] as
-          | {
-              total_reviews: number;
-              requires_image: boolean;
-            }
-          | undefined)
-      : undefined;
+    // Check for suspicious patterns (auto-flag, but don't block). Replicated
+    // directly from check_suspicious_review_pattern() (same reason above).
+    let suspiciousPattern: { is_suspicious: boolean; reason: string } | undefined;
+    try {
+      const { rows: patternRows } = await query(
+        `SELECT
+           COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') AS reviews_last_24h,
+           COUNT(*) AS total_reviews
+         FROM reviews WHERE user_id = $1 AND branch_id = $2`,
+        [session.userId, branch_id]
+      );
+      const reviewsLast24h = parseInt(patternRows[0].reviews_last_24h, 10);
+      const totalReviews = parseInt(patternRows[0].total_reviews, 10);
 
-    // Image requirement: First review = optional, 2nd+ = REQUIRED
-    // Note: Enforced client-side. Admin moderation catches violations.
-    const _requiresImage = reviewCount?.requires_image || false;
+      if (reviewsLast24h >= 3) {
+        suspiciousPattern = {
+          is_suspicious: true,
+          reason: `User submitted ${reviewsLast24h} reviews in last 24 hours - possible spam`,
+        };
+      } else if (totalReviews >= 10) {
+        suspiciousPattern = {
+          is_suspicious: true,
+          reason: `User has ${totalReviews} total reviews for this branch - may need verification`,
+        };
+      } else {
+        suspiciousPattern = {
+          is_suspicious: false,
+          reason: "No suspicious pattern detected",
+        };
+      }
+    } catch (error) {
+      console.error("Suspicious pattern check error:", error);
+    }
 
-    // Check for suspicious patterns (auto-flag, but don't block)
-    const { data: suspiciousData } = await supabase.rpc(
-      "check_suspicious_review_pattern",
-      {
-        p_user_id: user.id,
-        p_branch_id: branch_id,
-      },
+    // CRITICAL: Block staff from reviewing listings they manage. Replicated
+    // directly from user_manages_listing() (same reason above) - this one
+    // must NOT silently fail open, so its own errors propagate normally.
+    const { rows: roleRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
     );
-
-    const suspiciousPattern = Array.isArray(suspiciousData)
-      ? (suspiciousData[0] as
-          | { is_suspicious: boolean; reason: string }
-          | undefined)
-      : undefined;
-
-    // CRITICAL: Block staff from reviewing listings they manage
-    const { data: managesListing } = await supabase.rpc(
-      "user_manages_listing",
-      {
-        p_user_id: user.id,
-        p_listing_id: listing_id,
-      },
+    const userRole = roleRows[0]?.role;
+    const { rows: ownsRows } = await query(
+      `SELECT EXISTS(SELECT 1 FROM listings WHERE id = $1 AND owner_id = $2) AS owns`,
+      [listing_id, session.userId]
     );
+    const managesListing =
+      ownsRows[0]?.owns === true ||
+      userRole === "admin" ||
+      userRole === "super_admin" ||
+      userRole === "lister";
 
     if (managesListing === true) {
       return NextResponse.json(
@@ -139,34 +149,45 @@ export async function POST(request: NextRequest) {
     }
 
     // Create the review
-    const reviewData = {
-      listing_id,
-      branch_id,
-      user_id: user.id,
-      rating,
-      comment,
-      status: "pending" as const, // Reviews need moderation
-      is_flagged_suspicious: suspiciousPattern?.is_suspicious || false,
-      created_at: new Date().toISOString(),
-    };
-
-    const { data: review, error: insertError } = await supabase
-      .from("reviews")
-      .insert(reviewData)
-      .select(
-        `
-        *,
-        profiles:user_id (
-          full_name,
-          avatar_url
-        )
-      `,
-      )
-      .single();
-
-    if (insertError) {
-      console.error("Error creating review:", insertError);
-      captureRouteError(insertError, { route: "/api/reviews", method: "POST" });
+    let review;
+    try {
+      const { rows: insertedRows } = await query(
+        `WITH inserted AS (
+           INSERT INTO reviews (listing_id, branch_id, user_id, rating, comment, status, is_flagged_suspicious, created_at)
+           VALUES ($1, $2, $3, $4, $5, 'pending', $6, NOW())
+           RETURNING *
+         )
+         SELECT inserted.id, inserted.listing_id, inserted.branch_id, inserted.user_id,
+           inserted.rating, inserted.comment, inserted.status, inserted.moderated_by,
+           to_json(inserted.moderated_at) #>> '{}' AS moderated_at,
+           to_json(inserted.updated_at) #>> '{}' AS updated_at,
+           to_json(inserted.created_at) #>> '{}' AS created_at,
+           inserted.helpful_count, inserted.is_flagged_suspicious,
+           CASE WHEN p.id IS NOT NULL
+             THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+             ELSE NULL
+           END AS profiles
+         FROM inserted
+         LEFT JOIN profiles p ON p.id = inserted.user_id`,
+        [
+          listing_id,
+          branch_id,
+          session.userId,
+          rating,
+          comment,
+          suspiciousPattern?.is_suspicious || false,
+        ]
+      );
+      const row = insertedRows[0];
+      review = {
+        ...row,
+        id: Number(row.id),
+        listing_id: Number(row.listing_id),
+        branch_id: Number(row.branch_id),
+      };
+    } catch (error) {
+      console.error("Error creating review:", error);
+      captureRouteError(error, { route: "/api/reviews", method: "POST" });
       return NextResponse.json(
         { error: "Failed to create review" },
         { status: 500 },
@@ -175,19 +196,22 @@ export async function POST(request: NextRequest) {
 
     // Log the review creation for audit purposes
     try {
-      await supabase.from("audit_logs").insert({
-        action: "review_created",
-        entity_type: "review",
-        entity_id: review.id.toString(),
-        user_id: user.id,
-        metadata: {
-          listing_id,
-          listing_name: listing.name,
-          rating,
-          status: "pending",
-        },
-        created_at: new Date().toISOString(),
-      });
+      await query(
+        `INSERT INTO audit_logs (action, entity_type, entity_id, user_id, metadata, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())`,
+        [
+          "review_created",
+          "review",
+          review.id.toString(),
+          session.userId,
+          JSON.stringify({
+            listing_id,
+            listing_name: listing.name,
+            rating,
+            status: "pending",
+          }),
+        ]
+      );
     } catch (auditError) {
       // Don't fail the request if audit logging fails
       console.error("Audit logging failed:", auditError);
@@ -199,21 +223,18 @@ export async function POST(request: NextRequest) {
 
     // === SMART NOTIFICATIONS (Prevent Admin Spam) ===
     try {
-      const adminSupabase = await createServerSupabase({
-        useServiceRole: true,
-      });
       const { createNotification } = await import("@/lib/notifications");
 
       // 1. Notify listing owner (always)
-      const { data: listingOwner } = await adminSupabase
-        .from("listings")
-        .select("created_by")
-        .eq("id", listing_id)
-        .single();
+      const { rows: ownerRows } = await query(
+        `SELECT created_by FROM listings WHERE id = $1`,
+        [listing_id]
+      );
+      const listingOwnerId = ownerRows[0]?.created_by;
 
-      if (listingOwner?.created_by && listingOwner.created_by !== user.id) {
+      if (listingOwnerId && listingOwnerId !== session.userId) {
         await createNotification({
-          recipientId: listingOwner.created_by,
+          recipientId: listingOwnerId,
           roleScope: "lister",
           categorySlug: "general",
           title: "New Review on Your Listing",
@@ -232,13 +253,12 @@ export async function POST(request: NextRequest) {
 
       // 2. Notify admins ONLY if flagged as suspicious (prevent spam)
       if (suspiciousPattern?.is_suspicious) {
-        const { data: admins } = await adminSupabase
-          .from("profiles")
-          .select("id")
-          .in("role", ["admin", "super_admin"]);
+        const { rows: adminRows } = await query(
+          `SELECT id FROM profiles WHERE role IN ('admin', 'super_admin')`
+        );
 
-        for (const admin of admins || []) {
-          if (admin.id !== user.id) {
+        for (const admin of adminRows) {
+          if (admin.id !== session.userId) {
             await createNotification({
               recipientId: admin.id,
               roleScope: "admin",
@@ -285,7 +305,6 @@ export async function POST(request: NextRequest) {
 // GET method to fetch reviews for a listing (for potential future use)
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
     const listingId = searchParams.get("listing_id");
 
@@ -297,35 +316,44 @@ export async function GET(request: NextRequest) {
     }
 
     // Get authenticated user to check if they can see pending reviews
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    const isAdmin = user ? await checkAdminStatus(supabase, user.id) : false;
+    const session = await getSession(request);
+    const isAdmin = session ? await checkAdminStatus(session.userId) : false;
 
     // Build query based on user permissions
-    let query = supabase
-      .from("reviews")
-      .select(
-        `
-        *,
-        helpful_count,
-        profiles:user_id (
-          full_name,
-          avatar_url
-        )
-      `,
-      )
-      .eq("listing_id", parseInt(listingId))
-      .order("created_at", { ascending: false });
+    const whereClauses = ["r.listing_id = $1"];
+    const params: unknown[] = [parseInt(listingId, 10)];
 
     // Only show approved reviews to regular users
     if (!isAdmin) {
-      query = query.eq("status", "approved");
+      whereClauses.push(`r.status = 'approved'`);
     }
 
-    const { data: reviews, error } = await query;
-
-    if (error) {
+    let reviews;
+    try {
+      const { rows } = await query(
+        `SELECT r.id, r.listing_id, r.branch_id, r.user_id, r.rating, r.comment, r.status,
+           r.moderated_by,
+           to_json(r.moderated_at) #>> '{}' AS moderated_at,
+           to_json(r.updated_at) #>> '{}' AS updated_at,
+           to_json(r.created_at) #>> '{}' AS created_at,
+           r.helpful_count, r.is_flagged_suspicious,
+           CASE WHEN p.id IS NOT NULL
+             THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+             ELSE NULL
+           END AS profiles
+         FROM reviews r
+         LEFT JOIN profiles p ON p.id = r.user_id
+         WHERE ${whereClauses.join(" AND ")}
+         ORDER BY r.created_at DESC`,
+        params
+      );
+      reviews = rows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+        listing_id: Number(row.listing_id),
+        branch_id: Number(row.branch_id),
+      }));
+    } catch (error) {
       console.error("Error fetching reviews:", error);
       captureRouteError(error, { route: "/api/reviews", method: "GET" });
       return NextResponse.json(
@@ -335,22 +363,26 @@ export async function GET(request: NextRequest) {
     }
 
     // Get comment counts for each review
-    if (reviews && reviews.length > 0) {
+    if (reviews.length > 0) {
       const reviewIds = reviews.map((r) => r.id);
-      const { data: commentCounts } = await supabase
-        .from("review_comments")
-        .select("review_id")
-        .in("review_id", reviewIds)
-        .eq("status", "approved");
 
-      // Count comments per review
-      const commentCountMap = new Map<number, number>();
-      commentCounts?.forEach((comment) => {
-        const count = commentCountMap.get(comment.review_id) || 0;
-        commentCountMap.set(comment.review_id, count + 1);
-      });
+      // Matches the old code's leniency: a failure here was never checked
+      // for an error, so it silently fell back to zero comments everywhere.
+      let commentCountMap = new Map<number, number>();
+      try {
+        const { rows: commentRows } = await query(
+          `SELECT review_id FROM review_comments WHERE review_id = ANY($1::bigint[]) AND status = 'approved'`,
+          [reviewIds]
+        );
+        commentRows.forEach((c) => {
+          const rid = Number(c.review_id);
+          commentCountMap.set(rid, (commentCountMap.get(rid) || 0) + 1);
+        });
+      } catch (error) {
+        console.error("Error fetching comment counts:", error);
+        commentCountMap = new Map<number, number>();
+      }
 
-      // Add comment count to each review
       const reviewsWithCommentCount = reviews.map((review) => ({
         ...review,
         comment_count: commentCountMap.get(review.id) || 0,
@@ -377,18 +409,13 @@ export async function GET(request: NextRequest) {
 }
 
 // Helper function to check admin status
-async function checkAdminStatus(
-  supabase: SupabaseClient<Database>,
-  userId: string,
-): Promise<boolean> {
+async function checkAdminStatus(userId: string): Promise<boolean> {
   try {
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", userId)
-      .single();
-
-    return profile?.role === "admin" || profile?.role === "super_admin";
+    const { rows } = await query(`SELECT role FROM profiles WHERE id = $1`, [
+      userId,
+    ]);
+    const role = rows[0]?.role;
+    return role === "admin" || role === "super_admin";
   } catch (error) {
     console.error("Error checking admin status:", error);
     return false;

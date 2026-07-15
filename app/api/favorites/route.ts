@@ -1,41 +1,38 @@
-import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const listingId = Number(url.searchParams.get("listingId"));
   if (!listingId)
     return NextResponse.json({ error: "missing_listing_id" }, { status: 400 });
 
-  const supabase = await createServerSupabase();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const session = await getSession(request);
 
   // If user is not authenticated, return favorited: false
-  if (!user) {
+  if (!session) {
     return NextResponse.json({
       favorited: false,
     });
   }
 
-  const { data, error } = await supabase
-    .from("favorite_listings")
-    .select("listing_id")
-    .eq("user_id", user.id)
-    .eq("listing_id", listingId)
-    .limit(1);
+  try {
+    const { rows } = await query(
+      `SELECT 1 FROM favorite_listings WHERE user_id = $1 AND listing_id = $2 LIMIT 1`,
+      [session.userId, listingId]
+    );
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({
+      favorited: rows.length > 0,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-
-  return NextResponse.json({
-    favorited: Array.isArray(data) && data.length > 0,
-  });
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const listingId = Number(body.listingId);
@@ -45,56 +42,29 @@ export async function POST(request: Request) {
         { status: 400 }
       );
 
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user)
+    const session = await getSession(request);
+    if (!session)
       return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
-    // Use an admin client for the actual DB modifications to avoid RLS blocking
-    let supabaseAdmin;
-    try {
-      supabaseAdmin = await createServerSupabase({ useServiceRole: true });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      // Common cause: SUPABASE_SERVICE_ROLE_KEY not set in env
-      return NextResponse.json(
-        { error: "service_role_unavailable", message },
-        { status: 500 }
+
+    // Always scope to the caller's own session id - never trust a
+    // request-supplied user id.
+    const { rows: existing } = await query(
+      `SELECT 1 FROM favorite_listings WHERE user_id = $1 AND listing_id = $2 LIMIT 1`,
+      [session.userId, listingId]
+    );
+
+    if (existing.length > 0) {
+      await query(
+        `DELETE FROM favorite_listings WHERE user_id = $1 AND listing_id = $2`,
+        [session.userId, listingId]
       );
-    }
-
-    // Check existing using admin client
-    const { data: existing, error: selErr } = await supabaseAdmin
-      .from("favorite_listings")
-      .select("*")
-      .eq("user_id", user.id)
-      .eq("listing_id", listingId)
-      .limit(1);
-
-    if (selErr)
-      return NextResponse.json({ error: selErr.message }, { status: 500 });
-
-    if (existing && existing.length > 0) {
-      // Remove favorite using admin client
-      const { error: delErr } = await supabaseAdmin
-        .from("favorite_listings")
-        .delete()
-        .eq("user_id", user.id)
-        .eq("listing_id", listingId);
-
-      if (delErr)
-        return NextResponse.json({ error: delErr.message }, { status: 500 });
       return NextResponse.json({ favorited: false });
     }
 
-    // Insert favorite
-    const { error: insertErr } = await supabaseAdmin
-      .from("favorite_listings")
-      .insert({ user_id: user.id, listing_id: listingId });
-
-    if (insertErr)
-      return NextResponse.json({ error: insertErr.message }, { status: 500 });
+    await query(
+      `INSERT INTO favorite_listings (user_id, listing_id) VALUES ($1, $2)`,
+      [session.userId, listingId]
+    );
     return NextResponse.json({ favorited: true });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

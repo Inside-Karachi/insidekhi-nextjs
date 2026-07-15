@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import {
   CheckoutRequestBody,
   CheckoutSessionResponse,
   PaymentStage,
   BookingPaymentStatus,
 } from "@/types/payments.types";
-import { Database } from "@/types/supabase";
 import crypto from "crypto";
 import {
   checkCheckoutRateLimit,
@@ -57,16 +57,10 @@ export async function POST(req: NextRequest) {
     if (!/^\d{13}$/.test(body.customer.cnic))
       return bad("Invalid CNIC format", 400, "CNIC_INVALID");
 
-    const supabase = await createServerSupabase();
-    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user)
+    const session = await getSession(req);
+    if (!session)
       return bad("Authentication required", 401, "AUTH_REQUIRED");
+    const user = { id: session.userId };
 
     // PHASE 1 FIX: Distributed rate limiting
     const rateLimitResult = await checkCheckoutRateLimit(req, user.id);
@@ -123,22 +117,22 @@ export async function POST(req: NextRequest) {
     }));
     // Pre-validation of ticket types (helps distinguish RLS vs real absence before RPC)
     const ticketTypeIds = items.map((i) => i.ticket_type_id);
-    const { data: ticketTypes, error: ttErr } = await supabase
-      .from("ticket_types")
-      .select(
-        "id,event_id,quantity_available,sale_starts_at,sale_ends_at,max_per_person,price",
-      )
-      .in("id", ticketTypeIds);
-    if (ttErr) {
+    let ticketTypes;
+    try {
+      ({ rows: ticketTypes } = await query(
+        `SELECT id, event_id, quantity_available, sale_starts_at, sale_ends_at, max_per_person, price
+         FROM ticket_types WHERE id = ANY($1::int[])`,
+        [ticketTypeIds],
+      ));
+    } catch (ttErr) {
       console.error("[checkout] ticket_types query error", {
-        code: ttErr.code,
-        message: ttErr.message,
+        message: ttErr instanceof Error ? ttErr.message : String(ttErr),
       });
       return bad(
         "Ticket type lookup failed",
         500,
         "TICKET_TYPE_QUERY_FAILED",
-        { message: ttErr.message, code: ttErr.code },
+        { message: ttErr instanceof Error ? ttErr.message : String(ttErr) },
         ttErr,
       );
     }
@@ -234,53 +228,72 @@ export async function POST(req: NextRequest) {
     // Attempt reuse of existing awaiting_payment booking with identical basket
     let reused = false;
     let bookingId: number | null = null;
-    const { data: existingBooking, error: existingErr } = await supabase
-      .from("bookings")
-      .select("id, payment_status, basket_id")
-      .eq("user_id", user.id)
-      .eq("event_id", eventIds[0])
-      .eq("basket_id", basketHash)
-      .in("payment_status", ["awaiting_payment", "pending"])
-      .order("id", { ascending: false })
-      .maybeSingle();
-    if (existingErr) {
+    try {
+      const { rows: existingRows } = await query(
+        `SELECT id, payment_status, basket_id
+         FROM bookings
+         WHERE user_id = $1 AND event_id = $2 AND basket_id = $3
+           AND payment_status = ANY($4::text[])
+         ORDER BY id DESC
+         LIMIT 1`,
+        [user.id, eventIds[0], basketHash, ["awaiting_payment", "pending"]],
+      );
+      const existingBooking = existingRows[0];
+      if (existingBooking) {
+        reused = true;
+        bookingId = existingBooking.id;
+      }
+    } catch (existingErr) {
       console.warn("[checkout] basket reuse lookup error", {
-        code: existingErr.code,
-        message: existingErr.message,
+        message:
+          existingErr instanceof Error
+            ? existingErr.message
+            : String(existingErr),
       });
-    } else if (existingBooking) {
-      reused = true;
-      bookingId = existingBooking.id;
     }
 
-    let rpcErr;
+    let rpcErr: { message: string; code?: string; hint?: string } | undefined;
     if (!bookingId) {
       // Create booking via RPC
-      const rpcRes = await serviceSupabase.rpc(
-        "create_booking_with_reservation",
-        {
-          p_user_id: user.id,
-          p_items:
-            items as unknown as Database["public"]["Functions"]["create_booking_with_reservation"]["Args"]["p_items"],
-          p_customer_name: body.customer.name,
-          p_customer_email: body.customer.email,
-          p_customer_phone: body.customer.phone,
-          p_customer_cnic: body.customer.cnic,
-        },
-      );
-      rpcErr = rpcRes.error;
-      bookingId = rpcRes.data || null;
+      try {
+        const { rows: rpcRows } = await query(
+          `SELECT create_booking_with_reservation(
+             p_user_id => $1,
+             p_items => $2::jsonb,
+             p_customer_name => $3,
+             p_customer_email => $4,
+             p_customer_phone => $5,
+             p_customer_cnic => $6
+           ) AS result`,
+          [
+            user.id,
+            JSON.stringify(items),
+            body.customer.name,
+            body.customer.email,
+            body.customer.phone,
+            body.customer.cnic,
+          ],
+        );
+        bookingId = (rpcRows[0]?.result as number | null) ?? null;
+      } catch (err) {
+        rpcErr = {
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
       if (!rpcErr && bookingId) {
         // Attach basket hash for future idempotent reuse
-        const { error: basketUpdateErr } = await supabase
-          .from("bookings")
-          .update({ basket_id: basketHash })
-          .eq("id", bookingId);
-        if (basketUpdateErr && DEBUG_MODE) {
-          console.warn("[checkout][debug] failed to set basket_id", {
-            booking_id: bookingId,
-            basketUpdateErr,
-          });
+        try {
+          await query(`UPDATE bookings SET basket_id = $2 WHERE id = $1`, [
+            bookingId,
+            basketHash,
+          ]);
+        } catch (basketUpdateErr) {
+          if (DEBUG_MODE) {
+            console.warn("[checkout][debug] failed to set basket_id", {
+              booking_id: bookingId,
+              basketUpdateErr,
+            });
+          }
         }
       }
     }
@@ -299,13 +312,18 @@ export async function POST(req: NextRequest) {
         const m = rpcErr.message.match(/Ticket type (\d+) not found/);
         if (m) {
           const missingId = Number(m[1]);
-          const { data: diagRow, error: diagErr } = await supabase
-            .from("ticket_types")
-            .select(
-              "id,event_id,name,quantity_available,sale_starts_at,sale_ends_at",
-            )
-            .eq("id", missingId)
-            .maybeSingle();
+          let diagRow;
+          let diagErr: { message: string; code?: string } | undefined;
+          try {
+            const { rows: diagRows } = await query(
+              `SELECT id, event_id, name, quantity_available, sale_starts_at, sale_ends_at
+               FROM ticket_types WHERE id = $1`,
+              [missingId],
+            );
+            diagRow = diagRows[0];
+          } catch (err) {
+            diagErr = { message: err instanceof Error ? err.message : String(err) };
+          }
           extra = {
             missing_ticket_type_id: missingId,
             api_visible: !!diagRow,
@@ -350,46 +368,59 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { data: bookingRow, error: bErr } = await supabase
-      .from("bookings")
-      .select("id, booking_reference, total_amount, payment_status")
-      .eq("id", bookingId)
-      .single();
-    if (bErr || !bookingRow) {
-      console.error("[checkout] booking fetch failed", { bErr });
+    let bookingRow;
+    let bFetchErr: unknown;
+    try {
+      const { rows: bookingRows } = await query(
+        `SELECT id, booking_reference, total_amount, payment_status
+         FROM bookings WHERE id = $1`,
+        [bookingId],
+      );
+      bookingRow = bookingRows[0];
+    } catch (err) {
+      bFetchErr = err;
+    }
+    if (bFetchErr || !bookingRow) {
+      console.error("[checkout] booking fetch failed", { bFetchErr });
       return bad(
         "Booking fetch failed",
         500,
         "BOOKING_FETCH_FAILED",
-        { message: bErr?.message },
-        bErr ?? new Error("Booking row missing after RPC"),
+        {
+          message: bFetchErr instanceof Error ? bFetchErr.message : undefined,
+        },
+        bFetchErr ?? new Error("Booking row missing after RPC"),
       );
     }
     const amount = bookingRow.total_amount || 0;
     const currency = "PKR";
 
-    const { data: existing } = await supabase
-      .from("payments")
-      .select("id")
-      .eq("booking_id", bookingId)
-      .eq("gateway_code", PAYMENT_GATEWAY_CODE)
-      .maybeSingle();
+    const { rows: existingRows } = await query(
+      `SELECT id FROM payments WHERE booking_id = $1 AND gateway_code = $2`,
+      [bookingId, PAYMENT_GATEWAY_CODE],
+    );
+    const existing = existingRows[0];
     if (!existing) {
-      const { error: payErr } = await supabase.from("payments").insert({
-        booking_id: bookingId,
-        gateway_code: PAYMENT_GATEWAY_CODE,
-        amount,
-        currency,
-        status: "AWAITING_DETAILS",
-        normalized_status: "awaiting_payment",
-      });
-      if (payErr) {
+      try {
+        await query(
+          `INSERT INTO payments (booking_id, gateway_code, amount, currency, status, normalized_status)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            bookingId,
+            PAYMENT_GATEWAY_CODE,
+            amount,
+            currency,
+            "AWAITING_DETAILS",
+            "awaiting_payment",
+          ],
+        );
+      } catch (payErr) {
         console.error("[checkout] payment record init failed", { payErr });
         return bad(
           "Payment record init failed",
           500,
           "PAYMENT_RECORD_INIT_FAILED",
-          { message: payErr.message },
+          { message: payErr instanceof Error ? payErr.message : String(payErr) },
           payErr,
         );
       }
@@ -412,10 +443,10 @@ export async function POST(req: NextRequest) {
 
     if (normalizedStatus !== "awaiting_payment") {
       try {
-        await supabase
-          .from("bookings")
-          .update({ payment_status: "awaiting_payment" })
-          .eq("id", bookingId);
+        await query(
+          `UPDATE bookings SET payment_status = 'awaiting_payment' WHERE id = $1`,
+          [bookingId],
+        );
       } catch (updateErr) {
         if (DEBUG_MODE) {
           console.warn(

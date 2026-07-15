@@ -1,4 +1,5 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(
@@ -7,32 +8,28 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const supabase = await createServerSupabase();
-
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { data: booking, error } = await supabase
-      .from("bookings")
-      .select("*")
-      .eq("id", parseInt(id))
-      .single();
+    const { rows: bookingRows } = await query(
+      `SELECT * FROM bookings WHERE id = $1`,
+      [parseInt(id)]
+    );
+    const booking = bookingRows[0];
 
-    if (error || !booking) {
+    if (!booking) {
       return NextResponse.json({ error: "Booking not found" }, { status: 404 });
     }
 
     // Ownership check - admins can view any booking
-    if (booking.user_id !== user.id) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
+    if (booking.user_id !== session.userId) {
+      const { rows: profileRows } = await query(
+        `SELECT role FROM profiles WHERE id = $1`,
+        [session.userId]
+      );
+      const profile = profileRows[0];
       const isAdmin =
         profile?.role === "admin" || profile?.role === "super_admin";
       if (!isAdmin) {

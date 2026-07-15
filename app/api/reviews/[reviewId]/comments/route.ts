@@ -1,10 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import {
   CreateCommentPayload,
   CommentWithAuthor,
   CommentListResponse,
 } from "@/types/comment.types";
+
+function commentColumns(alias: string): string {
+  return (
+    `${alias}.id, ${alias}.review_id, ${alias}.user_id, ${alias}.parent_id, ${alias}.content, ${alias}.status, ${alias}.moderated_by, ` +
+    `to_json(${alias}.moderated_at) #>> '{}' AS moderated_at, ` +
+    `to_json(${alias}.created_at) #>> '{}' AS created_at, ` +
+    `to_json(${alias}.updated_at) #>> '{}' AS updated_at, ` +
+    `${alias}.edit_count, ` +
+    `to_json(${alias}.last_edited_at) #>> '{}' AS last_edited_at`
+  );
+}
+
+async function isAdminUser(userId: string): Promise<boolean> {
+  const { rows } = await query(`SELECT role FROM profiles WHERE id = $1`, [
+    userId,
+  ]);
+  const role = rows[0]?.role;
+  return role === "admin" || role === "super_admin";
+}
 
 // GET /api/reviews/[reviewId]/comments - Get comments for a review
 export async function GET(
@@ -12,7 +32,6 @@ export async function GET(
   { params }: { params: Promise<{ reviewId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
 
     const { reviewId: reviewIdParam } = await params;
@@ -22,34 +41,19 @@ export async function GET(
     }
 
     // Check if user is admin (must verify role, not just login status)
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
-    let isAdmin = false;
-    if (user && !userError) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
-      isAdmin =
-        profile?.role === "admin" || profile?.role === "super_admin";
-    }
+    const session = await getSession(request);
+    const isAdmin = session ? await isAdminUser(session.userId) : false;
 
     // Check if review exists (admins can see comments on all reviews, regular users only on approved reviews)
-    let reviewQuery = supabase
-      .from("reviews")
-      .select("id, status")
-      .eq("id", reviewId);
-
+    const reviewParams: unknown[] = [reviewId];
+    let reviewSql = `SELECT id, status FROM reviews WHERE id = $1`;
     if (!isAdmin) {
-      reviewQuery = reviewQuery.eq("status", "approved");
+      reviewSql += ` AND status = 'approved'`;
     }
+    const { rows: reviewRows } = await query(reviewSql, reviewParams);
+    const review = reviewRows[0];
 
-    const { data: review, error: reviewError } = await reviewQuery.single();
-
-    if (reviewError || !review) {
+    if (!review) {
       return NextResponse.json({ error: "Review not found" }, { status: 404 });
     }
 
@@ -62,48 +66,51 @@ export async function GET(
     const offset = (page - 1) * limit;
 
     // Get top-level comments with author info
-    const {
-      data: comments,
-      error: commentsError,
-      count,
-    } = await supabase
-      .from("review_comments")
-      .select(
-        `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url)
-      `,
-        { count: "exact" }
-      )
-      .eq("review_id", reviewId)
-      .is("parent_id", null)
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM review_comments WHERE review_id = $1 AND parent_id IS NULL`,
+      [reviewId]
+    );
+    const count = parseInt(countRows[0].count, 10);
 
-    if (commentsError) {
-      console.error("Error fetching comments:", commentsError);
-      return NextResponse.json(
-        { error: "Failed to fetch comments" },
-        { status: 500 }
-      );
-    }
+    const { rows: commentRows } = await query(
+      `SELECT ${commentColumns("c")},
+         CASE WHEN p.id IS NOT NULL
+           THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+           ELSE NULL
+         END AS profiles
+       FROM review_comments c
+       LEFT JOIN profiles p ON p.id = c.user_id
+       WHERE c.review_id = $1 AND c.parent_id IS NULL
+       ORDER BY c.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [reviewId, limit, offset]
+    );
+
+    const comments = commentRows.map((row) => ({
+      ...row,
+      id: Number(row.id),
+      review_id: Number(row.review_id),
+      parent_id: row.parent_id !== null ? Number(row.parent_id) : null,
+    }));
 
     // Get reply counts for each comment
-    const commentIds = comments?.map((c) => c.id) || [];
-    const { data: replyCounts } = await supabase
-      .from("review_comments")
-      .select("parent_id")
-      .in("parent_id", commentIds);
+    const commentIds = comments.map((c) => c.id);
+    let replyCounts: { parent_id: number }[] = [];
+    if (commentIds.length > 0) {
+      const { rows: replyRows } = await query(
+        `SELECT parent_id FROM review_comments WHERE parent_id = ANY($1::bigint[])`,
+        [commentIds]
+      );
+      replyCounts = replyRows.map((r) => ({ parent_id: Number(r.parent_id) }));
+    }
 
     // Add reply counts to comments and transform data
-    const commentsWithReplyCount =
-      comments?.map((comment) => ({
-        ...comment,
-        author_name: comment.profiles?.full_name || null,
-        author_avatar: comment.profiles?.avatar_url || null,
-        reply_count:
-          replyCounts?.filter((r) => r.parent_id === comment.id).length || 0,
-      })) || [];
+    const commentsWithReplyCount = comments.map((comment) => ({
+      ...comment,
+      author_name: comment.profiles?.full_name || null,
+      author_avatar: comment.profiles?.avatar_url || null,
+      reply_count: replyCounts.filter((r) => r.parent_id === comment.id).length,
+    }));
 
     const response: CommentListResponse = {
       comments: commentsWithReplyCount as CommentWithAuthor[],
@@ -132,14 +139,9 @@ export async function POST(
   { params }: { params: Promise<{ reviewId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
-
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -151,27 +153,16 @@ export async function POST(
 
     // Check if review exists (admins can comment on all reviews, regular users only on approved reviews)
     // First check user's admin status
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const isAdmin = await isAdminUser(session.userId);
 
-    const isAdmin =
-      profile?.role === "admin" || profile?.role === "super_admin";
-
-    let reviewQuery = supabase
-      .from("reviews")
-      .select("id, status")
-      .eq("id", reviewId);
-
+    let reviewSql = `SELECT id, status FROM reviews WHERE id = $1`;
     if (!isAdmin) {
-      reviewQuery = reviewQuery.eq("status", "approved");
+      reviewSql += ` AND status = 'approved'`;
     }
+    const { rows: reviewRows } = await query(reviewSql, [reviewId]);
+    const review = reviewRows[0];
 
-    const { data: review, error: reviewError } = await reviewQuery.single();
-
-    if (reviewError || !review) {
+    if (!review) {
       return NextResponse.json({ error: "Review not found" }, { status: 404 });
     }
 
@@ -196,14 +187,12 @@ export async function POST(
 
     // If this is a reply, validate parent comment exists
     if (parent_id) {
-      const { data: parentComment, error: parentError } = await supabase
-        .from("review_comments")
-        .select("id, review_id")
-        .eq("id", parent_id)
-        .eq("review_id", reviewId)
-        .single();
+      const { rows: parentRows } = await query(
+        `SELECT id, review_id FROM review_comments WHERE id = $1 AND review_id = $2`,
+        [parent_id, reviewId]
+      );
 
-      if (parentError || !parentComment) {
+      if (!parentRows[0]) {
         return NextResponse.json(
           { error: "Parent comment not found" },
           { status: 404 }
@@ -212,25 +201,32 @@ export async function POST(
     }
 
     // Create the comment
-    const { data: newComment, error: insertError } = await supabase
-      .from("review_comments")
-      .insert({
-        review_id: reviewId,
-        user_id: user.id,
-        content: content.trim(),
-        parent_id: parent_id || null,
-        status: "pending", // All new comments start as pending
-      })
-      .select(
-        `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url)
-      `
-      )
-      .single();
-
-    if (insertError) {
-      console.error("Error creating comment:", insertError);
+    let newComment;
+    try {
+      const { rows: insertedRows } = await query(
+        `WITH inserted AS (
+           INSERT INTO review_comments (review_id, user_id, content, parent_id, status)
+           VALUES ($1, $2, $3, $4, 'pending')
+           RETURNING *
+         )
+         SELECT ${commentColumns("inserted")},
+           CASE WHEN p.id IS NOT NULL
+             THEN json_build_object('full_name', p.full_name, 'avatar_url', p.avatar_url)
+             ELSE NULL
+           END AS profiles
+         FROM inserted
+         LEFT JOIN profiles p ON p.id = inserted.user_id`,
+        [reviewId, session.userId, content.trim(), parent_id || null]
+      );
+      const row = insertedRows[0];
+      newComment = {
+        ...row,
+        id: Number(row.id),
+        review_id: Number(row.review_id),
+        parent_id: row.parent_id !== null ? Number(row.parent_id) : null,
+      };
+    } catch (error) {
+      console.error("Error creating comment:", error);
       return NextResponse.json(
         { error: "Failed to create comment" },
         { status: 500 }
@@ -248,22 +244,22 @@ export async function POST(
     try {
       const { awardXP } = await import("@/lib/gamification");
       // Use review ID as related_id for audit purposes (comment_review is unlimited with daily cap)
-      const xpResult = await awardXP(user.id, "comment_review", reviewId);
+      const xpResult = await awardXP(session.userId, "comment_review", reviewId);
 
       if ("error" in xpResult) {
         console.error(
-          `[REVIEW COMMENT XP] Failed for user ${user.id} on review ${reviewId}:`,
+          `[REVIEW COMMENT XP] Failed for user ${session.userId} on review ${reviewId}:`,
           xpResult.error,
           xpResult.details
         );
       } else {
         console.log(
-          `[REVIEW COMMENT XP] Awarded ${xpResult.xp_awarded} XP to user ${user.id}`
+          `[REVIEW COMMENT XP] Awarded ${xpResult.xp_awarded} XP to user ${session.userId}`
         );
       }
     } catch (xpError) {
       console.error(
-        `[REVIEW COMMENT XP] Exception for user ${user.id} on review ${reviewId}:`,
+        `[REVIEW COMMENT XP] Exception for user ${session.userId} on review ${reviewId}:`,
         xpError
       );
     }

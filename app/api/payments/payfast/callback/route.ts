@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   validatePayFastCallback,
   normalizePayFastStatus,
@@ -13,6 +14,7 @@ import crypto from "crypto";
 // creates ticket passes, and notifies the user.
 export async function POST(request: NextRequest) {
   try {
+    // Only used for the createNotification() calls further down (shared lib still requires it).
     const supabase = await createServerSupabase({ useServiceRole: true });
 
     // Collect callback parameters from BOTH the query string and the request
@@ -104,15 +106,14 @@ export async function POST(request: NextRequest) {
     });
 
     // Find booking by basket_id (which is our booking_reference)
-    const { data: booking, error: bookingError } = await supabase
-      .from("bookings")
-      .select(
-        "id, user_id, payment_status, event_id, booking_reference, customer_name, total_amount",
-      )
-      .eq("basket_id", validation.basketId)
-      .single();
+    const { rows: bookingRows } = await query(
+      `SELECT id, user_id, payment_status, event_id, booking_reference, customer_name, total_amount
+       FROM bookings WHERE basket_id = $1`,
+      [validation.basketId],
+    );
+    const booking = bookingRows[0];
 
-    if (bookingError || !booking) {
+    if (!booking) {
       console.error(
         "[PayFast Webhook] Booking not found:",
         validation.basketId,
@@ -195,31 +196,35 @@ export async function POST(request: NextRequest) {
     // produce no additional rows - the unique index on provider_transaction_id
     // (migration 20260311_security_payment_idempotency_index.sql) enforces this.
     if (validation.transactionId) {
-      await supabase.from("payments").upsert(
-        {
-          booking_id: booking.id,
-          gateway_code: "payfast",
-          amount: booking.total_amount ?? 0,
-          currency: "PKR",
-          status: bookingPaymentStatus,
-          normalized_status: bookingPaymentStatus,
-          provider_transaction_id: validation.transactionId,
-          raw_request: params as Record<string, string>,
-        },
-        { onConflict: "provider_transaction_id", ignoreDuplicates: true },
+      await query(
+        `INSERT INTO payments
+           (booking_id, gateway_code, amount, currency, status, normalized_status, provider_transaction_id, raw_request)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+         ON CONFLICT (provider_transaction_id) DO NOTHING`,
+        [
+          booking.id,
+          "payfast",
+          booking.total_amount ?? 0,
+          "PKR",
+          bookingPaymentStatus,
+          bookingPaymentStatus,
+          validation.transactionId,
+          JSON.stringify(params),
+        ],
       );
     }
 
     // Update booking status
-    const { error: updateError } = await supabase
-      .from("bookings")
-      .update({
-        payment_status: bookingPaymentStatus,
-        status: bookingPaymentStatus === "paid" ? "confirmed" : "pending",
-      })
-      .eq("id", booking.id);
-
-    if (updateError) {
+    try {
+      await query(
+        `UPDATE bookings SET payment_status = $2, status = $3 WHERE id = $1`,
+        [
+          booking.id,
+          bookingPaymentStatus,
+          bookingPaymentStatus === "paid" ? "confirmed" : "pending",
+        ],
+      );
+    } catch (updateError) {
       console.error("[PayFast Webhook] Failed to update booking:", updateError);
       captureRouteError(updateError, {
         route: "/api/payments/payfast/callback",
@@ -237,10 +242,10 @@ export async function POST(request: NextRequest) {
     if (bookingPaymentStatus === "paid" && booking.event_id) {
       try {
         // Get booking items
-        const { data: bookingItems } = await supabase
-          .from("booking_items")
-          .select("ticket_type_id, quantity")
-          .eq("booking_id", booking.id);
+        const { rows: bookingItems } = await query(
+          `SELECT ticket_type_id, quantity FROM booking_items WHERE booking_id = $1`,
+          [booking.id],
+        );
 
         if (bookingItems && bookingItems.length > 0) {
           const passesToCreate = [];
@@ -278,24 +283,42 @@ export async function POST(request: NextRequest) {
 
           if (passesToCreate.length > 0) {
             // Check if passes already exist to avoid duplicates
-            const { data: existingPasses } = await supabase
-              .from("ticket_passes")
-              .select("id")
-              .eq("booking_id", booking.id)
-              .limit(1);
+            const { rows: existingPasses } = await query(
+              `SELECT id FROM ticket_passes WHERE booking_id = $1 LIMIT 1`,
+              [booking.id],
+            );
 
             if (!existingPasses || existingPasses.length === 0) {
-              const { data: createdPasses, error: passesError } = await supabase
-                .from("ticket_passes")
-                .insert(passesToCreate)
-                .select("id");
-
-              if (!passesError && createdPasses) {
+              try {
+                const values: unknown[] = [];
+                const placeholders = passesToCreate
+                  .map((p, idx) => {
+                    const base = idx * 8;
+                    values.push(
+                      p.booking_id,
+                      p.event_id,
+                      p.ticket_type_id,
+                      p.code,
+                      p.signature,
+                      p.status,
+                      p.quantity_index,
+                      p.guest_name,
+                    );
+                    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8})`;
+                  })
+                  .join(", ");
+                const { rows: createdPasses } = await query(
+                  `INSERT INTO ticket_passes
+                     (booking_id, event_id, ticket_type_id, code, signature, status, quantity_index, guest_name)
+                   VALUES ${placeholders}
+                   RETURNING id`,
+                  values,
+                );
                 passesCreated = createdPasses.length;
                 console.log(
                   `[PayFast Webhook] Created ${passesCreated} ticket passes`,
                 );
-              } else {
+              } catch (passesError) {
                 console.error(
                   "[PayFast Webhook] Failed to create passes:",
                   passesError,
@@ -315,14 +338,18 @@ export async function POST(request: NextRequest) {
 
     // Record in booking status history
     try {
-      await supabase.from("booking_status_history").insert({
-        booking_id: booking.id,
-        old_status: booking.payment_status,
-        new_status: bookingPaymentStatus,
-        context: `PayFast webhook: ${validation.errorCode} - ${
-          validation.errorMessage || "Success"
-        }. Transaction: ${validation.transactionId || "N/A"}`,
-      });
+      await query(
+        `INSERT INTO booking_status_history (booking_id, old_status, new_status, context)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          booking.id,
+          booking.payment_status,
+          bookingPaymentStatus,
+          `PayFast webhook: ${validation.errorCode} - ${
+            validation.errorMessage || "Success"
+          }. Transaction: ${validation.transactionId || "N/A"}`,
+        ],
+      );
     } catch {
       // Ignore if history table doesn't exist
     }
@@ -334,11 +361,11 @@ export async function POST(request: NextRequest) {
       booking.event_id
     ) {
       try {
-        const { data: eventData } = await supabase
-          .from("events")
-          .select("name")
-          .eq("id", booking.event_id)
-          .single();
+        const { rows: eventRows } = await query(
+          `SELECT name FROM events WHERE id = $1`,
+          [booking.event_id],
+        );
+        const eventData = eventRows[0];
 
         const eventName = eventData?.name || "your event";
 
@@ -406,11 +433,11 @@ export async function POST(request: NextRequest) {
       booking.event_id
     ) {
       try {
-        const { data: eventData } = await supabase
-          .from("events")
-          .select("name")
-          .eq("id", booking.event_id)
-          .single();
+        const { rows: eventRows } = await query(
+          `SELECT name FROM events WHERE id = $1`,
+          [booking.event_id],
+        );
+        const eventData = eventRows[0];
 
         const eventName = eventData?.name || "your event";
 

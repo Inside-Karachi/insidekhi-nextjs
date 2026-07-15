@@ -1,11 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  createServerSupabase,
-  getSupabaseClientForRole,
-} from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 
 const ROUTE = "/api/admin/events";
+
+const ADMIN_ROLES = ["admin", "super_admin", "lister"];
+
+const EVENT_COLUMNS =
+  "event_id, event_name, event_slug, event_description, " +
+  "to_json(start_time) #>> '{}' AS start_time, to_json(end_time) #>> '{}' AS end_time, " +
+  "event_status, to_json(created_at) #>> '{}' AS created_at, to_json(updated_at) #>> '{}' AS updated_at, " +
+  "category_id, max_capacity, is_featured, " +
+  "featured_rank, is_commission_based, commission_rate, require_guest_details, " +
+  "organizer_id, organizer_name, organizer_avatar, location_name, address, " +
+  "latitude, longitude";
+
+function toNumericEvent(row: Record<string, unknown>) {
+  return {
+    ...row,
+    event_id: Number(row.event_id),
+    category_id: row.category_id !== null ? Number(row.category_id) : null,
+  };
+}
 
 // GET /api/admin/events - Get all events with pagination and filtering
 export async function GET(request: NextRequest) {
@@ -18,72 +35,78 @@ export async function GET(request: NextRequest) {
     const organizer = searchParams.get("organizer");
     const category = searchParams.get("category");
 
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
       );
     }
-    // Use a regular client for profile lookup
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
       );
     }
-    if (!["admin", "super_admin", "lister"].includes(profile.role)) {
+    if (!ADMIN_ROLES.includes(profile.role)) {
       return NextResponse.json(
         { success: false, error: "Admin access required" },
         { status: 403 },
       );
     }
-    // Use correct client for DB operations
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
 
     // Build query for events with details
-    let query = adminSupabase
-      .from("events_with_details")
-      .select("*", { count: "exact" })
-      .order("created_at", { ascending: false });
+    const whereClauses: string[] = [];
+    const params: unknown[] = [];
 
-    // Apply filters
     if (status && status !== "all") {
-      query = query.eq(
-        "event_status",
-        status as "draft" | "published" | "archived",
-      );
+      params.push(status);
+      whereClauses.push(`event_status = $${params.length}`);
     }
 
     if (search) {
-      query = query.ilike("event_name", `%${search}%`);
+      params.push(`%${search}%`);
+      whereClauses.push(`event_name ILIKE $${params.length}`);
     }
 
     if (organizer) {
-      query = query.ilike("organizer_name", `%${organizer}%`);
+      params.push(`%${organizer}%`);
+      whereClauses.push(`organizer_name ILIKE $${params.length}`);
     }
 
     if (category) {
-      query = query.eq("category_id", parseInt(category));
+      params.push(parseInt(category, 10));
+      whereClauses.push(`category_id = $${params.length}`);
     }
 
-    // Apply pagination
-    const offset = (page - 1) * limit;
-    query = query.range(offset, offset + limit - 1);
+    const whereSql =
+      whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
-    const { data: events, error, count } = await query;
+    let events, count;
+    try {
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*) FROM events_with_details ${whereSql}`,
+        params
+      );
+      count = parseInt(countRows[0].count, 10);
 
-    if (error) {
+      const offset = (page - 1) * limit;
+      const dataParams = [...params, limit, offset];
+      const { rows } = await query(
+        `SELECT ${EVENT_COLUMNS} FROM events_with_details
+         ${whereSql}
+         ORDER BY created_at DESC
+         LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+        dataParams
+      );
+      events = rows.map(toNumericEvent);
+    } catch (error) {
       console.error("Error fetching events:", error);
       captureRouteError(error, { route: ROUTE, method: "GET" });
       return NextResponse.json(
@@ -121,38 +144,31 @@ export async function GET(request: NextRequest) {
 // POST /api/admin/events - Create new event (if needed for admin creation)
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
       );
     }
-    // Use a regular client for profile lookup
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
       );
     }
-    if (!["admin", "super_admin", "lister"].includes(profile.role)) {
+    if (!ADMIN_ROLES.includes(profile.role)) {
       return NextResponse.json(
         { success: false, error: "Admin access required" },
         { status: 403 },
       );
     }
-    // Use correct client for DB operations
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
 
     const body = await request.json();
     const {
@@ -180,34 +196,52 @@ export async function POST(request: NextRequest) {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "");
 
-    const { data: event, error: eventError } = await adminSupabase
-      .from("events")
-      .insert({
-        name,
-        slug,
-        description,
-        start_time,
-        end_time,
-        location_name: location_name || null,
-        address: address || null,
-        latitude: latitude ?? null,
-        longitude: longitude ?? null,
-        category_id: category_id || null,
-        organizer_id: organizer_id || user.id,
-        max_capacity,
-        is_featured: is_featured || false,
-        featured_rank: featured_rank || null,
-        commission_rate: commission_rate || null,
-        is_commission_based: is_commission_based || false,
-        status: (status || "draft") as "draft" | "published" | "archived",
-        require_guest_details: require_guest_details || false,
-      })
-      .select()
-      .single();
-
-    if (eventError) {
-      console.error("Error creating event:", eventError);
-      captureRouteError(eventError, { route: ROUTE, method: "POST" });
+    let event;
+    try {
+      const { rows } = await query(
+        `INSERT INTO events (
+           name, slug, description, start_time, end_time,
+           location_name, address, latitude, longitude, category_id, organizer_id, max_capacity,
+           is_featured, featured_rank, commission_rate, is_commission_based, status, require_guest_details
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         RETURNING id, organizer_id, name, slug, description,
+           to_json(start_time) #>> '{}' AS start_time,
+           to_json(end_time) #>> '{}' AS end_time,
+           is_commission_based, commission_rate, status,
+           to_json(created_at) #>> '{}' AS created_at,
+           to_json(updated_at) #>> '{}' AS updated_at,
+           category_id, max_capacity, is_featured, featured_rank, require_guest_details,
+           location_name, address, latitude, longitude`,
+        [
+          name,
+          slug,
+          description,
+          start_time,
+          end_time,
+          location_name || null,
+          address || null,
+          latitude ?? null,
+          longitude ?? null,
+          category_id || null,
+          organizer_id || session.userId,
+          max_capacity,
+          is_featured || false,
+          featured_rank || null,
+          commission_rate || null,
+          is_commission_based || false,
+          status || "draft",
+          require_guest_details || false,
+        ]
+      );
+      const row = rows[0];
+      event = {
+        ...row,
+        id: Number(row.id),
+        category_id: row.category_id !== null ? Number(row.category_id) : null,
+      };
+    } catch (error) {
+      console.error("Error creating event:", error);
+      captureRouteError(error, { route: ROUTE, method: "POST" });
       return NextResponse.json(
         { success: false, error: "Failed to create event" },
         { status: 500 },
@@ -218,7 +252,7 @@ export async function POST(request: NextRequest) {
     try {
       const { logEventCreation } = await import("@/lib/audit");
       await logEventCreation(
-        user.id,
+        session.userId,
         event.id.toString(),
         event,
         request.headers.get("x-forwarded-for") ||

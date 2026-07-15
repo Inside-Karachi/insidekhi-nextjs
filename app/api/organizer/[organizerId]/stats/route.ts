@@ -12,13 +12,23 @@ export async function GET(
   try {
     const { organizerId } = await params;
 
-    // Fetch organizer profile
-    const { rows: organizerRows } = await query(
-      `SELECT id, full_name, avatar_url, username, phone, role, is_verified_organizer, organizer_bio, organizer_company, organizer_website
-       FROM profiles WHERE id = $1`,
-      [organizerId]
-    );
-    const organizer = organizerRows[0];
+    // Fetch organizer profile. The old Supabase call surfaced any query
+    // error (including a malformed id) as data, uniformly mapped to a 404
+    // below - a malformed organizerId here would otherwise throw an
+    // "invalid input syntax for type uuid" that reaches the outer catch
+    // and returns a 500 on this fully public, unauthenticated route.
+    let organizer;
+    try {
+      const { rows: organizerRows } = await query(
+        `SELECT id, full_name, avatar_url, username, phone, role, is_verified_organizer, organizer_bio, organizer_company, organizer_website
+         FROM profiles WHERE id = $1`,
+        [organizerId]
+      );
+      organizer = organizerRows[0];
+    } catch (error) {
+      console.error("Error fetching organizer profile:", error);
+      organizer = undefined;
+    }
 
     if (!organizer) {
       return NextResponse.json(

@@ -1,3 +1,4 @@
+import { createServerSupabase } from "@/lib/supabase/server";
 /**
  * Resume Payment API Route
  *
@@ -8,12 +9,13 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+    const supabase = await createServerSupabase();
   try {
     const { id } = await params;
     const bookingId = parseInt(id);
@@ -23,17 +25,10 @@ export async function POST(
         { error: "Invalid booking ID" },
         { status: 400 }
       );
-    }
+    }    // Check Auth
+    const session = await getSessionFromCookies();
 
-    const supabase = await createServerSupabase();
-
-    // Check Auth
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -49,7 +44,7 @@ export async function POST(
     }
 
     // Security: Verify ownership
-    if (booking.user_id !== user.id) {
+    if (booking.user_id !== session.userId) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 

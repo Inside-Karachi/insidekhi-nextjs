@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { requireSuperAdmin } from "@/lib/auth/admin";
@@ -10,6 +11,7 @@ interface RouteContext {
 
 // DELETE /api/admin/security/blocked-ips/[ip] - Unblock an IP
 export async function DELETE(request: NextRequest, context: RouteContext) {
+  const session = await getSessionFromCookies();
   try {
     // Verify super admin
     const adminCheck = await requireSuperAdmin(request);

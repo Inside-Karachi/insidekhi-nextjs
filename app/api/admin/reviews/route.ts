@@ -1,30 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  createServerSupabase,
-  getSupabaseClientForRole,
-} from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSessionFromCookies();
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
       );
     }
-    // Use a regular client for profile lookup
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+
+    // Verify user has admin/staff role
+    const { rows: profileRows } = await query(
+      "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
@@ -36,8 +30,6 @@ export async function GET(request: NextRequest) {
         { status: 403 },
       );
     }
-    // Use correct client for DB operations
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
 
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get("page") || "1");
@@ -48,185 +40,122 @@ export async function GET(request: NextRequest) {
 
     const offset = (page - 1) * limit;
 
-    // Build query for reviews with related data
-    let query = adminSupabase
-      .from("reviews")
-      .select(
-        `
-        *,
-        helpful_count,
-        user:profiles!user_id (
-          full_name,
-          avatar_url
-        ),
-        listings:listing_id (
-          name,
-          slug
-        ),
-        review_images (
-          id,
-          image_url
-        ),
-        review_comments (
-          id
-        )
-      `,
-      )
-      .order("created_at", { ascending: false });
+    // Build WHERE conditions
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let paramIdx = 1;
 
-    // Apply filters
     if (search) {
-      query = query.or(
-        `comment.ilike.%${search}%,user.full_name.ilike.%${search}%,listings.name.ilike.%${search}%`,
+      conditions.push(
+        `(r.comment ILIKE $${paramIdx} OR p.full_name ILIKE $${paramIdx} OR l.name ILIKE $${paramIdx})`
       );
+      params.push(`%${search}%`);
+      paramIdx++;
     }
-
     if (status && status !== "all") {
-      query = query.eq("status", status);
+      conditions.push(`r.status = $${paramIdx}`);
+      params.push(status);
+      paramIdx++;
     }
-
     if (rating && rating !== "all") {
-      query = query.eq("rating", parseInt(rating));
+      conditions.push(`r.rating = $${paramIdx}`);
+      params.push(parseInt(rating));
+      paramIdx++;
     }
 
-    // Get paginated results
-    const {
-      data: reviews,
-      error: reviewsError,
-      count,
-    } = await query.range(offset, offset + limit - 1);
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    if (reviewsError) {
-      throw reviewsError;
-    }
+    // Paginated reviews query
+    const reviewsSql = `
+      SELECT
+        r.*,
+        p.full_name  AS user_name,
+        p.avatar_url AS user_avatar,
+        l.name       AS listing_name,
+        l.slug       AS listing_slug,
+        COALESCE((SELECT json_agg(ri) FROM public.review_images ri WHERE ri.review_id = r.id), '[]') AS images,
+        COALESCE((SELECT COUNT(*)::int FROM public.review_comments rc WHERE rc.review_id = r.id), 0) AS comment_count
+      FROM public.reviews r
+      LEFT JOIN public.profiles p ON p.id = r.user_id
+      LEFT JOIN public.listings l ON l.id = r.listing_id
+      ${whereClause}
+      ORDER BY r.created_at DESC
+      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}
+    `;
+    params.push(limit, offset);
 
-    interface ReviewData {
-      user?: { full_name?: string | null; avatar_url?: string | null };
-      listings?: { name?: string | null; slug?: string | null };
-      review_images?: unknown[];
-      helpful_count?: number;
-      review_comments?: unknown[];
-      status?: string;
-    }
+    const { rows: reviews } = await query(reviewsSql, params);
 
-    // Transform data to match our types
-    const transformedReviews =
-      reviews?.map((review: unknown) => {
-        const reviewData = review as ReviewData & Record<string, unknown>;
-        return {
-          ...reviewData,
-          user_name: reviewData.user?.full_name || null,
-          user_avatar: reviewData.user?.avatar_url || null,
-          listing_name: reviewData.listings?.name || null,
-          listing_slug: reviewData.listings?.slug || null,
-          images: reviewData.review_images || [],
-          helpful_count: reviewData.helpful_count || 0,
-          comment_count: (reviewData.review_comments?.length as number) || 0,
-          status: reviewData.status || "pending",
-        };
-      }) || [];
+    // Count query
+    const countParams = params.slice(0, paramIdx - 1); // without LIMIT/OFFSET
+    const countSql = `
+      SELECT COUNT(*)::int AS total
+      FROM public.reviews r
+      LEFT JOIN public.profiles p ON p.id = r.user_id
+      LEFT JOIN public.listings l ON l.id = r.listing_id
+      ${whereClause}
+    `;
+    const { rows: countRows } = await query(countSql, countParams);
+    const total = (countRows[0] as { total: number })?.total ?? 0;
 
-    // Get statistics
-    const { data: statsData, error: statsError } = await adminSupabase
-      .from("reviews")
-      .select("rating, status");
+    // Statistics
+    const { rows: statsRows } = await query(
+      "SELECT rating, status FROM public.reviews"
+    );
+    const { rows: commentRows } = await query(
+      "SELECT status FROM public.review_comments"
+    );
+
+    type StatRow = { rating: number; status: string | null };
+    type CommentRow = { status: string | null };
 
     const statistics = {
-      totalReviews: 0,
+      totalReviews: statsRows.length,
       pendingReviews: 0,
       approvedReviews: 0,
       rejectedReviews: 0,
       flaggedReviews: 0,
       averageRating: 0,
-      ratingDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
-      // Comment statistics
-      totalComments: 0,
+      ratingDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } as Record<number, number>,
+      totalComments: commentRows.length,
       pendingComments: 0,
       approvedComments: 0,
       rejectedComments: 0,
       flaggedComments: 0,
     };
 
-    if (!statsError && statsData) {
-      statistics.totalReviews = statsData.length;
-
-      // Count reviews by status
-      statsData.forEach((review: { status: string | null; rating: number }) => {
-        switch (review.status) {
-          case "pending":
-            statistics.pendingReviews++;
-            break;
-          case "approved":
-            statistics.approvedReviews++;
-            break;
-          case "rejected":
-            statistics.rejectedReviews++;
-            break;
-          case "flagged":
-            statistics.flaggedReviews++;
-            break;
-          default:
-            statistics.pendingReviews++; // Default to pending for null/undefined status
-        }
-
-        // Calculate rating distribution (only for approved reviews)
-        if (review.status === "approved") {
-          statistics.ratingDistribution[
-            review.rating as keyof typeof statistics.ratingDistribution
-          ]++;
-        }
-      });
-
-      // Calculate average rating from approved reviews only
-      const approvedReviews = statsData.filter(
-        (review: { status: string | null }) => review.status === "approved",
-      );
-      if (approvedReviews.length > 0) {
-        const totalRating = approvedReviews.reduce(
-          (sum: number, review: { rating: number }) => sum + review.rating,
-          0,
-        );
-        statistics.averageRating = totalRating / approvedReviews.length;
+    statsRows.forEach((r: StatRow) => {
+      switch (r.status) {
+        case "pending": statistics.pendingReviews++; break;
+        case "approved": statistics.approvedReviews++; break;
+        case "rejected": statistics.rejectedReviews++; break;
+        case "flagged": statistics.flaggedReviews++; break;
+        default: statistics.pendingReviews++;
       }
+      if (r.status === "approved") statistics.ratingDistribution[r.rating]++;
+    });
+
+    const approvedReviews = statsRows.filter((r: StatRow) => r.status === "approved");
+    if (approvedReviews.length > 0) {
+      const totalRating = approvedReviews.reduce(
+        (sum: number, r: StatRow) => sum + r.rating, 0
+      );
+      statistics.averageRating = totalRating / approvedReviews.length;
     }
 
-    // Get comment statistics
-    const { data: commentStatsData, error: commentStatsError } =
-      await adminSupabase.from("review_comments").select("status");
-
-    if (!commentStatsError && commentStatsData) {
-      statistics.totalComments = commentStatsData.length;
-
-      // Count comments by status
-      commentStatsData.forEach((comment: { status: string | null }) => {
-        switch (comment.status) {
-          case "pending":
-            statistics.pendingComments++;
-            break;
-          case "approved":
-            statistics.approvedComments++;
-            break;
-          case "rejected":
-            statistics.rejectedComments++;
-            break;
-          case "flagged":
-            statistics.flaggedComments++;
-            break;
-          default:
-            statistics.pendingComments++; // Default to pending for null/undefined status
-        }
-      });
-    }
+    commentRows.forEach((c: CommentRow) => {
+      switch (c.status) {
+        case "pending": statistics.pendingComments++; break;
+        case "approved": statistics.approvedComments++; break;
+        case "rejected": statistics.rejectedComments++; break;
+        case "flagged": statistics.flaggedComments++; break;
+        default: statistics.pendingComments++;
+      }
+    });
 
     return NextResponse.json({
       success: true,
-      data: {
-        reviews: transformedReviews,
-        total: count || 0,
-        page,
-        limit,
-        statistics,
-      },
+      data: { reviews, total, page, limit, statistics },
     });
   } catch (error) {
     console.error("GET /api/admin/reviews error:", error);
@@ -239,25 +168,21 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSessionFromCookies();
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
       );
     }
-    // Use a regular client for profile lookup
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+
+    // Verify user has admin/staff role
+    const { rows: profileRows } = await query(
+      "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
@@ -269,8 +194,6 @@ export async function POST(request: NextRequest) {
         { status: 403 },
       );
     }
-    // Use correct client for DB operations
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
 
     const body = await request.json();
     const { listing_id, user_id, rating, comment } = body;
@@ -283,14 +206,12 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if review already exists for this user and listing
-    const { data: existingReview } = await adminSupabase
-      .from("reviews")
-      .select("id")
-      .eq("listing_id", listing_id)
-      .eq("user_id", user_id)
-      .single();
+    const { rows: existing } = await query(
+      "SELECT id FROM public.reviews WHERE listing_id = $1 AND user_id = $2 LIMIT 1",
+      [listing_id, user_id]
+    );
 
-    if (existingReview) {
+    if (existing.length > 0) {
       return NextResponse.json(
         { success: false, error: "User has already reviewed this listing" },
         { status: 409 },
@@ -298,25 +219,15 @@ export async function POST(request: NextRequest) {
     }
 
     // Create the review
-    const { data: review, error: reviewError } = await adminSupabase
-      .from("reviews")
-      .insert({
-        listing_id,
-        branch_id: 1, // Default to first branch for admin-created reviews
-        user_id,
-        rating,
-        comment,
-      })
-      .select()
-      .single();
-
-    if (reviewError) {
-      throw reviewError;
-    }
+    const { rows: reviewRows } = await query(
+      `INSERT INTO public.reviews (listing_id, branch_id, user_id, rating, comment)
+       VALUES ($1, 1, $2, $3, $4) RETURNING *`,
+      [listing_id, user_id, rating, comment]
+    );
 
     return NextResponse.json({
       success: true,
-      data: review,
+      data: reviewRows[0],
     });
   } catch (error) {
     console.error("POST /api/admin/reviews error:", error);

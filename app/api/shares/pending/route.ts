@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { createClient } from "@supabase/supabase-js";
 import { canModerateShares } from "@/lib/auth/gamification-permissions";
 
@@ -21,16 +22,11 @@ function getSupabaseAdmin() {
 
 
 export async function GET(_request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Check authentication
+    const session = await getSessionFromCookies();
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
         { status: 401 }
@@ -41,7 +37,7 @@ export async function GET(_request: NextRequest) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (

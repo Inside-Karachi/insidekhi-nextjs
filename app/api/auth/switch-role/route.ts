@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 import { createServerSupabase } from "@/lib/supabase/server";
@@ -6,6 +7,7 @@ import type { RoleSwitchRequest, RoleSwitchResponse } from "@/types/auth.types";
 const ROUTE = "/api/auth/switch-role";
 
 export async function POST(request: NextRequest) {
+    const session = await getSessionFromCookies();
   try {
     const supabase = await createServerSupabase();
     const {
@@ -13,7 +15,7 @@ export async function POST(request: NextRequest) {
       error: authError,
     } = await supabase.auth.getUser();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, message: "Not authenticated" },
         { status: 401 },

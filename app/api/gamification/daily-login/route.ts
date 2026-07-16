@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 /**
  * GET and POST /api/gamification/daily-login
  * Daily login system with streak tracking using direct PostgreSQL queries

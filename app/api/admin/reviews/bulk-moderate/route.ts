@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 import {
   applyLeaveReviewXpForModeration,
@@ -21,15 +22,9 @@ function parseReviewIds(raw: unknown): number[] {
 }
 
 export async function POST(request: NextRequest) {
-  try {
-    const supabase = await createServerSupabase();
+  try {    const session = await getSessionFromCookies();
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
@@ -41,7 +36,7 @@ export async function POST(request: NextRequest) {
     const { data: profile, error: profileError } = await adminSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {
@@ -117,7 +112,7 @@ export async function POST(request: NextRequest) {
       .from("reviews")
       .update({
         status,
-        moderated_by: user.id,
+        moderated_by: session.userId,
         moderated_at: moderatedAt,
       })
       .in("id", idsToUpdate)
@@ -162,7 +157,7 @@ export async function POST(request: NextRequest) {
         review_ids: idsToUpdate,
         status,
         reason,
-        moderated_by: user.id,
+        moderated_by: session.userId,
         moderated_at: moderatedAt,
         count: updatedCount,
       },

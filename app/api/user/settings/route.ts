@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { z } from "zod";
 
 // Validation schema for user preferences
@@ -24,15 +25,10 @@ const UpdateSettingsSchema = z.object({
 
 // GET /api/user/settings - Get current user settings
 export async function GET() {
-  try {
     const supabase = await createServerSupabase();
+  try {    const session = await getSessionFromCookies();
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { error: "Unauthorized" },
         { status: 401 }
@@ -42,7 +38,7 @@ export async function GET() {
     const { data: profile, error } = await supabase
       .from("profiles")
       .select("id, user_preferences")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (error) {
@@ -68,15 +64,10 @@ export async function GET() {
 
 // PATCH /api/user/settings - Update user settings
 export async function PATCH(request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    const session = await getSessionFromCookies();
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { error: "Unauthorized" },
         { status: 401 }
@@ -106,7 +97,7 @@ export async function PATCH(request: NextRequest) {
         user_preferences: userPreferences,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .select("user_preferences")
       .single();
 

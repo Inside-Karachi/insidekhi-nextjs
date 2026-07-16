@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 /**
  * GET /api/gamification/leaderboard?period=all_time&limit=100
  * Fetch user rankings with filters
@@ -20,6 +21,8 @@ function validatePeriod(period: string | null): LeaderboardPeriod {
 }
 
 export async function GET(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const supabase = await createServerSupabase();
 
@@ -101,7 +104,7 @@ export async function GET(request: NextRequest) {
         .from("leaderboard_cache")
         .select("rank_position, xp_total")
         .eq("period_type", period)
-        .eq("user_id", user.id)
+        .eq("user_id", session.userId)
         .single();
 
       userRank = userData || null;

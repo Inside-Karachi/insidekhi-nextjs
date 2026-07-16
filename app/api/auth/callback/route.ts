@@ -1,9 +1,12 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { query } from "@/lib/db";
 import { setSession } from "@/lib/auth/session";
 
 export async function GET(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get("code");
   const token = requestUrl.searchParams.get("token") || code; // Support both naming styles
@@ -36,13 +39,13 @@ export async function GET(request: NextRequest) {
         `UPDATE auth.users 
          SET email_confirmed_at = $1, confirmation_token = NULL, recovery_token = NULL 
          WHERE id = $2`,
-        [now, user.id]
+        [now, session.userId]
       );
 
       // Create local session cookie
       const response = NextResponse.redirect(new URL("/dashboard", requestUrl.origin));
       await setSession(response, {
-        userId: user.id,
+        userId: session.userId,
         email: user.email,
         role: user.role,
       });
@@ -55,7 +58,7 @@ export async function GET(request: NextRequest) {
         // Keep session set but redirect to verification success page
         const redirectResponse = NextResponse.redirect(successUrl);
         await setSession(redirectResponse, {
-          userId: user.id,
+          userId: session.userId,
           email: user.email,
           role: user.role,
         });

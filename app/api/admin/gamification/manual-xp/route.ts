@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { awardXP } from "@/lib/gamification";
 import { logAuditEvent } from "@/lib/audit";
@@ -9,12 +10,9 @@ export async function POST(request: NextRequest) {
     const supabase = await createServerSupabase();
 
     // Check admin authentication
-    const {
-      data: { user: adminUser },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSessionFromCookies();
 
-    if (authError || !adminUser) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -22,7 +20,7 @@ export async function POST(request: NextRequest) {
     const { data: adminProfile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", adminUser.id)
+      .eq("id", session.userId)
       .single();
 
     if (!adminProfile || !isGamificationOperatorRole(adminProfile.role)) {
@@ -96,7 +94,7 @@ export async function POST(request: NextRequest) {
     // Log audit event
     await logAuditEvent({
       action: "admin_bulk_operation",
-      user_id: adminUser.id,
+      user_id: session.userId,
       entity_type: "xp_award",
       entity_id: user_id,
       metadata: {

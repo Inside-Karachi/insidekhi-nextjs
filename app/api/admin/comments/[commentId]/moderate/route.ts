@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import {
   ModerateCommentPayload,
   CommentWithAuthor,
@@ -12,14 +13,11 @@ export async function POST(
 ) {
   try {
     const { commentId } = await params;
-    const supabase = await createServerSupabase();
+    const supabase = (await createServerSupabase()) as any;
 
     // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSessionFromCookies();
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -27,7 +25,7 @@ export async function POST(
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (
@@ -43,83 +41,69 @@ export async function POST(
 
     const commentIdNum = parseInt(commentId);
     if (isNaN(commentIdNum)) {
+      return NextResponse.json({ error: "Invalid comment ID" }, { status: 400 });
+    }
+
+    const body = (await request.json()) as any;
+    const { status, remarks } = body;
+
+    if (!status || !["approved", "rejected", "flagged"].includes(status)) {
       return NextResponse.json(
-        { error: "Invalid comment ID" },
+        { error: "Invalid moderation status" },
         { status: 400 }
       );
     }
 
-    // Parse request body
-    const body: ModerateCommentPayload = await request.json();
-    const { status } = body;
-
-    // Validate status
-    if (
-      !status ||
-      !["pending", "approved", "rejected", "flagged"].includes(status)
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "Invalid status. Must be one of: pending, approved, rejected, flagged",
-        },
-        { status: 400 }
-      );
-    }
-
-    // Check if comment exists
-    const { data: existingComment, error: checkError } = await supabase
-      .from("review_comments")
-      .select("id, status")
+    // 1. Get the comment
+    const { data: comment, error: fetchError } = await supabase
+      .from("comments")
+      .select("*, profile:profiles(*)")
       .eq("id", commentIdNum)
       .single();
 
-    if (checkError || !existingComment) {
+    if (fetchError || !comment) {
       return NextResponse.json({ error: "Comment not found" }, { status: 404 });
     }
 
-    // Update the comment status
+    // 2. Perform moderation update
     const { data: updatedComment, error: updateError } = await supabase
-      .from("review_comments")
+      .from("comments")
       .update({
-        status,
-        moderated_by: user.id,
+        moderation_status: status,
+        moderation_remarks: remarks || null,
         moderated_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        moderated_by: session.userId,
       })
       .eq("id", commentIdNum)
-      .select(
-        `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url)
-      `
-      )
+      .select("*, profile:profiles(*)")
       .single();
 
-    if (updateError) {
-      console.error("Error moderating comment:", updateError);
+    if (updateError || !updatedComment) {
+      console.error("[MODERATE COMMENT API] Update error:", updateError);
       return NextResponse.json(
-        { error: "Failed to moderate comment" },
+        { error: "Failed to update comment status" },
         { status: 500 }
       );
     }
 
-    // Transform the response data
-    const transformedComment = {
-      ...updatedComment,
-      author_name: updatedComment.profiles?.full_name || null,
-      author_avatar: updatedComment.profiles?.avatar_url || null,
-    };
+    // 3. Log audit event
+    try {
+      const { logAuditEvent } = await import("@/lib/audit");
+      await logAuditEvent({
+        action: "moderate_comment" as any,
+        user_id: session.userId,
+        entity_type: "comment",
+        entity_id: commentId,
+        old_values: { moderation_status: comment.moderation_status },
+        new_values: { moderation_status: status, remarks },
+      });
+    } catch (auditError) {
+      console.error("[MODERATE COMMENT API] Failed to log audit event:", auditError);
+    }
 
-    return NextResponse.json({
-      comment: transformedComment as CommentWithAuthor,
-      message: `Comment ${status} successfully`,
-    });
+    return NextResponse.json({ success: true, comment: updatedComment });
   } catch (error) {
-    console.error(
-      "Unexpected error in POST /api/admin/comments/[commentId]/moderate:",
-      error
-    );
+    console.error("[MODERATE COMMENT API] Fatal error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }
@@ -134,14 +118,11 @@ export async function DELETE(
 ) {
   try {
     const { commentId } = await params;
-    const supabase = await createServerSupabase();
+    const supabase = (await createServerSupabase()) as any;
 
     // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSessionFromCookies();
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -149,7 +130,7 @@ export async function DELETE(
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (
@@ -163,47 +144,53 @@ export async function DELETE(
       );
     }
 
-    const deleteCommentIdNum = parseInt(commentId);
-    if (isNaN(deleteCommentIdNum)) {
-      return NextResponse.json(
-        { error: "Invalid comment ID" },
-        { status: 400 }
-      );
+    const commentIdNum = parseInt(commentId);
+    if (isNaN(commentIdNum)) {
+      return NextResponse.json({ error: "Invalid comment ID" }, { status: 400 });
     }
 
-    // Check if comment exists
-    const { data: existingComment, error: checkError } = await supabase
-      .from("review_comments")
-      .select("id")
-      .eq("id", deleteCommentIdNum)
+    // 1. Get comment for audit logging
+    const { data: comment, error: fetchError } = await supabase
+      .from("comments")
+      .select("*")
+      .eq("id", commentIdNum)
       .single();
 
-    if (checkError || !existingComment) {
+    if (fetchError || !comment) {
       return NextResponse.json({ error: "Comment not found" }, { status: 404 });
     }
 
-    // Delete the comment (this will cascade to delete replies)
+    // 2. Delete comment (Atomic action)
     const { error: deleteError } = await supabase
-      .from("review_comments")
+      .from("comments")
       .delete()
-      .eq("id", deleteCommentIdNum);
+      .eq("id", commentIdNum);
 
     if (deleteError) {
-      console.error("Error deleting comment:", deleteError);
+      console.error("[MODERATE COMMENT API] Delete error:", deleteError);
       return NextResponse.json(
         { error: "Failed to delete comment" },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({
-      message: "Comment deleted successfully",
-    });
+    // 3. Log audit event
+    try {
+      const { logAuditEvent } = await import("@/lib/audit");
+      await logAuditEvent({
+        action: "delete_comment" as any,
+        user_id: session.userId,
+        entity_type: "comment",
+        entity_id: commentId,
+        old_values: comment,
+      });
+    } catch (auditError) {
+      console.error("[MODERATE COMMENT API] Failed to log audit event:", auditError);
+    }
+
+    return NextResponse.json({ success: true });
   } catch (error) {
-    console.error(
-      "Unexpected error in DELETE /api/admin/comments/[commentId]/moderate:",
-      error
-    );
+    console.error("[MODERATE COMMENT API] Fatal delete error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }

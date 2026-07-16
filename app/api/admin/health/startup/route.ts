@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
 
@@ -16,15 +17,10 @@ function extractMissingColumn(message: string): string | null {
 }
 
 export async function GET() {
-  try {
     const supabase = await createServerSupabase();
+  try {    const session = await getSessionFromCookies();
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
@@ -34,7 +30,7 @@ export async function GET() {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {

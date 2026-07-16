@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
@@ -74,6 +75,8 @@ export async function POST(
   request: NextRequest,
   props: { params: Promise<{ replyId: string }> }
 ) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const { replyId } = await props.params;
 
@@ -86,7 +89,7 @@ export async function POST(
            p_reply_id => $1::uuid,
            p_retried_by => $2::uuid
          )`,
-        [replyId, user.id],
+        [replyId, session.userId],
       );
     } catch (rpcError) {
       console.error("RPC error:", rpcError);

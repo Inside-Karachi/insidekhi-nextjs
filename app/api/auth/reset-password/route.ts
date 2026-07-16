@@ -1,8 +1,11 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { v4 as uuidv4 } from "uuid";
 
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const body = await request.json();
     const { email } = body || {};
@@ -47,7 +50,7 @@ export async function POST(request: NextRequest) {
         `UPDATE auth.users 
          SET recovery_token = $1, recovery_sent_at = $2 
          WHERE id = $3`,
-        [recoveryToken, tokenSentAt, user.id]
+        [recoveryToken, tokenSentAt, session.userId]
       );
 
       // In real prod this would send an email with the link:

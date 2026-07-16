@@ -1,19 +1,15 @@
-import { NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { createNotification } from "@/lib/notifications/service";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 import crypto from "crypto";
 
 export async function POST(request: Request) {
-  try {
-    const supabase = await createServerSupabase();
+  try {    // Check Auth
+    const session = await getSessionFromCookies();
 
-    // Check Auth
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -158,7 +154,7 @@ export async function POST(request: Request) {
     const { data: rpcResult, error: bookingError } = await typedRpc.rpc(
       "create_booking_atomic",
       {
-        p_user_id: user.id,
+        p_user_id: session.userId,
         p_event_id: verifiedItems[0].eventId,
         p_total_amount: totalAmount,
         p_basket_id: bookingReference,
@@ -261,7 +257,7 @@ export async function POST(request: Request) {
 
       await createNotification(
         {
-          recipientId: user.id,
+          recipientId: session.userId,
           roleScope: "public_user",
           categorySlug: "public_booking_status",
           title: "⏳ Booking Created - Complete Payment",

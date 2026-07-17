@@ -1,19 +1,15 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { Json } from "@/types/supabase";
 
 // GET /api/admin/settings - Get system settings
 export async function GET() {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Check authentication
+    const session = await getSessionFromCookies();
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -21,7 +17,7 @@ export async function GET() {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (!profile || profile.role !== "super_admin") {
@@ -57,16 +53,11 @@ export async function GET() {
 
 // PATCH /api/admin/settings - Update a system setting
 export async function PATCH(request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Check authentication
+    const session = await getSessionFromCookies();
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -74,7 +65,7 @@ export async function PATCH(request: NextRequest) {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (!profile || profile.role !== "super_admin") {
@@ -112,7 +103,7 @@ export async function PATCH(request: NextRequest) {
       config_key,
       config_value: config_value as Json,
       config_type: resolvedConfigType,
-      updated_by: user.id,
+      updated_by: session.userId,
     };
 
     const { data, error } = await supabase

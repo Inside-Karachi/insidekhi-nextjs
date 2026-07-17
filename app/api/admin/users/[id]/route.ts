@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { requireAdmin } from "@/lib/auth/admin";
@@ -7,6 +8,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const session = await getSessionFromCookies();
   try {
     // Use existing admin authentication utility
     await requireAdmin(request);
@@ -48,6 +50,7 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const session = await getSessionFromCookies();
   const startTime = Date.now();
 
   try {
@@ -464,6 +467,7 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const session = await getSessionFromCookies();
   const startTime = Date.now();
 
   try {

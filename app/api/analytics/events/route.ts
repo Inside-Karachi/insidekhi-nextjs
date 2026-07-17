@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
 
-import { createServerSupabase } from "@/lib/supabase/server";
-import type { Database } from "@/types/supabase";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import {
   analyticsEventRequestSchema,
   type AnalyticsEventInput,
@@ -12,8 +12,18 @@ import {
 const CONTEXT_BYTES_LIMIT = 8_192; // 8 KB per event context to avoid oversized payloads
 const textEncoder = new TextEncoder();
 
-type AnalyticsEventInsert =
-  Database["public"]["Tables"]["analytics_events"]["Insert"];
+type AnalyticsEventInsert = {
+  event_type: string;
+  source: string;
+  occurred_at: string;
+  ingested_at: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  session_id: string | null;
+  actor_id: string | null;
+  actor_role: string | null;
+  context: unknown;
+};
 
 type ParsedRequest =
   | ({ events: AnalyticsEventInput[] } & { isBatch: true })
@@ -30,25 +40,22 @@ const parseRequest = (payload: unknown): ParsedRequest => {
 };
 
 const ensureActorRole = async (
-  supabase: Awaited<ReturnType<typeof createServerSupabase>>,
   actorId: string | null
 ): Promise<AnalyticsUserRole | null> => {
   if (!actorId) {
     return null;
   }
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", actorId)
-    .maybeSingle();
+  const { rows } = await query(
+    "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+    [actorId]
+  );
 
-  if (error) {
-    console.warn("Failed to resolve actor role", error);
+  if (!rows[0]) {
     return null;
   }
 
-  return (data?.role as AnalyticsUserRole) ?? null;
+  return (rows[0] as { role: string }).role as AnalyticsUserRole ?? null;
 };
 
 const sanitizeContext = (
@@ -208,16 +215,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const supabase = await createServerSupabase();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const session = await getSessionFromCookies();
 
-  const authenticatedActorId = user?.id ?? null;
-  const authenticatedRole = await ensureActorRole(
-    supabase,
-    authenticatedActorId
-  );
+  const authenticatedActorId = session?.userId ?? null;
+  const authenticatedRole = await ensureActorRole(authenticatedActorId);
 
   const normalized = await normalizeEvents(
     request,
@@ -231,18 +232,28 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-    const { error } = await adminSupabase
-      .from("analytics_events")
-      .insert(normalized);
-
-    if (error) {
-      console.error("Failed to insert analytics event(s)", error);
-      return NextResponse.json(
-        { error: "Failed to record analytics event" },
-        { status: 500 }
-      );
-    }
+    const placeholders = normalized.map(
+      (_, i) =>
+        `($${i * 10 + 1}, $${i * 10 + 2}, $${i * 10 + 3}, $${i * 10 + 4}, $${i * 10 + 5}, $${i * 10 + 6}, $${i * 10 + 7}, $${i * 10 + 8}, $${i * 10 + 9}, $${i * 10 + 10})`
+    ).join(", ");
+    const values = normalized.flatMap((e) => [
+      e.event_type,
+      e.source,
+      e.occurred_at,
+      e.ingested_at,
+      e.entity_type,
+      e.entity_id,
+      e.session_id,
+      e.actor_id,
+      e.actor_role,
+      JSON.stringify(e.context ?? {}),
+    ]);
+    await query(
+      `INSERT INTO public.analytics_events
+       (event_type, source, occurred_at, ingested_at, entity_type, entity_id, session_id, actor_id, actor_role, context)
+       VALUES ${placeholders}`,
+      values
+    );
 
     return NextResponse.json(
       {

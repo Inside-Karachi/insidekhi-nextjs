@@ -145,7 +145,7 @@ export function PremiumNotificationsPage() {
     initialFilters: { status: "all" },
   });
   const { toast } = useToast();
-  const { userId, isLoading: authLoading } = useSupabaseUser();
+  const { userId, user, isLoading: authLoading } = useSupabaseUser();
 
   const [searchValue, setSearchValue] = useState(feed.filters.search ?? "");
   const debouncedSearch = useDebounce(searchValue, 350);
@@ -158,63 +158,19 @@ export function PremiumNotificationsPage() {
   }, [debouncedSearch, feed]);
 
   useEffect(() => {
-    let mounted = true;
+    if (authLoading) {
+      return;
+    }
 
-    const loadRole = async () => {
-      if (authLoading) {
-        return;
-      }
+    if (!userId || !user) {
+      setRole(null);
+      setIsRoleLoading(false);
+      return;
+    }
 
-      if (!userId) {
-        if (mounted) {
-          setRole(null);
-          setIsRoleLoading(false);
-        }
-        return;
-      }
-
-      if (mounted) {
-        setIsRoleLoading(true);
-      }
-
-      try {
-        const supabase = createClient();
-        const { data, error } = await supabase
-          .from("profiles")
-          .select("role")
-          .eq("id", userId)
-          .maybeSingle();
-
-        if (!mounted) {
-          return;
-        }
-
-        if (error) {
-          throw error;
-        }
-
-        setRole((data?.role as NotificationUserRole | null) ?? null);
-      } catch (error) {
-        console.error(
-          "Failed to resolve profile role for notifications demo",
-          error
-        );
-        if (mounted) {
-          setRole(null);
-        }
-      } finally {
-        if (mounted) {
-          setIsRoleLoading(false);
-        }
-      }
-    };
-
-    void loadRole();
-
-    return () => {
-      mounted = false;
-    };
-  }, [authLoading, userId]);
+    setRole((user.role as NotificationUserRole) ?? null);
+    setIsRoleLoading(false);
+  }, [authLoading, userId, user]);
 
   const activeStatus: NotificationFeedStatusFilter =
     feed.filters.status ?? "all";
@@ -457,45 +413,7 @@ export function PremiumNotificationsPage() {
         </div>
       </section>
 
-      {/* Hide demo generator in production builds */}
-      {process.env.NODE_ENV !== "production" && !isRoleLoading && role && (
-        <section className="rounded-3xl border border-dashed border-primary/40 bg-primary/5 p-6 shadow-sm">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div className="space-y-2">
-              <h2 className="text-lg font-semibold text-foreground">
-                Generate a sample for this account
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                Click below to create a demo notification tailored to your
-                current role. Revisit this page while logged in as other roles
-                (lister, public user, etc.) and run the same action to confirm
-                their experience.
-              </p>
-            </div>
-            <Button
-              type="button"
-              className="h-11 w-full rounded-2xl md:w-auto"
-              disabled={isSeeding}
-              onClick={() => void handleGenerateDemo()}
-            >
-              {isSeeding ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Generating…
-                </>
-              ) : (
-                <>
-                  <Sparkles className="mr-2 h-4 w-4" /> Create sample
-                  notification
-                </>
-              )}
-            </Button>
-          </div>
-          <p className="mt-4 text-xs text-muted-foreground">
-            Tip: generated notifications include a “demo” flag in metadata so
-            they can be filtered out of analytics later.
-          </p>
-        </section>
-      )}
+
 
       <section className="space-y-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">

@@ -1,15 +1,17 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import type { Json } from "@/types/supabase";
 
 export async function GET(request: NextRequest) {
+  const session = await getSessionFromCookies();
   try {
     // Check admin authentication
     const {
       data: { user },
       error: authError,
     } = await (await createServerSupabase()).auth.getUser();
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -17,7 +19,7 @@ export async function GET(request: NextRequest) {
     const { data: profile } = await adminSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (!["super_admin", "lister"].includes(profile?.role || "")) {

@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { deleteFile, listFiles } from "@/lib/storage/spaces";
+
+const ALLOWED_ROLES = ["organizer", "lister", "admin", "super_admin"];
 
 // POST: Cleanup temp images (called when modal is closed without saving)
 export async function POST(request: NextRequest) {
@@ -14,48 +18,36 @@ export async function POST(request: NextRequest) {
     }
 
     // Auth check
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Verify user role
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (
-      !profile ||
-      !["organizer", "lister", "admin", "super_admin"].includes(profile.role)
-    ) {
+    if (!profile || !ALLOWED_ROLES.includes(profile.role)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    // Use service role for storage operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     // List files in temp folder
-    const tempPath = `temp/${tempSessionId}`;
-    const { data: tempFiles, error: listError } = await adminSupabase.storage
-      .from("event-images")
-      .list(tempPath);
-
-    if (listError) {
-      console.error("Error listing temp files:", listError);
+    const tempPath = `event-images/temp/${tempSessionId}/`;
+    let tempKeys: string[];
+    try {
+      tempKeys = await listFiles(tempPath);
+    } catch (error) {
+      console.error("Error listing temp files:", error);
       return NextResponse.json(
-        { error: "Failed to list temp files" },
+        { error: "Failed to cleanup temp files" },
         { status: 500 }
       );
     }
 
-    if (!tempFiles || tempFiles.length === 0) {
+    if (!tempKeys || tempKeys.length === 0) {
       return NextResponse.json({
         success: true,
         message: "No temp images to cleanup",
@@ -64,12 +56,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Delete all temp files
-    const filesToDelete = tempFiles.map((file) => `${tempPath}/${file.name}`);
-    const { error: deleteError } = await adminSupabase.storage
-      .from("event-images")
-      .remove(filesToDelete);
-
-    if (deleteError) {
+    try {
+      await Promise.all(tempKeys.map((key) => deleteFile(key)));
+    } catch (deleteError) {
       console.error("Error deleting temp files:", deleteError);
       return NextResponse.json(
         { error: "Failed to cleanup temp files" },
@@ -79,8 +68,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `Cleaned up ${tempFiles.length} temp images`,
-      deletedCount: tempFiles.length,
+      message: `Cleaned up ${tempKeys.length} temp images`,
+      deletedCount: tempKeys.length,
     });
   } catch (error) {
     console.error("Cleanup temp images error:", error);

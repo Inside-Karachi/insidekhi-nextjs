@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { requireSuperAdmin } from "@/lib/auth/admin";
@@ -5,6 +6,7 @@ import { withRateLimit, RateLimitPresets } from "@/lib/middleware/rate-limit";
 
 // GET /api/admin/security/events - List security events
 export async function GET(request: NextRequest) {
+  const session = await getSessionFromCookies();
   try {
     // Apply rate limiting
     const rateLimit = await withRateLimit(request, {
@@ -72,6 +74,7 @@ export async function GET(request: NextRequest) {
 
 // POST /api/admin/security/events - Create manual security event
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
   try {
     // Verify super admin
     const adminCheck = await requireSuperAdmin(request);

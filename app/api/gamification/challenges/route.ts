@@ -1,98 +1,74 @@
-/**
- * GET /api/gamification/challenges - Get active challenges for user with progress
- * POST /api/gamification/challenges - Create new challenge (admin only)
- */
-
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
-import type { ActiveChallenge } from "@/types/gamification.types";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
 
 /**
- * GET - Fetch active challenges with user's progress
+ * GET - List active challenges and user progress
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
+    const supabase = (await createServerSupabase()) as any;
 
-    // Get authenticated user
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    // Get optional authenticated user to show their progress
+    const session = await getSessionFromCookies();
 
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const now = new Date().toISOString();
-
-    // Get active challenges (currently running)
-    const { data: challenges, error: challengesError } = await supabase
-      .from("weekly_challenges")
+    // Fetch active challenges
+    const { data: challenges, error: fetchError } = await supabase
+      .from("xp_challenges")
       .select("*")
       .eq("is_active", true)
-      .lte("start_date", now)
-      .gte("end_date", now)
-      .order("start_date", { ascending: false });
+      .order("created_at", { ascending: false });
 
-    if (challengesError) {
+    if (fetchError) {
       return NextResponse.json(
-        {
-          error: "Failed to fetch challenges",
-          details: challengesError.message,
-        },
+        { error: "Failed to fetch challenges", details: fetchError.message },
         { status: 500 }
       );
     }
 
-    if (!challenges || challenges.length === 0) {
-      return NextResponse.json({ challenges: [] });
+    if (!session?.userId) {
+      // Return challenges without progress for unauthenticated users
+      const challengesWithProgress = challenges.map((c: any) => ({
+        ...c,
+        user_progress: {
+          current_count: 0,
+          is_completed: false,
+        },
+      }));
+      return NextResponse.json({ success: true, challenges: challengesWithProgress });
     }
 
-    // Get user's progress for these challenges
-    const challengeIds = challenges.map((c) => c.id);
-    const { data: progressData } = await supabase
-      .from("user_challenge_progress")
-      .select("*")
-      .eq("user_id", user.id)
-      .in("challenge_id", challengeIds);
+    // Fetch user progress for these challenges
+    const { data: progress, error: progressError } = await supabase
+      .from("user_challenges")
+      .select("challenge_id, current_count, is_completed, completed_at")
+      .eq("user_id", session.userId);
 
-    // Combine challenges with progress
-    const activeChallenges: ActiveChallenge[] = challenges.map((challenge) => {
-      const progress = progressData?.find(
-        (p) => p.challenge_id === challenge.id
-      );
+    if (progressError) {
+      // Don't fail the whole request, just return challenges without progress
+      console.error("Failed to fetch user challenge progress:", progressError);
+      return NextResponse.json({ success: true, challenges });
+    }
 
-      const endDate = new Date(challenge.end_date);
-      const nowTime = new Date();
-      const daysRemaining = Math.ceil(
-        (endDate.getTime() - nowTime.getTime()) / (1000 * 60 * 60 * 24)
-      );
-
+    // Map progress to challenges
+    const progressMap = new Map(progress.map((p: any) => [p.challenge_id, p]));
+    const challengesWithProgress = challenges.map((challenge: any) => {
+      const userProgress = progressMap.get(challenge.id) || {
+        current_count: 0,
+        is_completed: false,
+      };
       return {
-        id: challenge.id,
-        title: challenge.title,
-        description: challenge.description,
-        challenge_type: challenge.challenge_type,
-        xp_reward: challenge.xp_reward,
-        target_count: challenge.target_count,
-        start_date: challenge.start_date,
-        end_date: challenge.end_date,
-        current_progress: progress?.current_progress || 0,
-        is_completed: progress?.completed || false,
-        days_remaining: Math.max(0, daysRemaining),
+        ...challenge,
+        user_progress: userProgress,
       };
     });
 
-    return NextResponse.json({ challenges: activeChallenges });
-  } catch (error) {
-    console.error("Challenges GET error:", error);
+    return NextResponse.json({ success: true, challenges: challengesWithProgress });
+  } catch (error: any) {
+    console.error("GET challenges error:", error);
     return NextResponse.json(
-      {
-        error: "Internal server error",
-        details: error instanceof Error ? error.message : "Unknown error",
-      },
+      { error: "Internal server error" },
       { status: 500 }
     );
   }
@@ -103,16 +79,12 @@ export async function GET() {
  */
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
+    const supabase = (await createServerSupabase({ useServiceRole: true })) as any;
 
     // Get authenticated user
-    const authSupabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await authSupabase.auth.getUser();
+    const session = await getSessionFromCookies();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -120,7 +92,7 @@ export async function POST(request: NextRequest) {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (!profile || !isGamificationOperatorRole(profile.role)) {
@@ -138,58 +110,34 @@ export async function POST(request: NextRequest) {
       challenge_type,
       xp_reward,
       target_count,
+      activity_slug,
       start_date,
       end_date,
-      is_active = true,
-      auto_activate = false,
-      metadata = {},
+      is_active,
     } = body;
 
     // Validate required fields
-    if (
-      !title ||
-      !description ||
-      !challenge_type ||
-      !xp_reward ||
-      !target_count ||
-      !start_date ||
-      !end_date
-    ) {
+    if (!title || !challenge_type || !xp_reward || !target_count) {
       return NextResponse.json(
-        {
-          error:
-            "Missing required fields: title, description, challenge_type, xp_reward, target_count, start_date, end_date",
-        },
+        { error: "Missing required fields" },
         { status: 400 }
       );
     }
 
-    // Validate dates
-    const startDateTime = new Date(start_date);
-    const endDateTime = new Date(end_date);
-
-    if (endDateTime <= startDateTime) {
-      return NextResponse.json(
-        { error: "End date must be after start date" },
-        { status: 400 }
-      );
-    }
-
-    // Create challenge
-    const { data: newChallenge, error: insertError } = await supabase
-      .from("weekly_challenges")
+    // Insert challenge
+    const { data: challenge, error: insertError } = await supabase
+      .from("xp_challenges")
       .insert({
         title,
         description,
         challenge_type,
         xp_reward,
         target_count,
-        start_date,
-        end_date,
-        created_by: user.id,
-        is_active,
-        auto_activate,
-        metadata,
+        activity_slug: activity_slug || null,
+        created_by: session.userId,
+        start_date: start_date || null,
+        end_date: end_date || null,
+        is_active: is_active !== false,
       })
       .select()
       .single();
@@ -201,21 +149,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json(
-      {
-        success: true,
-        challenge: newChallenge,
-        message: "Challenge created successfully",
-      },
-      { status: 201 }
-    );
+    // Log audit event
+    try {
+      const { logAuditEvent } = await import("@/lib/audit");
+      await logAuditEvent({
+        action: "create_challenge" as any,
+        user_id: session.userId,
+        entity_type: "xp_challenge",
+        entity_id: challenge.id.toString(),
+        new_values: challenge,
+      });
+    } catch (auditError) {
+      console.error("Failed to log audit event:", auditError);
+    }
+
+    return NextResponse.json({ success: true, challenge });
   } catch (error) {
-    console.error("Challenges POST error:", error);
+    console.error("POST challenge error:", error);
     return NextResponse.json(
-      {
-        error: "Internal server error",
-        details: error instanceof Error ? error.message : "Unknown error",
-      },
+      { error: "Internal server error" },
       { status: 500 }
     );
   }

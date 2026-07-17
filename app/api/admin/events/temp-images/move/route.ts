@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { copyFile, deleteFile, getPublicUrl, listFiles } from "@/lib/storage/spaces";
 
 export async function POST(request: NextRequest) {
   let parsedBody = null;
@@ -22,22 +24,18 @@ export async function POST(request: NextRequest) {
 
   try {
     // Auth check (lister/admin/super_admin)
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Get user profile
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 404 });
     }
 
@@ -46,70 +44,62 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    // Use service_role only for super_admin
-    let storageClient = supabase;
-    let dbClient = supabase;
-    if (profile.role === "super_admin") {
-      storageClient = await createServerSupabase({ useServiceRole: true });
-      dbClient = await createServerSupabase({ useServiceRole: true });
-    }
-
     // List all files in temp folder
-    const tempFolder = `temp/${tempSessionId}`;
-    const { data: files, error: listError } = await storageClient.storage
-      .from("event-images")
-      .list(tempFolder);
-    if (listError) {
-      return NextResponse.json({ error: listError.message }, { status: 500 });
+    const tempFolder = `event-images/temp/${tempSessionId}/`;
+    let tempKeys: string[];
+    try {
+      tempKeys = await listFiles(tempFolder);
+    } catch (listError) {
+      return NextResponse.json(
+        { error: (listError as Error).message },
+        { status: 500 }
+      );
     }
-    if (!files || files.length === 0) {
+    if (!tempKeys || tempKeys.length === 0) {
       return NextResponse.json({ success: true, moved: 0 });
     }
 
     // Move each file to event folder and insert DB record
     let displayOrder = 1;
     const movedFiles = [];
-    for (const file of files) {
-      const fromPath = `${tempFolder}/${file.name}`;
-      const toPath = `${eventId}/${file.name}`;
+    for (const fromPath of tempKeys) {
+      const fileName = fromPath.split("/").pop() || fromPath;
+      const toPath = `event-images/${eventId}/${fileName}`;
+
       // Copy file
-      const { error: copyError } = await storageClient.storage
-        .from("event-images")
-        .copy(fromPath, toPath);
-      if (copyError) {
-        return NextResponse.json({ error: copyError.message }, { status: 500 });
+      try {
+        await copyFile(fromPath, toPath);
+      } catch (copyError) {
+        return NextResponse.json(
+          { error: (copyError as Error).message },
+          { status: 500 }
+        );
       }
+
       // Remove from temp
-      const { error: removeError } = await storageClient.storage
-        .from("event-images")
-        .remove([fromPath]);
-      if (removeError) {
+      try {
+        await deleteFile(fromPath);
+      } catch (removeError) {
         return NextResponse.json(
-          { error: removeError.message },
+          { error: (removeError as Error).message },
           { status: 500 }
         );
       }
-      // Get public URL
-      const { data: publicUrlData } = storageClient.storage
-        .from("event-images")
-        .getPublicUrl(toPath);
-      const publicUrl = publicUrlData?.publicUrl;
-      if (typeof publicUrl !== "string") {
-        return NextResponse.json(
-          { error: "Failed to get public URL" },
-          { status: 500 }
-        );
-      }
+
+      const publicUrl = getPublicUrl(toPath);
+
       // Insert into event_images
-      const { error: dbError } = await dbClient.from("event_images").insert({
-        event_id: Number(eventId),
-        url: publicUrl,
-        alt_text: file.name,
-        display_order: displayOrder,
-        is_primary: displayOrder === 1,
-      });
-      if (dbError) {
-        return NextResponse.json({ error: dbError.message }, { status: 500 });
+      try {
+        await query(
+          `INSERT INTO event_images (event_id, url, alt_text, display_order, is_primary)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [Number(eventId), publicUrl, fileName, displayOrder, displayOrder === 1]
+        );
+      } catch (dbError) {
+        return NextResponse.json(
+          { error: (dbError as Error).message },
+          { status: 500 }
+        );
       }
       movedFiles.push(toPath);
       displayOrder++;

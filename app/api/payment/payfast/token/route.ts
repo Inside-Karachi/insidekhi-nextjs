@@ -39,7 +39,6 @@ export async function POST(request: NextRequest) {
         { status: 401 },
       );
     }
-    const user = { id: session.userId };
 
     // Parse and validate request body
     const body = await request.json();
@@ -73,7 +72,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (booking.user_id !== user.id) {
+    if (booking.user_id !== session.userId) {
       return NextResponse.json(
         { success: false, error: "Forbidden" },
         { status: 403 },

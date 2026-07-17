@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin";
 import { query } from "@/lib/db";
@@ -17,6 +18,8 @@ async function cleanupStaleSessions() {
 }
 
 export async function GET(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     await requireAdmin(request);
 
@@ -51,6 +54,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const { user, profile } = await requireAdmin(request);
     const body = await request.json();
@@ -75,7 +80,7 @@ export async function POST(request: NextRequest) {
       try {
         await query(
           `DELETE FROM listing_edit_sessions WHERE listing_id = $1 AND user_id = $2`,
-          [listingId, user.id],
+          [listingId, session.userId],
         );
       } catch (error) {
         return NextResponse.json(
@@ -96,7 +101,7 @@ export async function POST(request: NextRequest) {
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (listing_id, user_id)
          DO UPDATE SET full_name = EXCLUDED.full_name, last_heartbeat_at = EXCLUDED.last_heartbeat_at`,
-        [listingId, user.id, fullName, lastHeartbeatAt],
+        [listingId, session.userId, fullName, lastHeartbeatAt],
       );
     } catch (error) {
       return NextResponse.json(

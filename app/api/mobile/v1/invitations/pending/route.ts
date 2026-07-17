@@ -4,8 +4,8 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 import {
-  PENDING_INVITATION_COLUMNS,
   toPendingInvitation,
   type PendingInvitationRow,
 } from "@/lib/mobile/invites";
@@ -15,27 +15,29 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/mobile/v1/invitations/pending
  *
- * The caller's own still-pending sent invitations, newest first. Uses the
- * caller's RLS client AND an explicit `inviter_id` filter (the SELECT policy
- * also admits invitee/admin rows, so we scope to "mine" in the query, not via
- * RLS alone). DTO is redacted - no UUIDs, token, or IPs. Mirrors
- * `app/api/invitations/pending`.
+ * The caller's own still-pending sent invitations, newest first, scoped by an
+ * explicit `inviter_id` filter. DTO is redacted - no UUIDs, token, or IPs.
+ * Mirrors `app/api/invitations/pending`.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
-  const { data, error } = await supabase
-    .from("invitations")
-    .select(PENDING_INVITATION_COLUMNS)
-    .eq("inviter_id", user.id)
-    .eq("status", "pending")
-    .order("created_at", { ascending: false })
-    .returns<PendingInvitationRow[]>();
-
-  if (error) {
-    console.error("[mobile-api] pending invitations failed:", error.message);
+  let rows: Record<string, unknown>[];
+  try {
+    const res = await query(
+      `SELECT invite_code, invitee_email, status,
+         to_json(created_at) #>> '{}' AS created_at,
+         to_json(expired_at) #>> '{}' AS expired_at
+       FROM invitations
+       WHERE inviter_id = $1 AND status = 'pending'
+       ORDER BY created_at DESC`,
+      [user.id],
+    );
+    rows = res.rows;
+  } catch (error) {
+    console.error("[mobile-api] pending invitations failed:", error);
     throw new MobileApiError(
       "internal_error",
       "Failed to load invitations.",
@@ -43,5 +45,7 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  return ok((data ?? []).map(toPendingInvitation));
+  return ok(
+    rows.map((row) => toPendingInvitation(row as unknown as PendingInvitationRow)),
+  );
 });

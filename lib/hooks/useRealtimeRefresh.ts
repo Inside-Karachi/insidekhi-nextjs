@@ -1,5 +1,4 @@
 import { useEffect, useRef } from "react";
-import { createClient } from "@/lib/supabase/client";
 
 type TableSubscription = {
   schema?: string;
@@ -7,8 +6,9 @@ type TableSubscription = {
   filter?: string;
 };
 
-// Subscribes to Supabase Realtime row changes and calls onChange.
-// debounceMs (default 500) coalesces bursts; cooldownMs (default 0) caps refresh frequency during bulk writes.
+// Polls for changes at a regular interval and calls onChange.
+// Replaces the former Supabase Realtime WebSocket subscription.
+// debounceMs / cooldownMs control the poll interval (uses the max of both, min 2s).
 export function useRealtimeRefresh(
   channelName: string,
   tables: TableSubscription[],
@@ -16,10 +16,10 @@ export function useRealtimeRefresh(
   debounceMs: number = 500,
   cooldownMs: number = 0,
 ) {
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const lastFireRef = useRef<number>(0);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const onChangeRef = useRef(onChange);
 
+  // Keep ref current so the interval closure always calls the latest callback
   useEffect(() => {
     onChangeRef.current = onChange;
   });
@@ -27,35 +27,16 @@ export function useRealtimeRefresh(
   useEffect(() => {
     if (!tables.length) return;
 
-    const supabase = createClient();
-    const channel = supabase.channel(channelName);
+    // Poll at the larger of debounceMs/cooldownMs; floor at 2 s to avoid hammering the server
+    const pollMs = Math.max(debounceMs, cooldownMs, 2_000);
 
-    const scheduleRefresh = () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-
-      const elapsed = Date.now() - lastFireRef.current;
-      const wait = Math.max(debounceMs, cooldownMs - elapsed);
-
-      timerRef.current = setTimeout(() => {
-        lastFireRef.current = Date.now();
-        onChangeRef.current();
-      }, wait);
-    };
-
-    tables.forEach(({ schema = "public", table, filter }) => {
-      channel.on(
-        "postgres_changes",
-        { event: "*", schema, table, filter },
-        () => scheduleRefresh(),
-      );
-    });
-
-    const subscription = channel.subscribe();
+    intervalRef.current = setInterval(() => {
+      onChangeRef.current();
+    }, pollMs);
 
     return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-      supabase.removeChannel(subscription);
+      if (intervalRef.current) clearInterval(intervalRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelName, JSON.stringify(tables)]);
+  }, [channelName, JSON.stringify(tables), debounceMs, cooldownMs]);
 }

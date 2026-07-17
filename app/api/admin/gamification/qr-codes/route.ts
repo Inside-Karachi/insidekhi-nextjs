@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
 
 /**
@@ -23,16 +24,11 @@ function generateQRCode(): string {
 
 // GET - Fetch all QR codes
 export async function GET(_request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Verify admin access
+    const session = await getSessionFromCookies();
 
-    // Verify admin access
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -40,7 +36,7 @@ export async function GET(_request: NextRequest) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !isGamificationOperatorRole(profile?.role)) {
@@ -113,16 +109,11 @@ export async function GET(_request: NextRequest) {
 
 // POST - Create a new QR code
 export async function POST(request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Verify admin access
+    const session = await getSessionFromCookies();
 
-    // Verify admin access
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -130,7 +121,7 @@ export async function POST(request: NextRequest) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !isGamificationOperatorRole(profile?.role)) {
@@ -211,7 +202,7 @@ export async function POST(request: NextRequest) {
         is_active: true,
         related_id: finalRelatedId,
         expires_at: expires_at || null,
-        created_by: user.id,
+        created_by: session.userId,
       })
       .select()
       .single();
@@ -247,16 +238,11 @@ export async function POST(request: NextRequest) {
 
 // DELETE - Delete a QR code
 export async function DELETE(request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Verify admin access
+    const session = await getSessionFromCookies();
 
-    // Verify admin access
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -264,7 +250,7 @@ export async function DELETE(request: NextRequest) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !isGamificationOperatorRole(profile?.role)) {

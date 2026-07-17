@@ -1,8 +1,10 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import crypto from "crypto";
 
 export async function POST(request: NextRequest) {
+    const session = await getSessionFromCookies();
   try {
     const body = await request.json();
     const { imageUrl, timestamp, pathname } = body;
@@ -35,7 +37,7 @@ export async function POST(request: NextRequest) {
       entity_id: urlHash, // MD5 hash fits in varchar(100)
       old_values: { url: imageUrl, page: pathname },
       new_values: { error: "Failed to load", timestamp },
-      user_id: user?.id || null,
+      user_id: session?.userId || null,
       ip_address:
         request.headers.get("x-forwarded-for") ||
         request.headers.get("x-real-ip"),
@@ -61,12 +63,9 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSessionFromCookies();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -74,7 +73,7 @@ export async function GET(request: NextRequest) {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {

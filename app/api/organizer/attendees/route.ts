@@ -1,39 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
 
-interface TicketPassRecord {
-  id: number;
-  code: string;
-  status: string;
-  guest_name?: string | null;
-  guest_cnic?: string | null;
-  cnic_last4?: string | null;
-  checked_in_at?: string | null;
-  issued_at?: string | null;
-  quantity_index?: number | null;
-  booking?: {
-    id: number;
-    user_id: string;
-    created_at: string;
-    customer_name?: string | null;
-    customer_email?: string | null;
-    customer_phone?: string | null;
-    buyer?: {
-      full_name?: string | null;
-      phone?: string | null;
-    } | null;
-  } | null;
-  ticket_type?: {
-    name: string;
-    price: number | string;
-  } | null;
-}
-
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
     const eventId = searchParams.get("eventId");
 
@@ -41,35 +13,32 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Event ID required" }, { status: 400 });
     }
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (!user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Verify user owns this event
-    const { data: event, error: eventError } = await supabase
-      .from("events")
-      .select("id, name, organizer_id")
-      .eq("id", parseInt(eventId, 10))
-      .single();
+    const { rows: eventRows } = await query(
+      `SELECT id, name, organizer_id FROM events WHERE id = $1`,
+      [parseInt(eventId, 10)]
+    );
+    const event = eventRows[0];
 
-    if (eventError || !event) {
+    if (!event) {
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
 
     // Check if user is organizer or admin
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const role = profileRows[0]?.role;
 
-    const isAdmin =
-      profile?.role === "admin" || profile?.role === "super_admin";
-    const isOrganizer = event.organizer_id === user.id;
+    const isAdmin = role === "admin" || role === "super_admin";
+    const isOrganizer = event.organizer_id === session.userId;
 
     if (!isOrganizer && !isAdmin) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
@@ -77,36 +46,29 @@ export async function GET(request: NextRequest) {
 
     // Get all ticket passes for this event
     // Note: profiles table doesn't have email - get customer_email from bookings
-    const { data: passes, error: passesError } = await supabase
-      .from("ticket_passes")
-      .select(
-        `
-        id,
-        code,
-        status,
-        guest_name,
-        guest_cnic,
-        cnic_last4,
-        checked_in_at,
-        issued_at,
-        quantity_index,
-        booking:booking_id(
-          id,
-          user_id,
-          created_at,
-          customer_name,
-          customer_email,
-          customer_phone,
-          buyer:user_id(full_name, phone)
-        ),
-        ticket_type:ticket_type_id(name, price)
-      `
-      )
-      .eq("event_id", parseInt(eventId, 10))
-      .order("issued_at", { ascending: false });
-
-    if (passesError) {
-      console.error("Passes fetch error:", passesError);
+    let passes;
+    try {
+      const { rows } = await query(
+        `SELECT
+           tp.id, tp.code, tp.status, tp.guest_name, tp.guest_cnic, tp.cnic_last4,
+           to_json(tp.checked_in_at) #>> '{}' AS checked_in_at,
+           to_json(tp.issued_at) #>> '{}' AS issued_at,
+           tp.quantity_index,
+           b.id AS booking_id, b.user_id AS booking_user_id,
+           b.customer_name, b.customer_email, b.customer_phone,
+           p.full_name AS buyer_full_name, p.phone AS buyer_phone,
+           tt.name AS ticket_type_name, tt.price AS ticket_type_price
+         FROM ticket_passes tp
+         LEFT JOIN bookings b ON b.id = tp.booking_id
+         LEFT JOIN profiles p ON p.id = b.user_id
+         LEFT JOIN ticket_types tt ON tt.id = tp.ticket_type_id
+         WHERE tp.event_id = $1
+         ORDER BY tp.issued_at DESC`,
+        [parseInt(eventId, 10)]
+      );
+      passes = rows;
+    } catch (error) {
+      console.error("Passes fetch error:", error);
       return NextResponse.json(
         { error: "Failed to fetch attendees" },
         { status: 500 }
@@ -114,30 +76,24 @@ export async function GET(request: NextRequest) {
     }
 
     // Format attendees - use customer_email from booking, fallback to profile data
-    const attendees = ((passes as unknown as TicketPassRecord[]) || []).map(
-      (pass) => ({
-        id: pass.id,
-        code: pass.code,
-        status: pass.status,
-        guestName:
-          pass.guest_name ||
-          pass.booking?.customer_name ||
-          pass.booking?.buyer?.full_name ||
-          "Unknown",
-        guestCnic:
-          pass.cnic_last4 ||
-          (pass.guest_cnic ? pass.guest_cnic.slice(-4) : null),
-        guestCnicFormatted: pass.cnic_last4
-          ? `*****-*******-${pass.cnic_last4.slice(0, 1)}`
-          : null,
-        ticketType: pass.ticket_type?.name || "Standard",
-        price: pass.ticket_type?.price || 0,
-        checkedInAt: pass.checked_in_at,
-        issuedAt: pass.issued_at,
-        buyerEmail: pass.booking?.customer_email,
-        buyerPhone: pass.booking?.customer_phone || pass.booking?.buyer?.phone,
-      })
-    );
+    const attendees = passes.map((pass) => ({
+      id: Number(pass.id),
+      code: pass.code,
+      status: pass.status,
+      guestName:
+        pass.guest_name || pass.customer_name || pass.buyer_full_name || "Unknown",
+      guestCnic:
+        pass.cnic_last4 || (pass.guest_cnic ? pass.guest_cnic.slice(-4) : null),
+      guestCnicFormatted: pass.cnic_last4
+        ? `*****-*******-${pass.cnic_last4.slice(0, 1)}`
+        : null,
+      ticketType: pass.ticket_type_name || "Standard",
+      price: pass.ticket_type_price !== null ? Number(pass.ticket_type_price) : 0,
+      checkedInAt: pass.checked_in_at,
+      issuedAt: pass.issued_at,
+      buyerEmail: pass.customer_email,
+      buyerPhone: pass.customer_phone || pass.buyer_phone,
+    }));
 
     // Calculate stats
     const stats = {
@@ -147,7 +103,7 @@ export async function GET(request: NextRequest) {
     };
 
     return NextResponse.json({
-      event: { id: event.id, name: event.name },
+      event: { id: Number(event.id), name: event.name },
       attendees,
       stats,
     });

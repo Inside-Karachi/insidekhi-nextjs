@@ -6,13 +6,30 @@ import { getOptionalMobileUser, requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePathId } from "@/lib/mobile/params";
 import { MobileApiError } from "@/lib/mobile/errors";
-import {
-  COMMENT_COLUMNS,
-  toComment,
-  type CommentRowLike,
-} from "@/lib/mobile/mappers";
+import { query } from "@/lib/db";
+import { toComment, type CommentRowLike } from "@/lib/mobile/mappers";
 
 export const dynamic = "force-dynamic";
+
+const COMMENT_SQL_COLUMNS =
+  "c.id, c.review_id, c.user_id, c.parent_id, c.content, c.status, " +
+  "to_json(c.created_at) #>> '{}' AS created_at, " +
+  "to_json(c.updated_at) #>> '{}' AS updated_at, " +
+  "CASE WHEN p.id IS NOT NULL " +
+  "THEN json_build_object('username', p.username, 'avatar_url', p.avatar_url) " +
+  "ELSE NULL END AS profiles";
+
+const COMMENT_FROM_JOIN =
+  "FROM review_comments c LEFT JOIN profiles p ON p.id = c.user_id";
+
+function toNumericCommentRow(row: Record<string, unknown>): CommentRowLike {
+  return {
+    ...row,
+    id: Number(row.id),
+    review_id: Number(row.review_id),
+    parent_id: row.parent_id !== null ? Number(row.parent_id) : null,
+  } as unknown as CommentRowLike;
+}
 
 /**
  * GET /api/mobile/v1/reviews/{reviewId}/comments/{commentId}
@@ -24,31 +41,28 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
   const p = await params;
   const reviewId = parsePathId(p.reviewId, "reviewId");
   const commentId = parsePathId(p.commentId, "commentId");
-  const { user, supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
   const currentUserId = user?.id ?? null;
 
-  const { data: comment } = await supabase
-    .from("review_comments")
-    .select(COMMENT_COLUMNS)
-    .eq("id", commentId)
-    .eq("review_id", reviewId)
-    .is("parent_id", null)
-    .eq("status", "approved")
-    .returns<CommentRowLike[]>()
-    .maybeSingle();
-  if (!comment) {
+  const { rows: commentRows } = await query(
+    `SELECT ${COMMENT_SQL_COLUMNS} ${COMMENT_FROM_JOIN}
+     WHERE c.id = $1 AND c.review_id = $2 AND c.parent_id IS NULL AND c.status = 'approved'`,
+    [commentId, reviewId],
+  );
+  if (!commentRows[0]) {
     throw new MobileApiError("not_found", "Comment not found.", 404);
   }
+  const comment = toNumericCommentRow(commentRows[0]);
 
-  const { data: replyRows } = await supabase
-    .from("review_comments")
-    .select(COMMENT_COLUMNS)
-    .eq("parent_id", commentId)
-    .eq("status", "approved")
-    .order("created_at", { ascending: true })
-    .returns<CommentRowLike[]>();
-
-  const replies = (replyRows ?? []).map((r) => toComment(r, currentUserId));
+  const { rows: replyRows } = await query(
+    `SELECT ${COMMENT_SQL_COLUMNS} ${COMMENT_FROM_JOIN}
+     WHERE c.parent_id = $1 AND c.status = 'approved'
+     ORDER BY c.created_at ASC`,
+    [commentId],
+  );
+  const replies = replyRows
+    .map(toNumericCommentRow)
+    .map((r) => toComment(r, currentUserId));
 
   return ok({
     comment: toComment(comment, currentUserId, replies.length),
@@ -62,18 +76,16 @@ const editCommentSchema = z.object({
 
 /** Loads a comment scoped to the review for ownership/status pre-checks. */
 async function loadOwnPending(
-  supabase: Awaited<ReturnType<typeof requireMobileUser>>["supabase"],
   reviewId: number,
   commentId: number,
   userId: string,
   verb: string,
 ): Promise<void> {
-  const { data: existing } = await supabase
-    .from("review_comments")
-    .select("id, user_id, status")
-    .eq("id", commentId)
-    .eq("review_id", reviewId)
-    .maybeSingle();
+  const { rows } = await query(
+    `SELECT id, user_id, status FROM review_comments WHERE id = $1 AND review_id = $2`,
+    [commentId, reviewId],
+  );
+  const existing = rows[0];
   if (!existing) {
     throw new MobileApiError("not_found", "Comment not found.", 404);
   }
@@ -104,7 +116,7 @@ export const PATCH = mobileRoute(async (request: NextRequest, { params }) => {
   const p = await params;
   const reviewId = parsePathId(p.reviewId, "reviewId");
   const commentId = parsePathId(p.commentId, "commentId");
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
   const parsed = editCommentSchema.safeParse(await request.json());
   if (!parsed.success) {
@@ -116,20 +128,24 @@ export const PATCH = mobileRoute(async (request: NextRequest, { params }) => {
     );
   }
 
-  await loadOwnPending(supabase, reviewId, commentId, user.id, "edit");
+  await loadOwnPending(reviewId, commentId, user.id, "edit");
 
-  const { data: updated, error } = await supabase
-    .from("review_comments")
-    .update({ content: parsed.data.content })
-    .eq("id", commentId)
-    .eq("review_id", reviewId)
-    .eq("user_id", user.id)
-    .eq("status", "pending")
-    .select(COMMENT_COLUMNS)
-    .returns<CommentRowLike[]>()
-    .maybeSingle();
-  if (error) {
-    console.error("[mobile-api] comment edit failed:", error.message);
+  let updated: CommentRowLike | undefined;
+  try {
+    const { rows } = await query(
+      `WITH updated AS (
+         UPDATE review_comments SET content = $1
+         WHERE id = $2 AND review_id = $3 AND user_id = $4 AND status = 'pending'
+         RETURNING *
+       )
+       SELECT ${COMMENT_SQL_COLUMNS}
+       FROM updated c
+       LEFT JOIN profiles p ON p.id = c.user_id`,
+      [parsed.data.content, commentId, reviewId, user.id],
+    );
+    updated = rows[0] ? toNumericCommentRow(rows[0]) : undefined;
+  } catch (error) {
+    console.error("[mobile-api] comment edit failed:", error);
     throw new MobileApiError(
       "internal_error",
       "Failed to update comment.",
@@ -159,27 +175,28 @@ export const DELETE = mobileRoute(async (request: NextRequest, { params }) => {
   const p = await params;
   const reviewId = parsePathId(p.reviewId, "reviewId");
   const commentId = parsePathId(p.commentId, "commentId");
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
-  await loadOwnPending(supabase, reviewId, commentId, user.id, "delete");
+  await loadOwnPending(reviewId, commentId, user.id, "delete");
 
-  const { data: deleted, error } = await supabase
-    .from("review_comments")
-    .delete()
-    .eq("id", commentId)
-    .eq("review_id", reviewId)
-    .eq("user_id", user.id)
-    .eq("status", "pending")
-    .select("id");
-  if (error) {
-    console.error("[mobile-api] comment delete failed:", error.message);
+  let deletedCount: number;
+  try {
+    const { rows } = await query(
+      `DELETE FROM review_comments
+       WHERE id = $1 AND review_id = $2 AND user_id = $3 AND status = 'pending'
+       RETURNING id`,
+      [commentId, reviewId, user.id],
+    );
+    deletedCount = rows.length;
+  } catch (error) {
+    console.error("[mobile-api] comment delete failed:", error);
     throw new MobileApiError(
       "internal_error",
       "Failed to delete comment.",
       500,
     );
   }
-  if (!deleted || deleted.length === 0) {
+  if (deletedCount === 0) {
     throw new MobileApiError(
       "conflict",
       "Comment can no longer be deleted.",

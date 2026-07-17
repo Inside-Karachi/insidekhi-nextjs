@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 export async function POST(
   request: NextRequest,
@@ -28,29 +29,23 @@ export async function POST(
       );
     }
 
-    // Create authenticated supabase client first to verify admin
-    const supabase = await createServerSupabase();
+    // Create authenticated supabase client first to verify admin    // Check if user is authenticated
+    const session = await getSessionFromCookies();
 
-    // Check if user is authenticated
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Rate limiting: Prevent abuse of password reset
     const { passwordResetLimiter } = await import("@/lib/rate-limiter");
-    const rateLimitCheck = passwordResetLimiter.check(user.id);
+    const rateLimitCheck = passwordResetLimiter.check(session.userId);
 
     if (!rateLimitCheck.allowed) {
       const resetInSeconds = Math.ceil(
         (rateLimitCheck.resetTime - Date.now()) / 1000
       );
       console.error(
-        `[RESET PASSWORD] Rate limit exceeded for admin ${user.id}. Reset in ${resetInSeconds}s`
+        `[RESET PASSWORD] Rate limit exceeded for admin ${session.userId}. Reset in ${resetInSeconds}s`
       );
       return NextResponse.json(
         {
@@ -84,7 +79,7 @@ export async function POST(
     const { data: profile, error: profileError } = await serviceSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (
@@ -114,7 +109,7 @@ export async function POST(
 
     // Log the password reset action (optional but recommended for audit trails)
     await serviceSupabase.from("audit_logs").insert({
-      user_id: user.id,
+      user_id: session.userId,
       action: "password_reset",
       resource_type: "user",
       resource_id: userId,

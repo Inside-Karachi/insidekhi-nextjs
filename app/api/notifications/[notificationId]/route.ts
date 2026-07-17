@@ -26,15 +26,16 @@ export async function PATCH(
     }
 
     let payload: MarkNotificationPayload = {};
-    if (request.headers.get("content-length")) {
-      try {
-        payload = (await request.json()) as MarkNotificationPayload;
-      } catch {
-        return NextResponse.json(
-          { error: "Invalid JSON body" },
-          { status: 400 }
-        );
+    try {
+      const text = await request.text();
+      if (text) {
+        payload = JSON.parse(text) as MarkNotificationPayload;
       }
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body" },
+        { status: 400 }
+      );
     }
     const archive = payload.archive ?? false;
 

@@ -7,19 +7,19 @@ export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get("code");
   const token = requestUrl.searchParams.get("token") || code; // Support both naming styles
-  
+
   if (token) {
     try {
       // Find user with this confirmation/recovery token
       const { rows } = await query(
-        `SELECT id, email, role, email_confirmed_at 
-         FROM public.profiles 
+        `SELECT id, email, role, email_confirmed_at
+         FROM public.profiles
          LEFT JOIN auth.users ON public.profiles.id = auth.users.id
-         WHERE auth.users.confirmation_token = $1 
+         WHERE auth.users.confirmation_token = $1
             OR auth.users.recovery_token = $1 LIMIT 1`,
         [token]
       );
-      
+
       const user = rows[0];
 
       if (!user) {
@@ -33,8 +33,8 @@ export async function GET(request: NextRequest) {
 
       // Update email verification status in database
       await query(
-        `UPDATE auth.users 
-         SET email_confirmed_at = $1, confirmation_token = NULL, recovery_token = NULL 
+        `UPDATE auth.users
+         SET email_confirmed_at = $1, confirmation_token = NULL, recovery_token = NULL
          WHERE id = $2`,
         [now, user.id]
       );
@@ -77,4 +77,3 @@ export async function GET(request: NextRequest) {
   // Fallback: redirect to home page
   return NextResponse.redirect(requestUrl.origin);
 }
-

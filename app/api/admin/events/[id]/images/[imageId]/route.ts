@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
-import { Database } from "@/types/supabase";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { deleteFile, getKeyFromPublicUrl } from "@/lib/storage/spaces";
+
+const EVENT_IMAGE_COLUMNS =
+  "id, event_id, url, alt_text, is_primary, display_order, " +
+  "to_json(created_at) #>> '{}' AS created_at";
+
+function toNumericEventImage(row: Record<string, unknown>) {
+  return {
+    ...row,
+    id: Number(row.id),
+    event_id: Number(row.event_id),
+  };
+}
 
 // PATCH /api/admin/events/[id]/images/[imageId] - Update image properties
 export async function PATCH(
@@ -8,33 +21,24 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string; imageId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { id, imageId } = await params;
+    const session = await getSession(request);
 
-    // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Use service role client for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     // Get user profile with role
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -68,29 +72,52 @@ export async function PATCH(
 
     // If setting as primary, unset other primary images for this event
     if (is_primary === true) {
-      await adminSupabase
-        .from("event_images")
-        .update({ is_primary: false })
-        .eq("event_id", eventId)
-        .neq("id", imageIdNum);
+      await query(
+        `UPDATE event_images SET is_primary = false WHERE event_id = $1 AND id != $2`,
+        [eventId, imageIdNum]
+      );
     }
 
     // Update the image
-    const updateData: Database["public"]["Tables"]["event_images"]["Update"] =
-      {};
-    if (is_primary !== undefined) updateData.is_primary = is_primary;
-    if (alt_text !== undefined) updateData.alt_text = alt_text;
-    if (display_order !== undefined) updateData.display_order = display_order;
+    const setClauses: string[] = [];
+    const updateParams: unknown[] = [];
 
-    const { data: image, error } = await adminSupabase
-      .from("event_images")
-      .update(updateData)
-      .eq("id", imageIdNum)
-      .eq("event_id", eventId)
-      .select()
-      .single();
+    const pushField = (column: string, value: unknown) => {
+      updateParams.push(value);
+      setClauses.push(`${column} = $${updateParams.length}`);
+    };
 
-    if (error) {
+    if (is_primary !== undefined) pushField("is_primary", is_primary);
+    if (alt_text !== undefined) pushField("alt_text", alt_text);
+    if (display_order !== undefined) pushField("display_order", display_order);
+
+    if (setClauses.length === 0) {
+      return NextResponse.json(
+        { success: false, error: "Failed to update image" },
+        { status: 500 }
+      );
+    }
+
+    updateParams.push(imageIdNum, eventId);
+    const idIdx = updateParams.length - 1;
+    const eventIdIdx = updateParams.length;
+
+    let image;
+    try {
+      const { rows } = await query(
+        `UPDATE event_images SET ${setClauses.join(", ")}
+         WHERE id = $${idIdx} AND event_id = $${eventIdIdx}
+         RETURNING ${EVENT_IMAGE_COLUMNS}`,
+        updateParams
+      );
+      if (!rows[0]) {
+        return NextResponse.json(
+          { success: false, error: "Failed to update image" },
+          { status: 500 }
+        );
+      }
+      image = toNumericEventImage(rows[0]);
+    } catch (error) {
       console.error("Error updating image:", error);
       return NextResponse.json(
         { success: false, error: "Failed to update image" },
@@ -117,33 +144,24 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; imageId: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { id, imageId } = await params;
+    const session = await getSession(request);
 
-    // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Use service role client for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     // Get user profile with role
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -173,14 +191,13 @@ export async function DELETE(
     }
 
     // Get image data first to get the file path for cleanup
-    const { data: image, error: fetchError } = await adminSupabase
-      .from("event_images")
-      .select("*")
-      .eq("id", imageIdNum)
-      .eq("event_id", eventId)
-      .single();
+    const { rows: imageRows } = await query(
+      `SELECT * FROM event_images WHERE id = $1 AND event_id = $2`,
+      [imageIdNum, eventId]
+    );
+    const image = imageRows[0];
 
-    if (fetchError || !image) {
+    if (!image) {
       return NextResponse.json(
         { success: false, error: "Image not found" },
         { status: 404 }
@@ -188,13 +205,12 @@ export async function DELETE(
     }
 
     // Delete from database first
-    const { error: deleteError } = await adminSupabase
-      .from("event_images")
-      .delete()
-      .eq("id", imageIdNum)
-      .eq("event_id", eventId);
-
-    if (deleteError) {
+    try {
+      await query(
+        `DELETE FROM event_images WHERE id = $1 AND event_id = $2`,
+        [imageIdNum, eventId]
+      );
+    } catch (deleteError) {
       console.error("Error deleting image from database:", deleteError);
       return NextResponse.json(
         { success: false, error: "Failed to delete image" },
@@ -202,20 +218,15 @@ export async function DELETE(
       );
     }
 
-    // Extract filename from URL for cleanup
-    const urlParts = image.url.split("/");
-    const fileName = urlParts[urlParts.length - 1];
-
-    if (fileName) {
-      // Try to delete from storage (don't fail if this doesn't work)
-      const { error: storageError } = await adminSupabase.storage
-        .from("event-images")
-        .remove([fileName]);
-
-      if (storageError) {
-        console.warn("Failed to delete image from storage:", storageError);
-        // Don't return error - database deletion was successful
+    // Try to delete from storage (don't fail if this doesn't work)
+    try {
+      const key = getKeyFromPublicUrl(image.url);
+      if (key) {
+        await deleteFile(key);
       }
+    } catch (storageError) {
+      console.warn("Failed to delete image from storage:", storageError);
+      // Don't return error - database deletion was successful
     }
 
     return NextResponse.json({

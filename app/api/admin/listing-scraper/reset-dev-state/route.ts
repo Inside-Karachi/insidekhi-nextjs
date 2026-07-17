@@ -1,8 +1,11 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { syncStateManager } from "@/lib/scraper/redis-state-manager";
 
 export async function POST(_request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     if (process.env.NODE_ENV === "production") {
       return NextResponse.json(
@@ -23,7 +26,7 @@ export async function POST(_request: NextRequest) {
     const { data: profile } = await authSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {

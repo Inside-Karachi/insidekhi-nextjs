@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import disposableDomains from "disposable-email-domains";
 
 /**
@@ -8,16 +9,11 @@ import disposableDomains from "disposable-email-domains";
  * Query params: email, excludeUserId (optional - for editing existing user)
  */
 export async function GET(request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Check authentication
+    const session = await getSessionFromCookies();
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -25,7 +21,7 @@ export async function GET(request: NextRequest) {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (

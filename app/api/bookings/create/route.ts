@@ -302,7 +302,7 @@ export async function POST(request: NextRequest) {
 
       await createNotification(
         {
-          recipientId: user.id,
+          recipientId: session.userId,
           roleScope: "public_user",
           categorySlug: "public_booking_status",
           title: "⏳ Booking Created - Complete Payment",

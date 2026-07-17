@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { createNotification } from "@/lib/notifications/service";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +25,6 @@ interface NotifyOrganizerRequest {
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const body: NotifyOrganizerRequest = await request.json();
 
     const { type, eventId, data } = body;
@@ -38,24 +37,22 @@ export async function POST(request: NextRequest) {
     }
 
     // Get event with organizer info
-    const { data: event, error: eventError } = await supabase
-      .from("events")
-      .select("id, name, organizer_id")
-      .eq("id", eventId)
-      .single();
+    const { rows: eventRows } = await query(
+      `SELECT id, name, organizer_id FROM events WHERE id = $1`,
+      [eventId]
+    );
+    const event = eventRows[0];
 
-    if (eventError || !event) {
+    if (!event) {
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
 
     // Get organizer profile
-    const { data: organizer } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", event.organizer_id)
-      .single();
-
-    const role = organizer?.role || "public_user";
+    const { rows: organizerRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [event.organizer_id]
+    );
+    const role = organizerRows[0]?.role || "public_user";
 
     // Build notification based on type
     let title = "";

@@ -1,5 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
+import { copyFile, deleteFile, getPublicUrl, listFiles } from "@/lib/storage/spaces";
+
+const ALLOWED_ROLES = ["organizer", "lister", "admin", "super_admin"];
+
+const EVENT_IMAGE_COLUMNS =
+  "id, event_id, url, alt_text, is_primary, display_order, " +
+  "to_json(created_at) #>> '{}' AS created_at";
+
+function toNumericEventImage(row: Record<string, unknown>) {
+  return {
+    ...row,
+    id: Number(row.id),
+    event_id: Number(row.event_id),
+  };
+}
 
 // POST: Move temp images to permanent storage after event creation
 export async function POST(request: NextRequest) {
@@ -14,42 +30,33 @@ export async function POST(request: NextRequest) {
     }
 
     // Auth check
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    const session = await getSession(request);
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Use service role for operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     // Verify user is organizer, lister, or admin
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM profiles WHERE id = $1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
-    if (
-      !profile ||
-      !["organizer", "lister", "admin", "super_admin"].includes(profile.role)
-    ) {
+    if (!profile || !ALLOWED_ROLES.includes(profile.role)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
+    const eventIdNum = Number(eventId);
+
     // For organizers, verify they own the event
     if (profile.role === "organizer") {
-      const { data: event } = await adminSupabase
-        .from("events")
-        .select("organizer_id")
-        .eq("id", eventId)
-        .single();
+      const { rows: eventRows } = await query(
+        `SELECT organizer_id FROM events WHERE id = $1`,
+        [eventIdNum]
+      );
+      const event = eventRows[0];
 
-      if (!event || event.organizer_id !== user.id) {
+      if (!event || event.organizer_id !== session.userId) {
         return NextResponse.json(
           { error: "You don't own this event" },
           { status: 403 }
@@ -58,20 +65,19 @@ export async function POST(request: NextRequest) {
     }
 
     // List files in temp folder
-    const tempPath = `temp/${tempSessionId}`;
-    const { data: tempFiles, error: listError } = await adminSupabase.storage
-      .from("event-images")
-      .list(tempPath);
-
-    if (listError) {
-      console.error("Error listing temp files:", listError);
+    const tempPath = `event-images/temp/${tempSessionId}/`;
+    let tempKeys: string[];
+    try {
+      tempKeys = await listFiles(tempPath);
+    } catch (error) {
+      console.error("Error listing temp files:", error);
       return NextResponse.json(
         { error: "Failed to list temp files" },
         { status: 500 }
       );
     }
 
-    if (!tempFiles || tempFiles.length === 0) {
+    if (!tempKeys || tempKeys.length === 0) {
       return NextResponse.json({
         success: true,
         message: "No temp images to move",
@@ -80,63 +86,58 @@ export async function POST(request: NextRequest) {
     }
 
     // Get current max display_order
-    const { data: maxOrderResult } = await adminSupabase
-      .from("event_images")
-      .select("display_order")
-      .eq("event_id", eventId)
-      .order("display_order", { ascending: false })
-      .limit(1)
-      .single();
-
-    let currentOrder = maxOrderResult?.display_order || 0;
+    const { rows: maxOrderRows } = await query(
+      `SELECT MAX(display_order) AS max_order FROM event_images WHERE event_id = $1`,
+      [eventIdNum]
+    );
+    let currentOrder = maxOrderRows[0]?.max_order || 0;
     const movedImages = [];
 
     // Move each file
-    for (const file of tempFiles) {
-      const oldPath = `${tempPath}/${file.name}`;
-      const newFileName = `event-${eventId}-${Date.now()}-${file.name}`;
+    for (const oldPath of tempKeys) {
+      const fileName = oldPath.split("/").pop() || oldPath;
+      const newPath = `event-images/event-${eventIdNum}-${Date.now()}-${fileName}`;
 
       // Copy to permanent location
-      const { error: copyError } = await adminSupabase.storage
-        .from("event-images")
-        .copy(oldPath, newFileName);
-
-      if (copyError) {
-        console.error(`Error copying file ${file.name}:`, copyError);
+      try {
+        await copyFile(oldPath, newPath);
+      } catch (copyError) {
+        console.error(`Error copying file ${fileName}:`, copyError);
         continue;
       }
 
-      // Get public URL
-      const {
-        data: { publicUrl },
-      } = adminSupabase.storage.from("event-images").getPublicUrl(newFileName);
-
+      const publicUrl = getPublicUrl(newPath);
       currentOrder++;
 
       // Insert into database
-      const { data: imageRecord, error: insertError } = await adminSupabase
-        .from("event_images")
-        .insert({
-          event_id: eventId,
-          url: publicUrl,
-          alt_text: file.name,
-          display_order: currentOrder,
-          is_primary: currentOrder === 1,
-        })
-        .select()
-        .single();
-
-      if (insertError) {
+      let imageRecord;
+      try {
+        const { rows } = await query(
+          `INSERT INTO event_images (event_id, url, alt_text, display_order, is_primary)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING ${EVENT_IMAGE_COLUMNS}`,
+          [eventIdNum, publicUrl, fileName, currentOrder, currentOrder === 1]
+        );
+        imageRecord = toNumericEventImage(rows[0]);
+      } catch (insertError) {
         console.error(`Error inserting image record:`, insertError);
         // Try to clean up the copied file
-        await adminSupabase.storage.from("event-images").remove([newFileName]);
+        try {
+          await deleteFile(newPath);
+        } catch {
+          // best-effort cleanup
+        }
         continue;
       }
 
       movedImages.push(imageRecord);
 
       // Delete from temp
-      await adminSupabase.storage.from("event-images").remove([oldPath]);
+      try {
+        await deleteFile(oldPath);
+      } catch {
+        // best-effort cleanup
+      }
     }
 
     return NextResponse.json({

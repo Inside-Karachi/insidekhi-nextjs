@@ -44,8 +44,8 @@ export async function POST(request: NextRequest) {
 
       // Store recovery token inside auth.users table
       await query(
-        `UPDATE auth.users 
-         SET recovery_token = $1, recovery_sent_at = $2 
+        `UPDATE auth.users
+         SET recovery_token = $1, recovery_sent_at = $2
          WHERE id = $3`,
         [recoveryToken, tokenSentAt, user.id]
       );
@@ -85,4 +85,3 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-

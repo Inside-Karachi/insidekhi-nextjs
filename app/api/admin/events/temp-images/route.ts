@@ -25,14 +25,13 @@ export async function POST(request: NextRequest) {
     // Generate unique filename
     const ext = file.name.split(".").pop();
     const filename = `${uuidv4()}.${ext}`;
-    const path = `temp/${tempSessionId}/${filename}`;
+    const path = `event-images/temp/${tempSessionId}/${filename}`;
 
     // Upload to DO Spaces Storage (using custom spaces client)
     const arrayBuffer = await file.arrayBuffer();
     const uploadResult = await uploadFile(path, Buffer.from(arrayBuffer), {
       contentType: file.type,
       isPublic: true,
-      bucket: "event-images"
     });
 
     // Return image info (simulate EventImage)

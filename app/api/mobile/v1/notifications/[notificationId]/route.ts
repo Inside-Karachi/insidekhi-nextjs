@@ -3,8 +3,8 @@ import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
-import { getUnreadCount } from "@/lib/notifications";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -15,14 +15,16 @@ const UUID_RE =
  * PATCH /api/mobile/v1/notifications/{id}
  *
  * Marks the caller's notification read; `{ "archive": true }` archives it. IDs
- * are UUIDs (not integers). Ownership is enforced by the SECURITY INVOKER RPC
- * `mark_notification_read`, which raises (42501) if the row isn't the caller's -
- * mapped to 404 (no existence disclosure). Mirrors
+ * are UUIDs (not integers). The old `mark_notification_read` RPC authorized
+ * itself via Supabase's `auth.uid()` session GUC, which a direct pg
+ * connection never sets - so the `recipient_id` filter below is what enforces
+ * ownership; a zero-row update (not found or not yours) maps to 404 (no
+ * existence disclosure), matching the RPC's prior behavior. Mirrors
  * `app/api/notifications/[notificationId]` (PATCH).
  */
 export const PATCH = mobileRoute(async (request: NextRequest, { params }) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
   const notificationId = (await params).notificationId;
@@ -43,18 +45,20 @@ export const PATCH = mobileRoute(async (request: NextRequest, { params }) => {
     // no/empty body -> mark read
   }
 
-  const { error } = await supabase.rpc("mark_notification_read", {
-    p_notification_id: notificationId,
-    p_archive: archive,
-  });
-  if (error) {
-    // RPC raises P0002 (not found) - and under the caller's RLS another user's
-    // row is invisible so it also surfaces as P0002 - or 42501 (not authorized).
-    // Both mean "not the caller's notification" -> 404 (no existence disclosure).
-    if (error.code === "P0002" || error.code === "42501") {
-      throw new MobileApiError("not_found", "Notification not found.", 404);
-    }
-    console.error("[mobile-api] mark_notification_read failed:", error.message);
+  let rowCount: number;
+  try {
+    const { rows } = await query(
+      `UPDATE notifications
+       SET read_at = COALESCE(read_at, timezone('utc', now())),
+           archived_at = CASE WHEN $1 THEN COALESCE(archived_at, timezone('utc', now())) ELSE archived_at END,
+           updated_at = timezone('utc', now())
+       WHERE id = $2 AND recipient_id = $3
+       RETURNING id`,
+      [archive, notificationId, user.id],
+    );
+    rowCount = rows.length;
+  } catch (error) {
+    console.error("[mobile-api] mark_notification_read failed:", error);
     throw new MobileApiError(
       "internal_error",
       "Failed to update notification.",
@@ -62,9 +66,16 @@ export const PATCH = mobileRoute(async (request: NextRequest, { params }) => {
     );
   }
 
-  const { unreadCount } = await getUnreadCount(supabase, user.id, {
-    excludeDemo: process.env.NODE_ENV === "production",
-  });
+  if (rowCount === 0) {
+    throw new MobileApiError("not_found", "Notification not found.", 404);
+  }
+
+  const isProd = process.env.NODE_ENV === "production";
+  const unreadSql = isProd
+    ? `SELECT COUNT(*) FROM notifications WHERE recipient_id = $1 AND read_at IS NULL AND archived_at IS NULL AND (metadata->>'demo' IS NULL OR metadata->>'demo' != 'true')`
+    : `SELECT COUNT(*) FROM notifications WHERE recipient_id = $1 AND read_at IS NULL AND archived_at IS NULL`;
+  const { rows: unreadRows } = await query(unreadSql, [user.id]);
+  const unreadCount = parseInt(unreadRows[0].count, 10);
 
   return ok({ success: true, unread_count: unreadCount });
 });

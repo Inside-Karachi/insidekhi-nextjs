@@ -6,9 +6,9 @@ import { getOptionalMobileUser, requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePathId } from "@/lib/mobile/params";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { createMobileServiceClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
+import { deleteFile, uploadFile } from "@/lib/storage/spaces";
 import {
-  REVIEW_IMAGE_COLUMNS,
   toReviewImage,
   type ReviewImageRow,
 } from "@/lib/mobile/mappers";
@@ -21,8 +21,7 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2MB
 /**
  * Accepted upload content types -> the canonical MIME + extension used for the
  * stored object. The incoming type is normalized so the object's MIME always
- * matches the storage bucket's `allowed_mime_types` (which lists `image/jpeg`,
- * not the non-standard `image/jpg`).
+ * matches the canonical type (`image/jpeg`, not the non-standard `image/jpg`).
  */
 const ALLOWED_UPLOADS: Record<string, { mime: string; ext: string }> = {
   "image/jpeg": { mime: "image/jpeg", ext: "jpg" },
@@ -68,30 +67,61 @@ function sniffImageMime(head: Uint8Array): string | null {
   return null;
 }
 
+function toNumericReviewImageRow(row: Record<string, unknown>): ReviewImageRow {
+  return { ...row, id: Number(row.id) } as unknown as ReviewImageRow;
+}
+
+const STAFF_ROLES = ["lister", "admin", "super_admin"];
+
 /**
  * GET /api/mobile/v1/reviews/{reviewId}/images
  *
- * Lists a review's images. Visibility is enforced by RLS: anon/regular users
- * see images only for APPROVED reviews; staff (lister/admin) see all. Returns
- * `{ id, image_url }` - `review_images` has no alt/order columns.
+ * Lists a review's images. Visibility matches the review itself: anon/regular
+ * users see images only for APPROVED reviews; staff (lister/admin) see all.
+ * Returns `{ id, image_url }` - `review_images` has no alt/order columns.
  */
 export const GET = mobileRoute(async (request: NextRequest, { params }) => {
   await enforceMobileRateLimit(request);
   const reviewId = parsePathId((await params).reviewId, "reviewId");
-  const { supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
 
-  const { data, error } = await supabase
-    .from("review_images")
-    .select(REVIEW_IMAGE_COLUMNS)
-    .eq("review_id", reviewId)
-    .order("created_at", { ascending: true })
-    .returns<ReviewImageRow[]>();
-  if (error) {
-    console.error("[mobile-api] review images query failed:", error.message);
+  const { rows: reviewRows } = await query(
+    `SELECT status FROM reviews WHERE id = $1`,
+    [reviewId],
+  );
+  const review = reviewRows[0];
+  if (!review) {
+    throw new MobileApiError("not_found", "Review not found.", 404);
+  }
+
+  if (review.status !== "approved") {
+    let isStaff = false;
+    if (user) {
+      const { rows: profileRows } = await query(
+        `SELECT role FROM profiles WHERE id = $1`,
+        [user.id],
+      );
+      const role = profileRows[0]?.role;
+      isStaff = role != null && STAFF_ROLES.includes(role);
+    }
+    if (!isStaff) {
+      throw new MobileApiError("not_found", "Review not found.", 404);
+    }
+  }
+
+  let rows: Record<string, unknown>[];
+  try {
+    const res = await query(
+      `SELECT id, image_url FROM review_images WHERE review_id = $1 ORDER BY created_at ASC`,
+      [reviewId],
+    );
+    rows = res.rows;
+  } catch (error) {
+    console.error("[mobile-api] review images query failed:", error);
     throw new MobileApiError("internal_error", "Failed to load images.", 500);
   }
 
-  return ok((data ?? []).map(toReviewImage));
+  return ok(rows.map(toNumericReviewImageRow).map(toReviewImage));
 });
 
 /**
@@ -99,30 +129,30 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
  *
  * Owner-only multipart upload (field `file`). The caller is authenticated and
  * the review ownership is enforced here; the file is then written to the
- * publicly-served `reviews/<reviewId>/...` storage prefix via a service-role
- * client. This mirrors the website's real review-image flow (`move-temp-images`,
- * which moves the file into `reviews/...` with service_role) - regular users may
- * only write to their own `temp/...` prefix, never directly to `reviews/...`.
+ * publicly-served `review-images/<reviewId>/...` prefix in DigitalOcean
+ * Spaces.
  */
 export const POST = mobileRoute(async (request: NextRequest, { params }) => {
   await enforceMobileRateLimit(request);
   const reviewId = parsePathId((await params).reviewId, "reviewId");
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   // Upload is the most expensive write path; throttle per-user in addition to
   // per-IP so a single token can't fan out binary uploads across rotating IPs.
   await enforceMobileRateLimit(request, user.id);
 
-  // Ownership check via the caller's RLS client (reviews are publicly readable).
-  // Images may be attached while the review is still `pending`: this matches the
-  // website flow, where images are moved in right after review creation and
-  // before moderation. So there is no status gate here - ownership only.
-  const { data: review, error: reviewError } = await supabase
-    .from("reviews")
-    .select("id, user_id")
-    .eq("id", reviewId)
-    .maybeSingle();
-  if (reviewError) {
-    console.error("[mobile-api] review lookup failed:", reviewError.message);
+  // Ownership check. Images may be attached while the review is still
+  // `pending`: this matches the website flow, where images are moved in right
+  // after review creation and before moderation. So there is no status gate
+  // here - ownership only.
+  let review: { id: unknown; user_id: unknown } | undefined;
+  try {
+    const { rows } = await query(
+      `SELECT id, user_id FROM reviews WHERE id = $1`,
+      [reviewId],
+    );
+    review = rows[0];
+  } catch (error) {
+    console.error("[mobile-api] review lookup failed:", error);
     throw new MobileApiError("internal_error", "Failed to add image.", 500);
   }
   if (!review) {
@@ -187,22 +217,15 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
     );
   }
 
-  // Privileged operations (count across all statuses, write to reviews/, insert)
-  // run as service_role AFTER the ownership check above.
-  const service = createMobileServiceClient();
-
-  const { count, error: countError } = await service
-    .from("review_images")
-    .select("id", { count: "exact", head: true })
-    .eq("review_id", reviewId);
-  if (countError) {
-    console.error("[mobile-api] image count failed:", countError.message);
-    throw new MobileApiError("internal_error", "Failed to add image.", 500);
-  }
+  const { rows: countRows } = await query(
+    `SELECT COUNT(*) FROM review_images WHERE review_id = $1`,
+    [reviewId],
+  );
+  const existingCount = Number(countRows[0]?.count ?? 0);
   // Best-effort cap: the count->insert is not atomic, so a burst of concurrent
   // uploads by the same owner could marginally exceed it. The per-user rate limit
   // bounds the blast radius; a hard guarantee would need a DB-level constraint.
-  if ((count ?? 0) >= MAX_IMAGES_PER_REVIEW) {
+  if (existingCount >= MAX_IMAGES_PER_REVIEW) {
     throw new MobileApiError(
       "too_many_images",
       `A review may have at most ${MAX_IMAGES_PER_REVIEW} images.`,
@@ -210,44 +233,38 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
     );
   }
 
-  const objectKey = `reviews/${reviewId}/${Date.now()}-${randomUUID()}.${upload.ext}`;
-  const { error: uploadError } = await service.storage
-    .from("review-images")
-    .upload(objectKey, file, {
-      cacheControl: "3600",
-      upsert: false,
+  const objectKey = `review-images/${reviewId}/${Date.now()}-${randomUUID()}.${upload.ext}`;
+  let publicUrl: string;
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const uploaded = await uploadFile(objectKey, Buffer.from(arrayBuffer), {
       contentType: upload.mime,
     });
-  if (uploadError) {
-    console.error("[mobile-api] image upload failed:", uploadError.message);
+    publicUrl = uploaded.publicUrl;
+  } catch (uploadError) {
+    console.error("[mobile-api] image upload failed:", uploadError);
     throw new MobileApiError("internal_error", "Failed to upload image.", 500);
   }
 
-  const {
-    data: { publicUrl },
-  } = service.storage.from("review-images").getPublicUrl(objectKey);
-
-  const { data: created, error: insertError } = await service
-    .from("review_images")
-    .insert({
-      review_id: reviewId,
-      image_url: publicUrl,
-      uploaded_by: user.id,
-    })
-    .select(REVIEW_IMAGE_COLUMNS)
-    .returns<ReviewImageRow[]>()
-    .single();
-  if (insertError || !created) {
-    console.error("[mobile-api] image insert failed:", insertError?.message);
+  let created: ReviewImageRow;
+  try {
+    const { rows } = await query(
+      `INSERT INTO review_images (review_id, image_url, uploaded_by)
+       VALUES ($1, $2, $3)
+       RETURNING id, image_url`,
+      [reviewId, publicUrl, user.id],
+    );
+    created = toNumericReviewImageRow(rows[0]);
+  } catch (insertError) {
+    console.error("[mobile-api] image insert failed:", insertError);
     // Best-effort cleanup of the orphaned object; log if it can't be removed so
     // the leftover is at least observable.
-    const { error: cleanupError } = await service.storage
-      .from("review-images")
-      .remove([objectKey]);
-    if (cleanupError) {
+    try {
+      await deleteFile(objectKey);
+    } catch (cleanupError) {
       console.error(
         "[mobile-api] orphaned image cleanup failed:",
-        cleanupError.message,
+        cleanupError,
         objectKey,
       );
     }

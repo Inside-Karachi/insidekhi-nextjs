@@ -1,8 +1,40 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 // Force dynamic to ensure fresh ticket data
 export const dynamic = "force-dynamic";
+
+const ADMIN_ROLES = ["admin", "super_admin", "lister"];
+
+const TICKET_TYPE_COLUMNS =
+  "id, event_id, name, description, price, quantity_available, " +
+  "to_json(sale_starts_at) #>> '{}' AS sale_starts_at, " +
+  "to_json(sale_ends_at) #>> '{}' AS sale_ends_at, " +
+  "max_per_person";
+
+function toNumericTicketType(row: Record<string, unknown>) {
+  return {
+    ...row,
+    id: Number(row.id),
+    event_id: Number(row.event_id),
+    price: row.price !== null ? Number(row.price) : null,
+  };
+}
+
+async function requireAdminRole(userId: string) {
+  const { rows } = await query(`SELECT role FROM profiles WHERE id = $1`, [
+    userId,
+  ]);
+  const profile = rows[0];
+  if (!profile) {
+    return { error: "Profile not found", status: 404 } as const;
+  }
+  if (!ADMIN_ROLES.includes(profile.role)) {
+    return { error: "Access denied", status: 403 } as const;
+  }
+  return { ok: true } as const;
+}
 
 // GET /api/admin/events/[id]/tickets - Get all ticket types for an event
 export async function GET(
@@ -10,41 +42,21 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { id } = await params;
+    const session = await getSession(request);
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Get user profile with role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (profileError || !profile) {
+    const access = await requireAdminRole(session.userId);
+    if (!access.ok) {
       return NextResponse.json(
-        { success: false, error: "Profile not found" },
-        { status: 404 }
-      );
-    }
-
-    // Check if user has admin or lister role
-    if (!["admin", "super_admin", "lister"].includes(profile.role)) {
-      return NextResponse.json(
-        { success: false, error: "Access denied" },
-        { status: 403 }
+        { success: false, error: access.error },
+        { status: access.status }
       );
     }
 
@@ -57,13 +69,11 @@ export async function GET(
     }
 
     // Verify event exists and user has access
-    const { data: event, error: eventError } = await supabase
-      .from("events")
-      .select("id, organizer_id")
-      .eq("id", eventId)
-      .single();
-
-    if (eventError || !event) {
+    const { rows: eventRows } = await query(
+      `SELECT id, organizer_id FROM events WHERE id = $1`,
+      [eventId]
+    );
+    if (!eventRows[0]) {
       return NextResponse.json(
         { success: false, error: "Event not found" },
         { status: 404 }
@@ -71,14 +81,20 @@ export async function GET(
     }
 
     // Get ticket types for the event
-    const { data: ticketTypes, error: ticketsError } = await supabase
-      .from("ticket_types")
-      .select("*")
-      .eq("event_id", eventId)
-      .order("sale_starts_at", { ascending: true });
-
-    if (ticketsError) {
-      console.error("Error fetching ticket types:", ticketsError);
+    let ticketTypes;
+    try {
+      const { rows } = await query(
+        // ORDER BY references the underlying table column explicitly (not
+        // the output alias) - Postgres prefers a same-named SELECT-list
+        // alias over the input column for simple ORDER BY names, which
+        // would otherwise sort by the to_json-rendered text instead of the
+        // real timestamptz value.
+        `SELECT ${TICKET_TYPE_COLUMNS} FROM ticket_types t WHERE t.event_id = $1 ORDER BY t.sale_starts_at ASC`,
+        [eventId]
+      );
+      ticketTypes = rows.map(toNumericTicketType);
+    } catch (error) {
+      console.error("Error fetching ticket types:", error);
       return NextResponse.json(
         { success: false, error: "Failed to fetch ticket types" },
         { status: 500 }
@@ -106,41 +122,21 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const supabase = await createServerSupabase();
     const { id } = await params;
+    const session = await getSession(request);
 
-    // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Get user profile with role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    if (profileError || !profile) {
+    const access = await requireAdminRole(session.userId);
+    if (!access.ok) {
       return NextResponse.json(
-        { success: false, error: "Profile not found" },
-        { status: 404 }
-      );
-    }
-
-    // Check if user has admin or lister role
-    if (!["admin", "super_admin", "lister"].includes(profile.role)) {
-      return NextResponse.json(
-        { success: false, error: "Access denied" },
-        { status: 403 }
+        { success: false, error: access.error },
+        { status: access.status }
       );
     }
 
@@ -153,13 +149,11 @@ export async function POST(
     }
 
     // Verify event exists
-    const { data: event, error: eventError } = await supabase
-      .from("events")
-      .select("id, organizer_id, start_time, end_time")
-      .eq("id", eventId)
-      .single();
-
-    if (eventError || !event) {
+    const { rows: eventRows } = await query(
+      `SELECT id, organizer_id, start_time, end_time FROM events WHERE id = $1`,
+      [eventId]
+    );
+    if (!eventRows[0]) {
       return NextResponse.json(
         { success: false, error: "Event not found" },
         { status: 404 }
@@ -248,23 +242,26 @@ export async function POST(
         ? 10
         : max_per_person;
 
-    const { data: ticketType, error: ticketError } = await supabase
-      .from("ticket_types")
-      .insert({
-        event_id: eventId,
-        name: name.trim(),
-        description: description?.trim() || null,
-        price,
-        quantity_available: normalizedQuantity,
-        sale_starts_at: saleStart.toISOString(),
-        sale_ends_at: saleEnd.toISOString(),
-        max_per_person: normalizedMaxPerPerson,
-      })
-      .select()
-      .single();
-
-    if (ticketError) {
-      console.error("Error creating ticket type:", ticketError);
+    let ticketType;
+    try {
+      const { rows } = await query(
+        `INSERT INTO ticket_types (event_id, name, description, price, quantity_available, sale_starts_at, sale_ends_at, max_per_person)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING ${TICKET_TYPE_COLUMNS}`,
+        [
+          eventId,
+          name.trim(),
+          description?.trim() || null,
+          price,
+          normalizedQuantity,
+          saleStart.toISOString(),
+          saleEnd.toISOString(),
+          normalizedMaxPerPerson,
+        ]
+      );
+      ticketType = toNumericTicketType(rows[0]);
+    } catch (error) {
+      console.error("Error creating ticket type:", error);
       return NextResponse.json(
         { success: false, error: "Failed to create ticket type" },
         { status: 500 }

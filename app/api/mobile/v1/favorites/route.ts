@@ -6,6 +6,7 @@ import { getOptionalMobileUser, requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePathId } from "@/lib/mobile/params";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -23,21 +24,15 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     "listingId",
   );
 
-  const { user, supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
   if (!user) return ok({ favorited: false });
 
-  const { data, error } = await supabase
-    .from("favorite_listings")
-    .select("listing_id")
-    .eq("user_id", user.id)
-    .eq("listing_id", listingId)
-    .maybeSingle();
-  if (error) {
-    console.error("[mobile-api] favorite lookup failed:", error.message);
-    throw new MobileApiError("internal_error", "Failed to load favorite.", 500);
-  }
+  const { rows } = await query(
+    `SELECT 1 FROM favorite_listings WHERE user_id = $1 AND listing_id = $2 LIMIT 1`,
+    [user.id, listingId],
+  );
 
-  return ok({ favorited: data != null });
+  return ok({ favorited: rows.length > 0 });
 });
 
 const toggleSchema = z.object({
@@ -48,13 +43,13 @@ const toggleSchema = z.object({
  * POST /api/mobile/v1/favorites
  *
  * Toggles the caller's favorite for a listing: inserts if absent (-> favorited),
- * deletes if present (-> unfavorited). Ownership is enforced by RLS (the user can
- * only touch their own `favorite_listings` rows), so no service-role client is
- * needed. Mirrors `app/api/favorites` (POST) semantics.
+ * deletes if present (-> unfavorited). Ownership is enforced by the explicit
+ * `user_id` filter below (scoped to the caller's own rows). Mirrors
+ * `app/api/favorites` (POST) semantics.
  */
 export const POST = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
   const parsed = toggleSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
@@ -67,47 +62,25 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
   const { listingId } = parsed.data;
 
-  const { data: existing, error: selError } = await supabase
-    .from("favorite_listings")
-    .select("listing_id")
-    .eq("user_id", user.id)
-    .eq("listing_id", listingId)
-    .maybeSingle();
-  if (selError) {
-    console.error("[mobile-api] favorite select failed:", selError.message);
-    throw new MobileApiError(
-      "internal_error",
-      "Failed to update favorite.",
-      500,
-    );
-  }
+  const { rows: existing } = await query(
+    `SELECT 1 FROM favorite_listings WHERE user_id = $1 AND listing_id = $2 LIMIT 1`,
+    [user.id, listingId],
+  );
 
-  if (existing) {
-    const { error: delError } = await supabase
-      .from("favorite_listings")
-      .delete()
-      .eq("user_id", user.id)
-      .eq("listing_id", listingId);
-    if (delError) {
-      console.error("[mobile-api] favorite delete failed:", delError.message);
-      throw new MobileApiError(
-        "internal_error",
-        "Failed to remove favorite.",
-        500,
-      );
-    }
+  if (existing.length > 0) {
+    await query(
+      `DELETE FROM favorite_listings WHERE user_id = $1 AND listing_id = $2`,
+      [user.id, listingId],
+    );
     return ok({ favorited: false });
   }
 
-  // Insert branch: the listing must exist and be published (RLS on the view
-  // already hides non-published listings from regular callers).
-  const { data: listing } = await supabase
-    .from("listings_with_details")
-    .select("id")
-    .eq("id", listingId)
-    .eq("status", "published")
-    .maybeSingle();
-  if (!listing) {
+  // Insert branch: the listing must exist and be published.
+  const { rows: listingRows } = await query(
+    `SELECT id FROM listings_with_details WHERE id = $1 AND status = 'published'`,
+    [listingId],
+  );
+  if (!listingRows[0]) {
     throw new MobileApiError(
       "not_found",
       "Listing not found.",
@@ -116,13 +89,16 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const { error: insError } = await supabase
-    .from("favorite_listings")
-    .insert({ user_id: user.id, listing_id: listingId });
-  if (insError) {
+  try {
+    await query(
+      `INSERT INTO favorite_listings (user_id, listing_id) VALUES ($1, $2)`,
+      [user.id, listingId],
+    );
+  } catch (insError) {
     // Unique-PK violation = a concurrent insert already favorited it.
-    if (insError.code === "23505") return ok({ favorited: true });
-    console.error("[mobile-api] favorite insert failed:", insError.message);
+    const pgError = insError as { code?: string };
+    if (pgError.code === "23505") return ok({ favorited: true });
+    console.error("[mobile-api] favorite insert failed:", insError);
     throw new MobileApiError("internal_error", "Failed to add favorite.", 500);
   }
 

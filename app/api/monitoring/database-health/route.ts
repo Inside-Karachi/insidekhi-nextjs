@@ -1,11 +1,13 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { Database } from "@/types/supabase";
 
 type DbHealthInsert =
   Database["public"]["Tables"]["database_health_checks"]["Insert"];
 
 export async function POST(request: NextRequest) {
+    const supabase = await createServerSupabase();
   try {
     const body = await request.json();
     const {
@@ -64,14 +66,10 @@ export async function POST(request: NextRequest) {
 
 // Get database health logs for super admins
 export async function GET(request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+  try {    const session = await getSessionFromCookies();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -79,7 +77,7 @@ export async function GET(request: NextRequest) {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {

@@ -1,9 +1,11 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { requireSuperAdmin } from "@/lib/auth/admin";
 
 // GET /api/admin/security/blocked-ips - List blocked IPs
 export async function GET(request: NextRequest) {
+  const session = await getSessionFromCookies();
   try {
     // Verify super admin
     await requireSuperAdmin(request);
@@ -44,6 +46,7 @@ export async function GET(request: NextRequest) {
 
 // POST /api/admin/security/blocked-ips - Manually block an IP
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
   try {
     // Verify super admin
     const adminCheck = await requireSuperAdmin(request);

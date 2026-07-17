@@ -1,7 +1,9 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
   try {
     const supabase = await createServerSupabase({ useServiceRole: true });
     const { code, location, deviceInfo } = await request.json();
@@ -20,7 +22,7 @@ export async function POST(request: NextRequest) {
       error: authError,
     } = await authSupabase.auth.getUser();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -61,7 +63,7 @@ export async function POST(request: NextRequest) {
       let query = supabase
         .from("qr_scans")
         .select("scanned_at", { count: "exact", head: true })
-        .eq("user_id", user.id)
+        .eq("user_id", session.userId)
         .eq("qr_code_id", qrCode.id);
 
       const now = new Date();
@@ -113,7 +115,7 @@ export async function POST(request: NextRequest) {
     const { data: insertedScan, error: scanError } = await supabase
       .from("qr_scans")
       .insert({
-        user_id: user.id,
+        user_id: session.userId,
         qr_code_id: qrCode.id,
         xp_awarded: 0,
         scan_location: location || null,
@@ -143,7 +145,7 @@ export async function POST(request: NextRequest) {
       let winnerQuery = supabase
         .from("qr_scans")
         .select("id")
-        .eq("user_id", user.id)
+        .eq("user_id", session.userId)
         .eq("qr_code_id", qrCode.id)
         .order("scanned_at", { ascending: true })
         .order("id", { ascending: true })
@@ -192,7 +194,7 @@ export async function POST(request: NextRequest) {
       const { awardXP } = await import("@/lib/gamification");
       // Use the XP value from the QR code (override default if present)
       const result = await awardXP(
-        user.id,
+        session.userId,
         "visit_location",
         qrCode.id,
         qrCode.xp_reward

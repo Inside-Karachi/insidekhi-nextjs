@@ -1,15 +1,11 @@
 import { type NextRequest } from "next/server";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
-import { createMobilePublicClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
-import {
-  buildListingSearchOrFilter,
-  sortFetchedListingsBySearchRelevance,
-} from "@/lib/listings/search-relevance";
-import type { Database } from "@/types/supabase";
+import { sortFetchedListingsBySearchRelevance } from "@/lib/listings/search-relevance";
 
 export const dynamic = "force-dynamic";
 
@@ -17,26 +13,17 @@ const MIN_QUERY_LENGTH = 2;
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 25;
 
-type ListingSearchRow = Pick<
-  Database["public"]["Views"]["listings_with_details"]["Row"],
-  | "id"
-  | "name"
-  | "slug"
-  | "description"
-  | "address"
-  | "category_name"
-  | "is_featured"
-  | "avg_rating"
-  | "review_count"
->;
-type EventSearchRow = Pick<
-  Database["public"]["Tables"]["events"]["Row"],
-  "id" | "name" | "slug" | "description" | "start_time" | "end_time"
->;
-type PostSearchRow = Pick<
-  Database["public"]["Tables"]["posts"]["Row"],
-  "id" | "title" | "slug" | "excerpt"
->;
+type ListingSearchRow = {
+  id: number;
+  name: string | null;
+  slug: string | null;
+  description: string | null;
+  address: string | null;
+  category_name: string | null;
+  is_featured: boolean | null;
+  avg_rating: number | null;
+  review_count: number | null;
+};
 
 type SearchResult =
   | {
@@ -72,8 +59,8 @@ type SearchResult =
  *
  * Unified search across listings, events and posts, tagged by `type`. Mirrors
  * the website's `app/api/search` handler, normalized to allow-listed fields per
- * type. Posts are anon-gated by RLS, so they only appear for callers that can
- * read them (display-only in v1 per contract section 6).
+ * type. Posts and events are published-only in v1 (display-only per contract
+ * section 6).
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
@@ -102,30 +89,63 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const supabase = createMobilePublicClient();
   const searchTerm = `%${sanitized}%`;
   const results: SearchResult[] = [];
 
-  const listingOrFilter = buildListingSearchOrFilter(sanitized);
-  let listingsQuery = supabase
-    .from("listings_with_details")
-    .select(
-      "id, name, slug, description, address, category_name, is_featured, avg_rating, review_count",
-    )
-    .eq("status", "published");
-  if (listingOrFilter) listingsQuery = listingsQuery.or(listingOrFilter);
+  let listingsRes, eventsRes, postsRes;
+  try {
+    [listingsRes, eventsRes, postsRes] = await Promise.all([
+      query(
+        `SELECT id, name, slug, description, address, category_name, is_featured, avg_rating, review_count
+         FROM listings_with_details
+         WHERE status = 'published'
+           AND (name ILIKE $1 OR description ILIKE $1 OR address ILIKE $1)
+         LIMIT $2`,
+        [searchTerm, Math.min(50, limit * 3)],
+      ),
+      query(
+        `SELECT id, name, slug, description,
+           to_json(start_time) #>> '{}' AS start_time,
+           to_json(end_time) #>> '{}' AS end_time
+         FROM events
+         WHERE status = 'published'
+           AND (name ILIKE $1 OR description ILIKE $1)
+           AND start_time >= NOW()
+         LIMIT $2`,
+        [searchTerm, limit],
+      ),
+      query(
+        `SELECT id, title, slug, excerpt
+         FROM posts
+         WHERE status = 'published'
+           AND (title ILIKE $1 OR excerpt ILIKE $1)
+         LIMIT $2`,
+        [searchTerm, limit],
+      ),
+    ]);
+  } catch (error) {
+    console.error("[mobile-api] search query failed:", error);
+    throw new MobileApiError("internal_error", "Failed to search.", 500);
+  }
 
-  const { data: listingsRaw } = await listingsQuery
-    .returns<ListingSearchRow[]>()
-    .limit(Math.min(50, limit * 3));
+  const listingRows: ListingSearchRow[] = listingsRes.rows.map((row) => ({
+    id: Number(row.id),
+    name: row.name as string | null,
+    slug: row.slug as string | null,
+    description: row.description as string | null,
+    address: row.address as string | null,
+    category_name: row.category_name as string | null,
+    is_featured: row.is_featured as boolean | null,
+    avg_rating: row.avg_rating !== null ? Number(row.avg_rating) : null,
+    review_count: row.review_count !== null ? Number(row.review_count) : null,
+  }));
 
   const listingsOrdered = sortFetchedListingsBySearchRelevance(
-    (listingsRaw ?? []) as never,
+    listingRows,
     sanitized,
-  ).slice(0, limit) as unknown as ListingSearchRow[];
+  ).slice(0, limit);
 
   for (const listing of listingsOrdered) {
-    if (listing.id == null) continue;
     results.push({
       type: "listing",
       id: listing.id,
@@ -139,42 +159,25 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     });
   }
 
-  const { data: events } = await supabase
-    .from("events")
-    .select("id, name, slug, description, start_time, end_time")
-    .eq("status", "published")
-    .or(`name.ilike."${searchTerm}",description.ilike."${searchTerm}"`)
-    .gte("start_time", new Date().toISOString())
-    .returns<EventSearchRow[]>()
-    .limit(limit);
-
-  for (const event of events ?? []) {
+  for (const event of eventsRes.rows) {
     results.push({
       type: "event",
-      id: event.id,
-      name: event.name,
-      slug: event.slug,
-      description: event.description,
-      start_time: event.start_time,
-      end_time: event.end_time,
+      id: Number(event.id),
+      name: event.name as string | null,
+      slug: event.slug as string | null,
+      description: event.description as string | null,
+      start_time: event.start_time as string | null,
+      end_time: event.end_time as string | null,
     });
   }
 
-  const { data: posts } = await supabase
-    .from("posts")
-    .select("id, title, slug, excerpt")
-    .eq("status", "published")
-    .or(`title.ilike."${searchTerm}",excerpt.ilike."${searchTerm}"`)
-    .returns<PostSearchRow[]>()
-    .limit(limit);
-
-  for (const post of posts ?? []) {
+  for (const post of postsRes.rows) {
     results.push({
       type: "post",
-      id: post.id,
-      name: post.title,
-      slug: post.slug,
-      description: post.excerpt,
+      id: Number(post.id),
+      name: post.title as string | null,
+      slug: post.slug as string | null,
+      description: post.excerpt as string | null,
     });
   }
 

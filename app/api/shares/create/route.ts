@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { z } from "zod";
 import type { CreateShareResponse } from "@/types/invite-share.types";
 
@@ -21,19 +22,14 @@ const createShareSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-  try {
-    const supabase = await createServerSupabase();
-    const serviceSupabase = await createServerSupabase({
+  try {    const serviceSupabase = await createServerSupabase({
       useServiceRole: true,
     });
 
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSessionFromCookies();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
         { status: 401 }
@@ -70,7 +66,7 @@ export async function POST(request: NextRequest) {
       p_content_url: content_url,
       p_platform: platform,
       p_verification_method: verification_method,
-      p_user_id: user.id,
+      p_user_id: session.userId,
     });
 
     if (error) {

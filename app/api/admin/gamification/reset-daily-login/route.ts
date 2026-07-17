@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 /**
  * POST /api/admin/gamification/reset-daily-login
  * Admin endpoint to reset daily login claim status for testing
@@ -11,6 +12,7 @@ import { createServerSupabase } from "@/lib/supabase/server";
 import { canManageGamificationSettings } from "@/lib/auth/gamification-permissions";
 
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
   try {
     const supabase = await createServerSupabase({ useServiceRole: true });
     const authSupabase = await createServerSupabase();
@@ -21,7 +23,7 @@ export async function POST(request: NextRequest) {
       error: authError,
     } = await authSupabase.auth.getUser();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -29,7 +31,7 @@ export async function POST(request: NextRequest) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {
@@ -47,7 +49,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Parse request body to get optional user_id to reset
-    let targetUserId = user.id;
+    let targetUserId = session.userId;
     try {
       const body = await request.json();
       if (body.user_id) {

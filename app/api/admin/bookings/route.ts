@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 /**
  * Admin API: List All Bookings with Complete Details
@@ -8,16 +9,10 @@ import { createServerSupabase } from "@/lib/supabase/server";
  * Only admins can access this endpoint.
  */
 export async function GET() {
-  try {
-    const supabase = await createServerSupabase();
+  try {    // Check user is authenticated and is admin
+    const session = await getSessionFromCookies();
 
-    // Check user is authenticated and is admin
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
         { status: 401 }
@@ -25,10 +20,11 @@ export async function GET() {
     }
 
     // Check admin role
+    const supabase = await createServerSupabase();
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     const isAdmin =

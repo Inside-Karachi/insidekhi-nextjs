@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { logAuditEvent } from "@/lib/audit";
 import {
   categoryCreateSchema,
@@ -18,16 +19,11 @@ import type { GradientStyle } from "@/lib/utils/gradientStyles";
  * Query params: parent_id, show_in_nav, search
  */
 export async function GET(request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Verify authentication
+    const session = await getSessionFromCookies();
 
-    // Verify authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -35,7 +31,7 @@ export async function GET(request: NextRequest) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {
@@ -279,16 +275,11 @@ export async function GET(request: NextRequest) {
  * Create a new category
  */
 export async function POST(request: NextRequest) {
-  try {
     const supabase = await createServerSupabase();
+  try {    // Verify authentication
+    const session = await getSessionFromCookies();
 
-    // Verify authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -296,7 +287,7 @@ export async function POST(request: NextRequest) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {
@@ -419,7 +410,7 @@ export async function POST(request: NextRequest) {
 
     // Log audit event
     await logAuditEvent({
-      admin_id: user.id,
+      admin_id: session.userId,
       action: "category_created",
       entity_type: "category",
       entity_id: newCategory.id.toString(),

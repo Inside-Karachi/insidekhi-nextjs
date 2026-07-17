@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { Database } from "@/types/supabase";
 
 type ApiErrorInsert = Database["public"]["Tables"]["api_error_logs"]["Insert"];
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await getSessionFromCookies();
     const body = await request.json();
     const {
       endpoint,
@@ -27,9 +29,6 @@ export async function POST(request: NextRequest) {
 
     // Get user info if available
     const supabase = await createServerSupabase({ useServiceRole: true });
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
 
     // Log API error with proper types
     const errorLog: ApiErrorInsert = {
@@ -37,7 +36,7 @@ export async function POST(request: NextRequest) {
       method,
       status_code: statusCode,
       error_message: errorMessage || null,
-      user_id: user?.id || null,
+      user_id: session?.userId || null,
       ip_address:
         request.headers.get("x-forwarded-for") ||
         request.headers.get("x-real-ip") ||
@@ -71,12 +70,9 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSessionFromCookies();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -84,7 +80,7 @@ export async function GET(request: NextRequest) {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {

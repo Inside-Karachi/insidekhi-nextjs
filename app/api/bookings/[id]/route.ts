@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -5,6 +6,8 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const { id } = await params;
     const supabase = await createServerSupabase();
@@ -27,11 +30,11 @@ export async function GET(
     }
 
     // Ownership check - admins can view any booking
-    if (booking.user_id !== user.id) {
+    if (booking.user_id !== session.userId) {
       const { data: profile } = await supabase
         .from("profiles")
         .select("role")
-        .eq("id", user.id)
+        .eq("id", session.userId)
         .single();
       const isAdmin =
         profile?.role === "admin" || profile?.role === "super_admin";

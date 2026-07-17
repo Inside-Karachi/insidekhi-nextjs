@@ -1,9 +1,11 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { deriveStateCode } from "@/lib/payments/status-map";
 import { BookingPaymentStatus } from "@/types/payments.types";
 
 export async function GET(req: NextRequest) {
+  const session = await getSessionFromCookies();
   const url = new URL(req.url);
   const bookingIdParam = url.searchParams.get("booking_id");
   if (!bookingIdParam) {
@@ -23,7 +25,7 @@ export async function GET(req: NextRequest) {
     data: { user },
     error: authError,
   } = await authSupabase.auth.getUser();
-  if (authError || !user) {
+  if (!session) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   }
 
@@ -33,7 +35,7 @@ export async function GET(req: NextRequest) {
     .from("bookings")
     .select("id, booking_reference, payment_status")
     .eq("id", bookingId)
-    .eq("user_id", user.id)
+    .eq("user_id", session.userId)
     .single();
   if (error || !booking) {
     return NextResponse.json({ error: "Booking not found" }, { status: 404 });

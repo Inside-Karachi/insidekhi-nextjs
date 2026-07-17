@@ -1,3 +1,4 @@
+"use client";
 import { type NextRequest } from "next/server";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
@@ -6,6 +7,8 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { uploadFile, deleteFile } from "@/lib/storage/spaces";
+import { query } from "@/lib/db";
 
 export const runtime = "nodejs"; // sharp needs the Node runtime
 export const dynamic = "force-dynamic";
@@ -20,11 +23,11 @@ sharp.cache(false);
 sharp.concurrency(1);
 
 // Replaces the caller's avatar (multipart field `avatar`). Decodes the image to validate it,
-// resizes to a square webp, uploads under the caller's `<uid>/` prefix (storage RLS scopes writes),
+// resizes to a square webp, uploads under the caller's `<uid>/` prefix (storage DO Spaces),
 // and writes the public URL to profiles.avatar_url; a failed DB write rolls the object back.
 export const POST = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
   let form: FormData;
@@ -86,27 +89,28 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
 
   const path = `${user.id}/avatar-${Date.now()}-${randomUUID()}.webp`;
-  const { error: upErr } = await supabase.storage
-    .from(BUCKET)
-    .upload(path, webp, { contentType: "image/webp", upsert: false });
-  if (upErr) {
-    console.error("[mobile-api] avatar upload failed:", upErr.message);
+  
+  let avatarUrl;
+  try {
+    const uploadResult = await uploadFile(path, webp, { bucket: BUCKET, contentType: "image/webp" });
+    avatarUrl = uploadResult.publicUrl;
+  } catch (upErr: any) {
+    console.error("[mobile-api] avatar upload failed:", upErr.message || upErr);
     throw new MobileApiError("internal_error", "Failed to upload avatar.", 500);
   }
 
-  const avatarUrl = supabase.storage.from(BUCKET).getPublicUrl(path)
-    .data.publicUrl;
-
-  const { error: updErr } = await supabase
-    .from("profiles")
-    .update({ avatar_url: avatarUrl })
-    .eq("id", user.id);
-  if (updErr) {
-    const { error: rmErr } = await supabase.storage.from(BUCKET).remove([path]);
-    if (rmErr) {
-      console.error("[mobile-api] avatar cleanup failed:", rmErr.message, path);
+  try {
+    await query(
+      "UPDATE public.profiles SET avatar_url = $1 WHERE id = $2",
+      [avatarUrl, user.id]
+    );
+  } catch (updErr: any) {
+    try {
+      await deleteFile(path, BUCKET);
+    } catch (rmErr: any) {
+      console.error("[mobile-api] avatar cleanup failed:", rmErr.message || rmErr, path);
     }
-    console.error("[mobile-api] avatar profile update failed:", updErr.message);
+    console.error("[mobile-api] avatar profile update failed:", updErr.message || updErr);
     throw new MobileApiError("internal_error", "Failed to save avatar.", 500);
   }
 

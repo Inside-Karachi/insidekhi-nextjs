@@ -1,21 +1,16 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await params;
-    const supabase = await createServerSupabase();
+    const { id } = await params;    // Check admin authentication
+    const session = await getSessionFromCookies();
 
-    // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -29,7 +24,7 @@ export async function GET(
     const { data: profile, error: profileError } = await adminSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {
@@ -117,16 +112,10 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await params;
-    const supabase = await createServerSupabase();
+    const { id } = await params;    // Check admin authentication
+    const session = await getSessionFromCookies();
 
-    // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -140,7 +129,7 @@ export async function PUT(
     const { data: profile, error: profileError } = await adminSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {
@@ -206,16 +195,10 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await params;
-    const supabase = await createServerSupabase();
+    const { id } = await params;    // Check admin authentication
+    const session = await getSessionFromCookies();
 
-    // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 }
@@ -229,7 +212,7 @@ export async function DELETE(
     const { data: profile, error: profileError } = await adminSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {

@@ -1,24 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
+import { verifyPassword, hashPassword } from "@/lib/auth/password";
 
 export async function PUT(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
+    const session = await getSessionFromCookies();
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
+    if (!session) {
       return NextResponse.json(
         {
           error: "Authentication required",
           field: "auth",
         },
         { status: 401 }
+      );
+    }
+
+    // Fetch user's email and current hashed password from auth.users
+    const { rows } = await query(
+      "SELECT email, encrypted_password FROM auth.users WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const authUser = rows[0] as { email: string; encrypted_password: string } | undefined;
+
+    if (!authUser) {
+      return NextResponse.json(
+        { error: "User not found", field: "auth" },
+        { status: 404 }
       );
     }
 
@@ -77,13 +86,9 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    // Verify current password by attempting to sign in
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: user.email!,
-      password: currentPassword,
-    });
-
-    if (signInError) {
+    // Verify current password against our stored bcrypt hash
+    const isCorrect = await verifyPassword(currentPassword, authUser.encrypted_password);
+    if (!isCorrect) {
       return NextResponse.json(
         {
           error: "Current password is incorrect",
@@ -93,28 +98,18 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    // Update password using service role
-    const { error: updateError } =
-      await serviceSupabase.auth.admin.updateUserById(user.id, {
-        password: newPassword,
-      });
-
-    if (updateError) {
-      console.error("Password update error:", updateError);
-      return NextResponse.json(
-        {
-          error: "Failed to update password. Please try again.",
-          field: "server",
-        },
-        { status: 500 }
-      );
-    }
+    // Hash the new password and update auth.users directly
+    const newHash = await hashPassword(newPassword);
+    await query(
+      "UPDATE auth.users SET encrypted_password = $1, updated_at = NOW() WHERE id = $2",
+      [newHash, session.userId]
+    );
 
     // Log the password change
     try {
       const { logPasswordChange } = await import("@/lib/audit");
       await logPasswordChange(
-        user.id,
+        session.userId,
         request.headers.get("x-forwarded-for") ||
           request.headers.get("x-real-ip") ||
           "unknown"

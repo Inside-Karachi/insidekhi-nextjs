@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { z } from "zod";
@@ -30,6 +31,8 @@ const SyncRequestSchema = z.object({
  * @route POST /api/admin/listing-scraper/sync
  */
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     // Auth check
     const authSupabase = await createServerSupabase();
@@ -45,7 +48,7 @@ export async function POST(request: NextRequest) {
     const { data: profile } = await authSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {
@@ -85,7 +88,7 @@ export async function POST(request: NextRequest) {
         },
         body: JSON.stringify({
           syncId,
-          userId: user.id,
+          userId: session.userId,
           config,
         }),
       },
@@ -139,6 +142,8 @@ export async function POST(request: NextRequest) {
  * @route GET /api/admin/listing-scraper/sync
  */
 export async function GET(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     await requireSuperAdmin(request);
 

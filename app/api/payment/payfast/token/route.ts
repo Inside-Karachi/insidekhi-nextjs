@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 /**
  * PayFast Token API Route
  *
@@ -29,6 +30,7 @@ const TokenRequestSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
   try {
     // Require authenticated session
     const authSupabase = await createServerSupabase();
@@ -36,7 +38,7 @@ export async function POST(request: NextRequest) {
       data: { user },
       error: authError,
     } = await authSupabase.auth.getUser();
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
@@ -78,7 +80,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (booking.user_id !== user.id) {
+    if (booking.user_id !== session.userId) {
       return NextResponse.json(
         { success: false, error: "Forbidden" },
         { status: 403 },

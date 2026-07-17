@@ -1,8 +1,11 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { getWorkerConfig, requestWorker } from "@/lib/scraper/worker-client";
 
 export async function GET(_request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const authSupabase = await createServerSupabase();
     const {
@@ -16,7 +19,7 @@ export async function GET(_request: NextRequest) {
     const { data: profile } = await authSupabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {

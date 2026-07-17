@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import {
   normalizeEmail,
   validateEmail,
@@ -36,8 +37,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Use admin client for duplication checks and the insert (server-only operation)
-    const supabaseAdmin = await createServerSupabase({ useServiceRole: true });
+    // Use query() for duplication checks and the insert (server-only operation)
 
     // Basic required-field validation
     const required = ["companyName", "email", "contactName", "businessType"];
@@ -63,26 +63,22 @@ export async function POST(request: NextRequest) {
       request.headers.get("x-real-ip") ||
       "unknown";
     const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const { count, error: countErr } = await supabaseAdmin
-      .from("form_submissions")
-      .select("id", { count: "exact" })
-      .eq("form_type", "membership")
-      .gt("submitted_at", cutoff)
-      .eq("additional_data->>ip", ip);
-    if (countErr) console.error("Rate count error (membership):", countErr);
-    const total = typeof count === "number" ? count : 0;
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*)::int AS cnt FROM public.form_submissions
+       WHERE form_type = 'membership' AND submitted_at > $1 AND additional_data->>'ip' = $2`,
+      [cutoff, ip]
+    );
+    const total = (countRows[0] as { cnt: number })?.cnt ?? 0;
     if (total > 10) {
-      const { data: earliest, error: eErr } = await supabaseAdmin
-        .from("form_submissions")
-        .select("submitted_at")
-        .eq("form_type", "membership")
-        .gt("submitted_at", cutoff)
-        .eq("additional_data->>ip", ip)
-        .order("submitted_at", { ascending: true })
-        .limit(1);
+      const { rows: earliest } = await query(
+        `SELECT submitted_at FROM public.form_submissions
+         WHERE form_type = 'membership' AND submitted_at > $1 AND additional_data->>'ip' = $2
+         ORDER BY submitted_at ASC LIMIT 1`,
+        [cutoff, ip]
+      );
       let retryAfter = Math.ceil(60 * 60);
-      if (!eErr && earliest && earliest.length && earliest[0].submitted_at) {
-        const oldestTs = Date.parse(String(earliest[0].submitted_at));
+      if (earliest.length && (earliest[0] as { submitted_at: string }).submitted_at) {
+        const oldestTs = Date.parse(String((earliest[0] as { submitted_at: string }).submitted_at));
         const now = Date.now();
         const retryAfterMs = Math.max(0, 60 * 60 * 1000 - (now - oldestTs));
         retryAfter = Math.ceil(retryAfterMs / 1000);
@@ -172,22 +168,12 @@ export async function POST(request: NextRequest) {
       },
     };
 
-    // Duplicate check: safe server-side SELECT using service role
-    const { data: existing, error: dupErr } = await supabaseAdmin
-      .from("form_submissions")
-      .select("id")
-      .eq("form_type", "membership")
-      .eq("email", email)
-      .limit(1)
-      .maybeSingle();
-
-    if (dupErr) {
-      console.error("Duplication check error:", dupErr);
-      return NextResponse.json(
-        { error: "Failed to verify existing submissions" },
-        { status: 500 }
-      );
-    }
+    // Duplicate check using query()
+    const { rows: existingRows } = await query(
+      `SELECT id FROM public.form_submissions WHERE form_type = 'membership' AND email = $1 LIMIT 1`,
+      [email]
+    );
+    const existing = existingRows[0] ?? null;
 
     if (existing) {
       return NextResponse.json(
@@ -202,30 +188,30 @@ export async function POST(request: NextRequest) {
     // Perform insert using service role (server-only) so we can return the new id reliably
     // Attach uploaded_by when user session available
     try {
-      const supabaseAuth = await createServerSupabase();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const userSession = (await supabaseAuth.auth.getUser()) as any;
-      const uploaded_by = userSession?.data?.user?.id ?? null;
+      const session = await getSessionFromCookies();
+      const uploaded_by = session?.userId ?? null;
       const toInsert = { ...submissionData, uploaded_by };
 
-      const { data, error } = await supabaseAdmin
-        .from("form_submissions")
-        .insert([toInsert])
-        .select("id")
-        .single();
+      const { rows: insertedRows } = await query(
+        `INSERT INTO public.form_submissions
+         (form_type, name, email, phone, company_name, business_type, address, city, state,
+          zip_code, website, years_in_business, message, additional_data, uploaded_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         RETURNING id`,
+        [
+          toInsert.form_type, toInsert.name, toInsert.email, toInsert.phone,
+          toInsert.company_name, toInsert.business_type, toInsert.address,
+          toInsert.city, toInsert.state, toInsert.zip_code, toInsert.website,
+          toInsert.years_in_business, toInsert.message,
+          JSON.stringify(toInsert.additional_data), toInsert.uploaded_by
+        ]
+      );
+      const insertedId = (insertedRows[0] as { id: string })?.id;
 
-      if (error) {
-        console.error("Database error:", error);
-        return NextResponse.json(
-          { error: "Failed to submit application" },
-          { status: 500 }
-        );
-      }
-
-      const signed = signReceipt(data.id);
+      const signed = signReceipt(insertedId);
       const res = NextResponse.json({
         success: true,
-        id: data.id,
+        id: insertedId,
         signedReceipt: signed,
         message: "Membership application submitted successfully!",
       });
@@ -255,33 +241,21 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
-    // For GET requests, we use the default (anon or user) role
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
     const email = searchParams.get("email");
 
-    // If no email query param, try to detect logged-in user and query by uploaded_by
+    // If no email query param, detect logged-in user and query by uploaded_by
     if (!email) {
       try {
-        const userRes = await supabase.auth.getUser();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const userId = (userRes as any)?.data?.user?.id ?? null;
-        if (!userId)
-          return NextResponse.json({ success: true, applications: [] });
-        const { data, error } = await supabase
-          .from("form_submissions")
-          .select("*")
-          .eq("form_type", "membership")
-          .eq("uploaded_by", userId)
-          .order("submitted_at", { ascending: false });
-        if (error) {
-          console.error("Database error:", error);
-          return NextResponse.json(
-            { error: "Failed to fetch applications" },
-            { status: 500 }
-          );
-        }
-        return NextResponse.json({ success: true, applications: data });
+        const session = await getSessionFromCookies();
+        if (!session) return NextResponse.json({ success: true, applications: [] });
+        const { rows } = await query(
+          `SELECT * FROM public.form_submissions
+           WHERE form_type = 'membership' AND uploaded_by = $1
+           ORDER BY submitted_at DESC`,
+          [session.userId]
+        );
+        return NextResponse.json({ success: true, applications: rows });
       } catch (err) {
         console.error("Auth read failed", err);
         return NextResponse.json({ success: true, applications: [] });
@@ -289,12 +263,18 @@ export async function GET(request: NextRequest) {
     }
 
     // Email-based lookup requires authentication and restricts to own email
-    const authCheck = await supabase.auth.getUser();
-    if (!authCheck.data?.user) {
+    const session = await getSessionFromCookies();
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    if (authCheck.data.user.email?.toLowerCase() !== email.toLowerCase()) {
+    // Fetch the user's actual email from auth.users
+    const { rows: userRows } = await query(
+      "SELECT email FROM auth.users WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const userEmail = (userRows[0] as { email: string } | undefined)?.email;
+    if (!userEmail || userEmail.toLowerCase() !== email.toLowerCase()) {
       return NextResponse.json(
         { error: "You can only view your own applications" },
         { status: 403 }
@@ -302,24 +282,16 @@ export async function GET(request: NextRequest) {
     }
 
     // Get user's membership applications by email (fallback)
-    const { data, error } = await supabase
-      .from("form_submissions")
-      .select("*")
-      .eq("form_type", "membership")
-      .eq("email", email)
-      .order("submitted_at", { ascending: false });
-
-    if (error) {
-      console.error("Database error:", error);
-      return NextResponse.json(
-        { error: "Failed to fetch applications" },
-        { status: 500 }
-      );
-    }
+    const { rows } = await query(
+      `SELECT * FROM public.form_submissions
+       WHERE form_type = 'membership' AND email = $1
+       ORDER BY submitted_at DESC`,
+      [email]
+    );
 
     return NextResponse.json({
       success: true,
-      applications: data,
+      applications: rows,
     });
   } catch (error) {
     console.error("API error:", error);

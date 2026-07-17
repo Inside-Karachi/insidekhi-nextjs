@@ -1,8 +1,11 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { requireSuperAdmin, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const { user } = await requireSuperAdmin(request);
 
@@ -18,7 +21,7 @@ export async function POST(request: NextRequest) {
            p_age_threshold_days => $1::integer,
            p_executed_by => $2::uuid
          ) AS result`,
-        [ageThresholdDays, user.id],
+        [ageThresholdDays, session.userId],
       );
       result = rows[0]?.result;
     } catch (rpcError) {

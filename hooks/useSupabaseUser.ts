@@ -1,9 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Session, User } from "@supabase/supabase-js";
 
-import { createClient } from "@/lib/supabase/client";
+interface User {
+  id: string;
+  email: string;
+  role: string;
+  active_role: string;
+  full_name?: string | null;
+  avatar_url?: string | null;
+}
+
+interface Session {
+  access_token: string;
+}
 
 interface SupabaseAuthState {
   user: User | null;
@@ -21,7 +31,7 @@ const buildError = (error: unknown) => {
   try {
     return new Error(JSON.stringify(error));
   } catch {
-    return new Error("Unknown Supabase auth error");
+    return new Error("Unknown authentication error");
   }
 };
 
@@ -36,42 +46,35 @@ export function useSupabaseUser(): SupabaseAuthState {
 
   useEffect(() => {
     let isMounted = true;
-    const supabase = createClient();
 
     const resolveSession = async () => {
       try {
-        const [
-          { data: userData, error: userError },
-          { data: sessionData, error: sessionError },
-        ] = await Promise.all([
-          supabase.auth.getUser(),
-          supabase.auth.getSession(),
-        ]);
-
-        if (!isMounted) {
-          return;
+        const response = await fetch("/api/user/me");
+        if (!response.ok) {
+          throw new Error("Failed to fetch user session");
         }
+        const data = await response.json();
+        if (!isMounted) return;
 
-        if (userError) {
-          throw userError;
+        if (data.user) {
+          setAuthState({
+            user: data.user,
+            session: { access_token: "dummy" } as any, // Mock Supabase Session object if needed
+            userId: data.user.id,
+            isLoading: false,
+            error: null,
+          });
+        } else {
+          setAuthState({
+            user: null,
+            session: null,
+            userId: null,
+            isLoading: false,
+            error: null,
+          });
         }
-
-        if (sessionError && !userData.user) {
-          throw sessionError;
-        }
-
-        setAuthState({
-          user: userData.user ?? null,
-          session: sessionData.session ?? null,
-          userId: userData.user?.id ?? null,
-          isLoading: false,
-          error: sessionError && userData.user ? buildError(sessionError) : null,
-        });
       } catch (error) {
-        if (!isMounted) {
-          return;
-        }
-
+        if (!isMounted) return;
         setAuthState({
           user: null,
           session: null,
@@ -84,52 +87,8 @@ export function useSupabaseUser(): SupabaseAuthState {
 
     void resolveSession();
 
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        if (!isMounted) {
-          return;
-        }
-
-        if (!session) {
-          setAuthState({
-            user: null,
-            session: null,
-            userId: null,
-            isLoading: false,
-            error: null,
-          });
-          return;
-        }
-
-        const { data: userData, error: userError } = await supabase.auth.getUser();
-        if (!isMounted) {
-          return;
-        }
-
-        if (userError || !userData.user) {
-          setAuthState({
-            user: null,
-            session: null,
-            userId: null,
-            isLoading: false,
-            error: userError ? buildError(userError) : null,
-          });
-          return;
-        }
-
-        setAuthState({
-          user: userData.user,
-          session,
-          userId: userData.user.id,
-          isLoading: false,
-          error: null,
-        });
-      },
-    );
-
     return () => {
       isMounted = false;
-      listener?.subscription.unsubscribe();
     };
   }, []);
 

@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 /**
  * GET /api/gamification/ranks - Fetch all active ranks
  * PUT /api/gamification/ranks/:id - Update rank (super_admin only)
@@ -12,6 +13,8 @@ import type { RankUpsertRequest } from "@/types/gamification.types";
  * GET all active ranks with user's current rank and progress
  */
 export async function GET(_request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const supabase = await createServerSupabase();
 
@@ -42,7 +45,7 @@ export async function GET(_request: NextRequest) {
       const { data: profile } = await supabase
         .from("profiles")
         .select("points")
-        .eq("id", user.id)
+        .eq("id", session.userId)
         .single();
 
       const userXP = profile?.points || 0;
@@ -51,7 +54,7 @@ export async function GET(_request: NextRequest) {
       const { data: userRankData } = await supabase
         .from("user_ranks")
         .select("rank_id, achieved_at")
-        .eq("user_id", user.id)
+        .eq("user_id", session.userId)
         .eq("current_rank", true)
         .single();
 
@@ -96,6 +99,8 @@ export async function GET(_request: NextRequest) {
  * POST create new rank (super_admin only)
  */
 export async function POST(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     // Get authenticated user
     const supabase = await createServerSupabase({ useServiceRole: true });
@@ -104,7 +109,7 @@ export async function POST(request: NextRequest) {
       error: authError,
     } = await (await createServerSupabase()).auth.getUser();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -112,7 +117,7 @@ export async function POST(request: NextRequest) {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {
@@ -197,6 +202,8 @@ export async function POST(request: NextRequest) {
  * PUT update rank (super_admin only)
  */
 export async function PUT(request: NextRequest) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     // Get authenticated user
     const supabaseAuth = await createServerSupabase();
@@ -205,7 +212,7 @@ export async function PUT(request: NextRequest) {
       error: authError,
     } = await supabaseAuth.auth.getUser();
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -216,7 +223,7 @@ export async function PUT(request: NextRequest) {
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {

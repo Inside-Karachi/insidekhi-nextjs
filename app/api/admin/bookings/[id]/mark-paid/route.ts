@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { createNotification } from "@/lib/notifications/service";
 import crypto from "crypto";
 
@@ -66,16 +67,10 @@ export async function POST(
       );
     }
 
-    // Use regular client for auth check
-    const supabase = await createServerSupabase();
+    // Use regular client for auth check    // Check user is authenticated and is super_admin
+    const session = await getSessionFromCookies();
 
-    // Check user is authenticated and is super_admin
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
         { status: 401 },
@@ -83,10 +78,11 @@ export async function POST(
     }
 
     // Check super_admin role (only super_admin can mark as paid manually)
+    const supabase = await createServerSupabase();
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profile?.role !== "super_admin") {
@@ -118,7 +114,7 @@ export async function POST(
             },
             body: JSON.stringify({
               p_booking_id: bookingId,
-              p_admin_id: user.id,
+              p_admin_id: session.userId,
               p_signing_secret: signingSecret,
             }),
           },
@@ -409,7 +405,7 @@ export async function POST(
         booking_id: bookingId,
         old_status: booking.payment_status, // Use payment_status, not status
         new_status: "paid" as const, // This is booking_payment_status_enum
-        context: `Manually marked as paid by admin ${user.id}. ${passesCreated} tickets generated.`,
+        context: `Manually marked as paid by admin ${session.userId}. ${passesCreated} tickets generated.`,
       });
     } catch {
       // Ignore if history table doesn't exist or insert fails

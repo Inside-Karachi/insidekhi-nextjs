@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabase } from "@/lib/supabase/server";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { logAuditEvent } from "@/lib/audit";
 import {
   categoryUpdateSchema,
@@ -86,6 +87,7 @@ async function getUsageCount(
  * Update an existing category
  */
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
+    const supabase = await createServerSupabase();
   try {
     const { id } = await params;
     const categoryId = parseInt(id);
@@ -95,17 +97,10 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         { success: false, error: "Invalid category ID" },
         { status: 400 }
       );
-    }
+    }    // Verify authentication
+    const session = await getSessionFromCookies();
 
-    const supabase = await createServerSupabase();
-
-    // Verify authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -113,7 +108,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {
@@ -302,7 +297,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     // Log audit event
     await logAuditEvent({
-      admin_id: user.id,
+      admin_id: session.userId,
       action: "category_updated",
       entity_type: "category",
       entity_id: categoryId.toString(),
@@ -343,6 +338,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
  * Delete a category (with safety checks)
  */
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
+    const supabase = await createServerSupabase();
   try {
     const { id } = await params;
     const categoryId = parseInt(id);
@@ -352,17 +348,10 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
         { success: false, error: "Invalid category ID" },
         { status: 400 }
       );
-    }
+    }    // Verify authentication
+    const session = await getSessionFromCookies();
 
-    const supabase = await createServerSupabase();
-
-    // Verify authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -370,7 +359,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     const { data: profile, error: profileError } = await supabase
       .from("profiles")
       .select("role")
-      .eq("id", user.id)
+      .eq("id", session.userId)
       .single();
 
     if (profileError || !profile) {
@@ -458,7 +447,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     // Log audit event
     await logAuditEvent({
-      admin_id: user.id,
+      admin_id: session.userId,
       action: "category_deleted",
       entity_type: "category",
       entity_id: categoryId.toString(),

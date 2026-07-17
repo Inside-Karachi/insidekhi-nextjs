@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 
 // Pakistan phone number validation (supports various formats)
 function validatePakistanPhone(phone: string): boolean {
@@ -36,14 +37,12 @@ function validateUsername(username: string): boolean {
 
 export async function PUT(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const session = await getSessionFromCookies();
 
-    if (!user)
+    if (!session)
       return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
 
+    const userId = session.userId;
     const body = await request.json();
     const update: {
       full_name?: string | null;
@@ -94,14 +93,12 @@ export async function PUT(request: NextRequest) {
 
       // Check username uniqueness if provided
       if (trimmedUsername) {
-        const { data: existingUser } = await supabase
-          .from("profiles")
-          .select("id")
-          .ilike("username", trimmedUsername)
-          .neq("id", user.id)
-          .single();
+        const { rows: existingUsers } = await query(
+          "SELECT id FROM public.profiles WHERE LOWER(username) = LOWER($1) AND id != $2 LIMIT 1",
+          [trimmedUsername, userId]
+        );
 
-        if (existingUser) {
+        if (existingUsers.length > 0) {
           return NextResponse.json(
             {
               error: "validation_error",
@@ -135,17 +132,17 @@ export async function PUT(request: NextRequest) {
     // Validate and set membership_plan (only for business owners)
     if (typeof body.membership_plan === "string") {
       // First get current user profile to check role
-      const { data: currentProfile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
+      const { rows: roleRows } = await query(
+        "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+        [userId]
+      );
+      const currentProfileForRole = roleRows[0] as { role?: string } | undefined;
 
-      if (currentProfile?.role !== "business_owner") {
+      if (currentProfileForRole?.role !== "business_owner") {
         // Ignore membership_plan set attempts from non-business accounts to prevent errors
         console.warn(
           "Ignoring membership_plan update for non-business user",
-          user.id
+          userId
         );
       } else {
         const validPlans = ["basic", "premium", "enterprise"];
@@ -228,26 +225,30 @@ export async function PUT(request: NextRequest) {
     }
 
     // Get current profile data for logging
-    const { data: currentProfile, error: fetchError } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", user.id)
-      .single();
+    const { rows: currentRows } = await query(
+      "SELECT * FROM public.profiles WHERE id = $1 LIMIT 1",
+      [userId]
+    );
+    const currentProfile = currentRows[0] ?? null;
 
-    if (fetchError) {
-      console.error("Error fetching current profile:", fetchError);
+    // Build dynamic SET clause
+    const fields = Object.keys(update) as (keyof typeof update)[];
+    if (fields.length === 0) {
+      return NextResponse.json({ ok: true });
     }
+    const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(", ");
+    const values = fields.map((f) => update[f]);
 
-    const { error } = await supabase
-      .from("profiles")
-      .update(update)
-      .eq("id", user.id);
-
-    if (error) {
-      // Handle specific database errors
+    try {
+      await query(
+        `UPDATE public.profiles SET ${setClauses} WHERE id = $1`,
+        [userId, ...values]
+      );
+    } catch (dbError: unknown) {
+      const err = dbError as { code?: string; message?: string };
       if (
-        error.code === "23505" &&
-        error.message.includes("idx_profiles_username_unique")
+        err.code === "23505" &&
+        err.message?.includes("idx_profiles_username_unique")
       ) {
         return NextResponse.json(
           {
@@ -258,22 +259,22 @@ export async function PUT(request: NextRequest) {
           { status: 400 }
         );
       }
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: err.message }, { status: 500 });
     }
 
     // Get updated profile data for logging
-    const { data: updatedProfile } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", user.id)
-      .single();
+    const { rows: updatedRows } = await query(
+      "SELECT * FROM public.profiles WHERE id = $1 LIMIT 1",
+      [userId]
+    );
+    const updatedProfile = updatedRows[0] ?? null;
 
     // Log the profile update
     if (currentProfile && updatedProfile) {
       try {
         const { logProfileUpdate } = await import("@/lib/audit");
         await logProfileUpdate(
-          user.id,
+          userId,
           currentProfile,
           updatedProfile,
           request.headers.get("x-forwarded-for") ||
@@ -296,7 +297,7 @@ export async function PUT(request: NextRequest) {
       try {
         const { awardXP } = await import("@/lib/gamification");
         // This activity is set to 'once' in the DB, so awardXP handles duplication checks
-        await awardXP(user.id, "profile_complete");
+        await awardXP(userId, "profile_complete");
       } catch (xpError) {
         console.error("Failed to award profile_complete XP:", xpError);
       }
@@ -311,25 +312,22 @@ export async function PUT(request: NextRequest) {
 
 export async function GET(_request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const session = await getSessionFromCookies();
 
-    if (!user)
+    if (!session)
       return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
 
-    const { data, error } = await supabase
-      .from("profiles")
-      .select(
-        "id, full_name, avatar_url, username, phone, membership_plan, role, points, created_at, updated_at, organizer_bio, organizer_company, organizer_website"
-      )
-      .eq("id", user.id)
-      .single();
+    const { rows } = await query(
+      `SELECT id, full_name, avatar_url, username, phone, membership_plan, role, points,
+              created_at, updated_at, organizer_bio, organizer_company, organizer_website
+       FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId]
+    );
 
-    if (error)
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ profile: data });
+    if (!rows[0])
+      return NextResponse.json({ error: "Profile not found" }, { status: 404 });
+
+    return NextResponse.json({ profile: rows[0] });
   } catch (err) {
     console.error("Profile fetch error:", err);
     return NextResponse.json({ error: "unexpected_error" }, { status: 500 });

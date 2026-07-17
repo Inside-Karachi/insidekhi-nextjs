@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
@@ -83,6 +84,8 @@ export async function POST(
   request: NextRequest,
   props: { params: Promise<{ id: string }> },
 ) {
+  const session = await getSessionFromCookies();
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const { id } = await props.params;
     const submissionId = parseInt(id);
@@ -176,7 +179,7 @@ export async function POST(
          RETURNING *`,
         [
           submissionId,
-          user.id,
+          session.userId,
           replyType,
           replyText.trim(),
           emailSubject.trim(),

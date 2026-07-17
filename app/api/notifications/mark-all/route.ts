@@ -1,3 +1,4 @@
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextResponse } from "next/server";
 import { NextRequest } from "next/server";
 

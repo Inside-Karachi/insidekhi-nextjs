@@ -5,29 +5,23 @@ import { getOptionalMobileUser, requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePathId } from "@/lib/mobile/params";
 import { MobileApiError } from "@/lib/mobile/errors";
-import type { MobileSupabase } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Authoritative helpful count: the number of `helpful_reviews` rows for the
- * review. We compute it here rather than reading `reviews.helpful_count` because
- * that denormalized column is maintained by a SECURITY INVOKER trigger whose
- * `UPDATE reviews` is filtered by RLS when the voter is not the review owner -
- * so it does not reliably reflect votes.
+ * review. We compute it here rather than reading `reviews.helpful_count`
+ * because that denormalized column was maintained by a SECURITY INVOKER
+ * trigger scoped to `auth.uid()`, which never fires over a direct pg
+ * connection - so it no longer reflects votes.
  */
-async function helpfulCount(
-  supabase: MobileSupabase,
-  reviewId: number,
-): Promise<number> {
-  const { count, error } = await supabase
-    .from("helpful_reviews")
-    .select("review_id", { count: "exact", head: true })
-    .eq("review_id", reviewId);
-  if (error) {
-    console.error("[mobile-api] helpful count failed:", error.message);
-  }
-  return count ?? 0;
+async function helpfulCount(reviewId: number): Promise<number> {
+  const { rows } = await query(
+    `SELECT COUNT(*) FROM helpful_reviews WHERE review_id = $1`,
+    [reviewId],
+  );
+  return Number(rows[0]?.count ?? 0);
 }
 
 /**
@@ -39,32 +33,30 @@ async function helpfulCount(
 export const GET = mobileRoute(async (request: NextRequest, { params }) => {
   await enforceMobileRateLimit(request);
   const reviewId = parsePathId((await params).reviewId, "reviewId");
-  const { user, supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
 
   // Non-approved reviews are invisible (like comments/threads) - 404 rather than
   // disclosing that a pending/rejected review exists.
-  const { data: review } = await supabase
-    .from("reviews")
-    .select("id, status")
-    .eq("id", reviewId)
-    .maybeSingle();
+  const { rows: reviewRows } = await query(
+    `SELECT id, status FROM reviews WHERE id = $1`,
+    [reviewId],
+  );
+  const review = reviewRows[0];
   if (!review || review.status !== "approved") {
     throw new MobileApiError("not_found", "Review not found.", 404);
   }
 
   let userVoted = false;
   if (user) {
-    const { data: vote } = await supabase
-      .from("helpful_reviews")
-      .select("review_id")
-      .eq("review_id", reviewId)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    userVoted = vote != null;
+    const { rows: voteRows } = await query(
+      `SELECT 1 FROM helpful_reviews WHERE review_id = $1 AND user_id = $2`,
+      [reviewId, user.id],
+    );
+    userVoted = voteRows.length > 0;
   }
 
   return ok({
-    helpful_count: await helpfulCount(supabase, reviewId),
+    helpful_count: await helpfulCount(reviewId),
     user_voted: userVoted,
   });
 });
@@ -78,13 +70,13 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
 export const POST = mobileRoute(async (request: NextRequest, { params }) => {
   await enforceMobileRateLimit(request);
   const reviewId = parsePathId((await params).reviewId, "reviewId");
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
-  const { data: review } = await supabase
-    .from("reviews")
-    .select("id, user_id, status")
-    .eq("id", reviewId)
-    .maybeSingle();
+  const { rows: reviewRows } = await query(
+    `SELECT id, user_id, status FROM reviews WHERE id = $1`,
+    [reviewId],
+  );
+  const review = reviewRows[0];
   if (!review) {
     throw new MobileApiError("not_found", "Review not found.", 404);
   }
@@ -103,13 +95,11 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
     );
   }
 
-  const { data: existing } = await supabase
-    .from("helpful_reviews")
-    .select("review_id")
-    .eq("review_id", reviewId)
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (existing) {
+  const { rows: existingRows } = await query(
+    `SELECT 1 FROM helpful_reviews WHERE review_id = $1 AND user_id = $2`,
+    [reviewId, user.id],
+  );
+  if (existingRows.length > 0) {
     throw new MobileApiError(
       "already_voted",
       "You have already voted on this review.",
@@ -117,25 +107,28 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
     );
   }
 
-  const { error: insertError } = await supabase
-    .from("helpful_reviews")
-    .insert({ review_id: reviewId, user_id: user.id });
-  if (insertError) {
+  try {
+    await query(
+      `INSERT INTO helpful_reviews (review_id, user_id) VALUES ($1, $2)`,
+      [reviewId, user.id],
+    );
+  } catch (insertError) {
+    const pgError = insertError as { code?: string };
     // Unique-PK violation = a concurrent vote landed first; treat as already voted
     // (the pre-check above is a fast path, the PK is the real guard).
-    if (insertError.code === "23505") {
+    if (pgError.code === "23505") {
       throw new MobileApiError(
         "already_voted",
         "You have already voted on this review.",
         400,
       );
     }
-    console.error("[mobile-api] helpful insert failed:", insertError.message);
+    console.error("[mobile-api] helpful insert failed:", insertError);
     throw new MobileApiError("internal_error", "Failed to record vote.", 500);
   }
 
   return ok({
-    helpful_count: await helpfulCount(supabase, reviewId),
+    helpful_count: await helpfulCount(reviewId),
     user_voted: true,
   });
 });
@@ -148,20 +141,20 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
 export const DELETE = mobileRoute(async (request: NextRequest, { params }) => {
   await enforceMobileRateLimit(request);
   const reviewId = parsePathId((await params).reviewId, "reviewId");
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
-  const { error: deleteError } = await supabase
-    .from("helpful_reviews")
-    .delete()
-    .eq("review_id", reviewId)
-    .eq("user_id", user.id);
-  if (deleteError) {
-    console.error("[mobile-api] helpful delete failed:", deleteError.message);
+  try {
+    await query(
+      `DELETE FROM helpful_reviews WHERE review_id = $1 AND user_id = $2`,
+      [reviewId, user.id],
+    );
+  } catch (error) {
+    console.error("[mobile-api] helpful delete failed:", error);
     throw new MobileApiError("internal_error", "Failed to remove vote.", 500);
   }
 
   return ok({
-    helpful_count: await helpfulCount(supabase, reviewId),
+    helpful_count: await helpfulCount(reviewId),
     user_voted: false,
   });
 });

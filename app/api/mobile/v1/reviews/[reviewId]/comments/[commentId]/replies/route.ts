@@ -7,31 +7,43 @@ import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePagination } from "@/lib/mobile/pagination";
 import { parsePathId } from "@/lib/mobile/params";
 import { MobileApiError } from "@/lib/mobile/errors";
-import {
-  COMMENT_COLUMNS,
-  toComment,
-  type CommentRowLike,
-} from "@/lib/mobile/mappers";
-import type { MobileSupabase } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
+import { toComment, type CommentRowLike } from "@/lib/mobile/mappers";
 
 export const dynamic = "force-dynamic";
+
+const COMMENT_SQL_COLUMNS =
+  "c.id, c.review_id, c.user_id, c.parent_id, c.content, c.status, " +
+  "to_json(c.created_at) #>> '{}' AS created_at, " +
+  "to_json(c.updated_at) #>> '{}' AS updated_at, " +
+  "CASE WHEN p.id IS NOT NULL " +
+  "THEN json_build_object('username', p.username, 'avatar_url', p.avatar_url) " +
+  "ELSE NULL END AS profiles";
+
+const COMMENT_FROM_JOIN =
+  "FROM review_comments c LEFT JOIN profiles p ON p.id = c.user_id";
+
+function toNumericCommentRow(row: Record<string, unknown>): CommentRowLike {
+  return {
+    ...row,
+    id: Number(row.id),
+    review_id: Number(row.review_id),
+    parent_id: row.parent_id !== null ? Number(row.parent_id) : null,
+  } as unknown as CommentRowLike;
+}
 
 /** The parent must be an approved, top-level comment on this review (replies are
  * single-level - you cannot reply to a reply). Throws 404 otherwise. */
 async function assertApprovedParent(
-  supabase: MobileSupabase,
   reviewId: number,
   commentId: number,
 ): Promise<void> {
-  const { data } = await supabase
-    .from("review_comments")
-    .select("id")
-    .eq("id", commentId)
-    .eq("review_id", reviewId)
-    .is("parent_id", null)
-    .eq("status", "approved")
-    .maybeSingle();
-  if (!data) {
+  const { rows } = await query(
+    `SELECT id FROM review_comments
+     WHERE id = $1 AND review_id = $2 AND parent_id IS NULL AND status = 'approved'`,
+    [commentId, reviewId],
+  );
+  if (!rows[0]) {
     throw new MobileApiError("not_found", "Parent comment not found.", 404);
   }
 }
@@ -52,25 +64,36 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
     maxLimit: 50,
   });
 
-  const { user, supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
   const currentUserId = user?.id ?? null;
-  await assertApprovedParent(supabase, reviewId, commentId);
+  await assertApprovedParent(reviewId, commentId);
 
-  const { data, count, error } = await supabase
-    .from("review_comments")
-    .select(COMMENT_COLUMNS, { count: "exact" })
-    .eq("parent_id", commentId)
-    .eq("status", "approved")
-    .order("created_at", { ascending: true })
-    .returns<CommentRowLike[]>()
-    .range(offset, offset + limit - 1);
-  if (error) {
-    console.error("[mobile-api] replies query failed:", error.message);
+  let rows: Record<string, unknown>[];
+  let total: number;
+  try {
+    const [rowsRes, countRes] = await Promise.all([
+      query(
+        `SELECT ${COMMENT_SQL_COLUMNS} ${COMMENT_FROM_JOIN}
+         WHERE c.parent_id = $1 AND c.status = 'approved'
+         ORDER BY c.created_at ASC
+         LIMIT $2 OFFSET $3`,
+        [commentId, limit, offset],
+      ),
+      query(
+        `SELECT COUNT(*) FROM review_comments WHERE parent_id = $1 AND status = 'approved'`,
+        [commentId],
+      ),
+    ]);
+    rows = rowsRes.rows;
+    total = Number(countRes.rows[0]?.count ?? 0);
+  } catch (error) {
+    console.error("[mobile-api] replies query failed:", error);
     throw new MobileApiError("internal_error", "Failed to load replies.", 500);
   }
 
-  const replies = (data ?? []).map((r) => toComment(r, currentUserId));
-  const total = count ?? 0;
+  const replies = rows
+    .map(toNumericCommentRow)
+    .map((r) => toComment(r, currentUserId));
   return ok(replies, {
     pagination: {
       total,
@@ -95,7 +118,7 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
   const p = await params;
   const reviewId = parsePathId(p.reviewId, "reviewId");
   const commentId = parsePathId(p.commentId, "commentId");
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
   const parsed = createReplySchema.safeParse(await request.json());
   if (!parsed.success) {
@@ -107,22 +130,24 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
     );
   }
 
-  await assertApprovedParent(supabase, reviewId, commentId);
+  await assertApprovedParent(reviewId, commentId);
 
-  const { data: created, error } = await supabase
-    .from("review_comments")
-    .insert({
-      review_id: reviewId,
-      user_id: user.id,
-      parent_id: commentId,
-      content: parsed.data.content,
-      status: "pending",
-    })
-    .select(COMMENT_COLUMNS)
-    .returns<CommentRowLike[]>()
-    .single();
-  if (error || !created) {
-    console.error("[mobile-api] reply insert failed:", error?.message);
+  let created: CommentRowLike;
+  try {
+    const { rows } = await query(
+      `WITH inserted AS (
+         INSERT INTO review_comments (review_id, user_id, parent_id, content, status)
+         VALUES ($1, $2, $3, $4, 'pending')
+         RETURNING *
+       )
+       SELECT ${COMMENT_SQL_COLUMNS}
+       FROM inserted c
+       LEFT JOIN profiles p ON p.id = c.user_id`,
+      [reviewId, user.id, commentId, parsed.data.content],
+    );
+    created = toNumericCommentRow(rows[0]);
+  } catch (error) {
+    console.error("[mobile-api] reply insert failed:", error);
     throw new MobileApiError("internal_error", "Failed to create reply.", 500);
   }
 

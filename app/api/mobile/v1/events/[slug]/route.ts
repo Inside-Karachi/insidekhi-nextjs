@@ -1,13 +1,10 @@
 import { type NextRequest } from "next/server";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
-import { createMobilePublicClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 import {
-  EVENT_CARD_COLUMNS,
-  EVENT_IMAGE_COLUMNS,
-  TICKET_TYPE_COLUMNS,
   toEventCard,
   toEventImage,
   toTicketType,
@@ -19,6 +16,19 @@ import {
 export const dynamic = "force-dynamic";
 
 const MAX_EVENT_IMAGES = 20;
+
+const EVENT_CARD_SQL_COLUMNS =
+  "event_id, event_name, event_slug, event_description, event_status, " +
+  "to_json(start_time) #>> '{}' AS start_time, " +
+  "to_json(end_time) #>> '{}' AS end_time, " +
+  "is_featured, organizer_name, organizer_avatar, location_name, address, latitude, longitude";
+
+const EVENT_IMAGE_SQL_COLUMNS = "id, url, alt_text, display_order";
+
+const TICKET_TYPE_SQL_COLUMNS =
+  "id, name, price, quantity_available, " +
+  "to_json(sale_starts_at) #>> '{}' AS sale_starts_at, " +
+  "to_json(sale_ends_at) #>> '{}' AS sale_ends_at";
 
 /**
  * GET /api/mobile/v1/events/{slug}
@@ -33,42 +43,51 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
   await enforceMobileRateLimit(request);
 
   const { slug } = await params;
-  const supabase = createMobilePublicClient();
 
-  const { data: eventRow, error: eventError } = await supabase
-    .from("events_with_details")
-    .select(EVENT_CARD_COLUMNS)
-    .eq("event_slug", slug)
-    .eq("event_status", "published")
-    .returns<EventCardRow[]>()
-    .maybeSingle();
+  const { rows: eventRows } = await query(
+    `SELECT ${EVENT_CARD_SQL_COLUMNS} FROM events_with_details
+     WHERE event_slug = $1 AND event_status = 'published'`,
+    [slug],
+  );
+  const eventRow = eventRows[0];
 
-  if (eventError || !eventRow || eventRow.event_id == null) {
+  if (!eventRow || eventRow.event_id == null) {
     throw new MobileApiError("not_found", "Event not found.", 404);
   }
 
-  const eventId = eventRow.event_id;
+  const eventId = Number(eventRow.event_id);
 
   const [imagesRes, ticketsRes] = await Promise.all([
-    supabase
-      .from("event_images")
-      .select(EVENT_IMAGE_COLUMNS)
-      .eq("event_id", eventId)
-      .order("display_order", { ascending: true })
-      .limit(MAX_EVENT_IMAGES)
-      .returns<EventImageRow[]>(),
-    supabase
-      .from("ticket_types")
-      .select(TICKET_TYPE_COLUMNS)
-      .eq("event_id", eventId)
-      .order("price", { ascending: true })
-      .order("id", { ascending: true })
-      .returns<TicketTypeRow[]>(),
+    query(
+      `SELECT ${EVENT_IMAGE_SQL_COLUMNS} FROM event_images
+       WHERE event_id = $1 ORDER BY display_order ASC LIMIT $2`,
+      [eventId, MAX_EVENT_IMAGES],
+    ),
+    query(
+      `SELECT ${TICKET_TYPE_SQL_COLUMNS} FROM ticket_types
+       WHERE event_id = $1 ORDER BY price ASC, id ASC`,
+      [eventId],
+    ),
   ]);
 
+  const images = imagesRes.rows.map(
+    (row) => ({ ...row, id: Number(row.id) }) as unknown as EventImageRow,
+  );
+  const tickets = ticketsRes.rows.map(
+    (row) =>
+      ({
+        ...row,
+        id: Number(row.id),
+        price: row.price !== null ? Number(row.price) : null,
+      }) as unknown as TicketTypeRow,
+  );
+
   return ok({
-    event: toEventCard(eventRow),
-    images: (imagesRes.data ?? []).map(toEventImage),
-    ticket_types: (ticketsRes.data ?? []).map(toTicketType),
+    event: toEventCard({
+      ...eventRow,
+      event_id: eventId,
+    } as unknown as EventCardRow),
+    images: images.map(toEventImage),
+    ticket_types: tickets.map(toTicketType),
   });
 });

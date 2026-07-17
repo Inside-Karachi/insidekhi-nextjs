@@ -396,7 +396,7 @@ export default async function ListingsPage({
         if (!imagesMap[listingId]) {
           imagesMap[listingId] = [];
         }
-        imagesMap[listingId]!.push(img as ListingWithImages["images"][number]);
+        imagesMap[listingId]!.push(img as NonNullable<ListingWithImages["images"]>[number]);
       });
     }
   }

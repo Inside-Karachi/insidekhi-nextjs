@@ -8,6 +8,7 @@ import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions"
  */
 export async function GET(request: NextRequest) {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const supabase = (await createServerSupabase()) as any;
 
     // Get optional authenticated user to show their progress
@@ -29,6 +30,7 @@ export async function GET(request: NextRequest) {
 
     if (!session?.userId) {
       // Return challenges without progress for unauthenticated users
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const challengesWithProgress = challenges.map((c: any) => ({
         ...c,
         user_progress: {
@@ -52,7 +54,9 @@ export async function GET(request: NextRequest) {
     }
 
     // Map progress to challenges
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const progressMap = new Map(progress.map((p: any) => [p.challenge_id, p]));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const challengesWithProgress = challenges.map((challenge: any) => {
       const userProgress = progressMap.get(challenge.id) || {
         current_count: 0,
@@ -65,7 +69,7 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json({ success: true, challenges: challengesWithProgress });
-  } catch (error: any) {
+  } catch (error) {
     console.error("GET challenges error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -79,6 +83,7 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const supabase = (await createServerSupabase({ useServiceRole: true })) as any;
 
     // Get authenticated user
@@ -153,6 +158,7 @@ export async function POST(request: NextRequest) {
     try {
       const { logAuditEvent } = await import("@/lib/audit");
       await logAuditEvent({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         action: "create_challenge" as any,
         user_id: session.userId,
         entity_type: "xp_challenge",

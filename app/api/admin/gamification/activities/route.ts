@@ -74,12 +74,12 @@ export async function GET(_request: NextRequest) {
 
     if (error) throw error;
     return NextResponse.json({ success: true, activities });
-  } catch (error: any) {
+  } catch (error) {
     console.error("GET activities error:", error);
     return NextResponse.json(
       {
         success: false,
-        error: error.message || "Failed to fetch activities",
+        error: error instanceof Error ? error.message : "Failed to fetch activities",
       },
       { status: 500 }
     );
@@ -153,6 +153,7 @@ export async function POST(request: NextRequest) {
     try {
       const { logAuditEvent } = await import("@/lib/audit");
       await logAuditEvent({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         action: "create_xp_activity" as any,
         user_id: session.userId,
         entity_type: "xp_activity",
@@ -164,10 +165,10 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({ success: true, activity });
-  } catch (error: any) {
+  } catch (error) {
     console.error("POST activity error:", error);
     return NextResponse.json(
-      { success: false, error: error.message || "Failed to create activity" },
+      { success: false, error: error instanceof Error ? error.message : "Failed to create activity" },
       { status: 500 }
     );
   }
@@ -250,6 +251,7 @@ export async function PUT(request: NextRequest) {
     try {
       const { logAuditEvent } = await import("@/lib/audit");
       await logAuditEvent({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         action: "update_xp_activity" as any,
         user_id: session.userId,
         entity_type: "xp_activity",
@@ -262,10 +264,10 @@ export async function PUT(request: NextRequest) {
     }
 
     return NextResponse.json({ success: true, activity });
-  } catch (error: any) {
+  } catch (error) {
     console.error("PUT activity error:", error);
     return NextResponse.json(
-      { success: false, error: error.message || "Failed to update activity" },
+      { success: false, error: error instanceof Error ? error.message : "Failed to update activity" },
       { status: 500 }
     );
   }

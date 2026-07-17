@@ -3,7 +3,7 @@ import { TrendingEventsSection } from "@/components/homepage/TrendingEventsSecti
 import { formatEventDate } from "@/lib/utils/date-utils";
 
 export async function TrendingEventsContainer() {
-  let upcomingEventRows;
+  let upcomingEventRows: Record<string, unknown>[] | undefined;
   try {
     const res = await query(
       `SELECT 
@@ -22,7 +22,7 @@ export async function TrendingEventsContainer() {
       [new Date().toISOString()]
     );
     upcomingEventRows = res.rows;
-  } catch (eventsError: any) {
+  } catch (eventsError) {
     console.error("Error fetching trending events", eventsError);
     return null;
   }
@@ -36,7 +36,7 @@ export async function TrendingEventsContainer() {
         acc.push(event);
         return acc;
       },
-      [] as any[],
+      [] as Record<string, unknown>[],
     ) || [];
 
   const eventIds = uniqueUpcomingEventRows
@@ -83,11 +83,11 @@ export async function TrendingEventsContainer() {
           id: event.event_id,
           name: event.event_name,
           slug: event.event_slug,
-          description: event.event_description,
+          description: (event.event_description as string | null) ?? null,
           start_time: event.start_time,
           end_time: event.end_time,
-          listing_name: event.location_name,
-          listing_address: event.address,
+          listing_name: (event.location_name as string | null) ?? null,
+          listing_address: (event.address as string | null) ?? null,
           ticket_types: ticketTypesByEvent.get(event.event_id) || [],
           formatted_date: formatEventDate(event.start_time),
         };

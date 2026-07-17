@@ -1,4 +1,3 @@
-"use client";
 import { type NextRequest } from "next/server";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
@@ -94,8 +93,8 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   try {
     const uploadResult = await uploadFile(path, webp, { bucket: BUCKET, contentType: "image/webp" });
     avatarUrl = uploadResult.publicUrl;
-  } catch (upErr: any) {
-    console.error("[mobile-api] avatar upload failed:", upErr.message || upErr);
+  } catch (upErr: unknown) {
+    console.error("[mobile-api] avatar upload failed:", upErr instanceof Error ? upErr.message : upErr);
     throw new MobileApiError("internal_error", "Failed to upload avatar.", 500);
   }
 
@@ -104,13 +103,13 @@ export const POST = mobileRoute(async (request: NextRequest) => {
       "UPDATE public.profiles SET avatar_url = $1 WHERE id = $2",
       [avatarUrl, user.id]
     );
-  } catch (updErr: any) {
+  } catch (updErr: unknown) {
     try {
       await deleteFile(path, BUCKET);
-    } catch (rmErr: any) {
-      console.error("[mobile-api] avatar cleanup failed:", rmErr.message || rmErr, path);
+    } catch (rmErr: unknown) {
+      console.error("[mobile-api] avatar cleanup failed:", rmErr instanceof Error ? rmErr.message : rmErr, path);
     }
-    console.error("[mobile-api] avatar profile update failed:", updErr.message || updErr);
+    console.error("[mobile-api] avatar profile update failed:", updErr instanceof Error ? updErr.message : updErr);
     throw new MobileApiError("internal_error", "Failed to save avatar.", 500);
   }
 

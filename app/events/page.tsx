@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { EventsHero } from "@/components/events/EventsHero";
 import { FeaturedEventsPreview } from "@/components/events/FeaturedEventsPreview";
 import { EventsContent } from "@/components/events/EventsContent";
@@ -18,59 +18,49 @@ interface EventsPageProps {
 }
 
 export default async function EventsPage({ searchParams }: EventsPageProps) {
-  const supabase = await createServerSupabase({ publicAnon: true });
   const params = await searchParams;
+  const nowIso = new Date().toISOString();
 
-  // Build the query based on search parameters
-  // Attempt to fetch featured events first (view exposes event_is_featured/event_featured_rank)
-  const featuredQueryBase = supabase
-    .from("events_with_details")
-    .select("*")
-    .eq("event_status", "published")
-    .gte("start_time", new Date().toISOString());
-
+  // Attempt to fetch featured events first (view exposes is_featured/featured_rank)
   let featuredRows: EventWithDetails[] = [];
   try {
-    const { data: featuredData } = await featuredQueryBase
-      .eq("is_featured", true)
-      .order("featured_rank", { ascending: false })
-      .order("event_id", { ascending: true }); // Deterministic tie-breaker
-    featuredRows = (featuredData || []) as EventWithDetails[];
+    const { rows } = await query(
+      `SELECT * FROM events_with_details
+       WHERE event_status = 'published' AND start_time >= $1 AND is_featured = true
+       ORDER BY featured_rank DESC NULLS LAST, event_id ASC`,
+      [nowIso],
+    );
+    featuredRows = rows as EventWithDetails[];
   } catch {
     // If the view or fields are not available, keep featuredRows empty (no fallback to top items)
     featuredRows = [];
   }
 
   // Build main events query; exclude any featured IDs if we have them
-  let query = supabase
-    .from("events_with_details")
-    .select("*")
-    .eq("event_status", "published")
-    .gte("start_time", new Date().toISOString())
-    .order("start_time", { ascending: true })
-    .order("event_id", { ascending: true }); // Deterministic tie-breaker
+  const whereClauses = ["event_status = 'published'", "start_time >= $1"];
+  const queryParams: unknown[] = [nowIso];
 
-  // We'll exclude featured IDs below after mapping featuredRows -> featuredEvents
-
-  // Apply filters
   if (params.search) {
     const term = sanitizeSearchTerm(params.search);
     if (term) {
-      query = query.ilike("event_name", `%${term}%`);
+      queryParams.push(`%${term}%`);
+      whereClauses.push(`event_name ILIKE $${queryParams.length}`);
     }
   }
 
   if (params.location) {
-    query = query.ilike("address", `%${params.location}%`);
+    queryParams.push(`%${params.location}%`);
+    whereClauses.push(`address ILIKE $${queryParams.length}`);
   }
 
   if (params.date) {
     const filterDate = new Date(params.date);
     if (!isNaN(filterDate.getTime())) {
       const nextDay = new Date(filterDate.getTime() + 24 * 60 * 60 * 1000);
-      query = query
-        .gte("start_time", filterDate.toISOString())
-        .lt("start_time", nextDay.toISOString());
+      queryParams.push(filterDate.toISOString());
+      whereClauses.push(`start_time >= $${queryParams.length}`);
+      queryParams.push(nextDay.toISOString());
+      whereClauses.push(`start_time < $${queryParams.length}`);
     }
   }
 
@@ -90,43 +80,55 @@ export default async function EventsPage({ searchParams }: EventsPageProps) {
     const keywords = categoryKeywords[params.category];
     if (keywords) {
       const orClauses = keywords
-        .map((kw) => `event_name.ilike.%${kw}%,event_description.ilike.%${kw}%`)
-        .join(",");
-      query = query.or(orClauses);
+        .map((kw) => {
+          queryParams.push(`%${kw}%`);
+          const nameParam = queryParams.length;
+          queryParams.push(`%${kw}%`);
+          const descParam = queryParams.length;
+          return `event_name ILIKE $${nameParam} OR event_description ILIKE $${descParam}`;
+        })
+        .join(" OR ");
+      whereClauses.push(`(${orClauses})`);
     }
   }
 
-  const { data: eventsData } = await query.limit(200);
+  const whereSql = whereClauses.join(" AND ");
+  const { rows: eventsData } = await query(
+    `SELECT * FROM events_with_details
+     WHERE ${whereSql}
+     ORDER BY start_time ASC, event_id ASC
+     LIMIT 200`,
+    queryParams,
+  );
 
   // If we have events, fetch their images and attach to each event
   const eventIds = (eventsData || [])
     .map((r: EventWithDetails) => r.event_id)
     .filter(Boolean) as number[];
   // Fetch only primary (or display_order = 1) images for the event IDs to reduce payload
-  const allEventImagesResponse =
-    eventIds.length > 0
-      ? await supabase
-          .from("event_images")
-          .select("*")
-          .in("event_id", eventIds)
-          .or("is_primary.eq.true,display_order.eq.1")
-          .order("display_order", { ascending: true })
-      : { data: [] as EventImage[] };
-
-  const allEventImages: EventImage[] = (allEventImagesResponse.data ||
-    []) as EventImage[];
+  let allEventImages: EventImage[] = [];
+  if (eventIds.length > 0) {
+    const { rows: imageRows } = await query(
+      `SELECT * FROM event_images
+       WHERE event_id = ANY($1) AND (is_primary = true OR display_order = 1)
+       ORDER BY display_order ASC`,
+      [eventIds],
+    );
+    allEventImages = imageRows as EventImage[];
+  }
 
   // Build a map of event_id -> first image (primary or first by display_order)
   const primaryImageByEvent = new Map<number, EventImage>();
   for (const img of allEventImages) {
-    if (!primaryImageByEvent.has(img.event_id)) {
-      primaryImageByEvent.set(img.event_id, img);
+    const imgEventId = Number(img.event_id);
+    if (!primaryImageByEvent.has(imgEventId)) {
+      primaryImageByEvent.set(imgEventId, img);
     }
   }
 
   // Helper to map DB row to Event (attach only primary image)
   const mapRowToEvent = (row: EventWithDetails): Event => {
-    const eid = row.event_id!;
+    const eid = Number(row.event_id);
     return {
       id: eid,
       name: row.event_name!,

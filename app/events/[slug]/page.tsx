@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { notFound } from "next/navigation";
 import { EventHero } from "@/components/events/EventHero";
 import { EventOrganizer } from "@/components/events/EventOrganizer";
@@ -31,21 +31,20 @@ export default async function EventPage({
 }: {
   params: Promise<{ slug: string }>;
 }) {
-  const supabase = await createServerSupabase({ publicAnon: true });
   const { slug } = await params;
 
   // Query the events view - Critical Data
-  const { data: eventRow } = await supabase
-    .from("events_with_details")
-    .select("*")
-    .eq("event_slug", slug)
-    .single();
+  const { rows: eventRows } = await query(
+    `SELECT * FROM events_with_details WHERE event_slug = $1 LIMIT 1`,
+    [slug],
+  );
+  const eventRow = eventRows[0];
 
   if (!eventRow) notFound();
 
   // Map event row to our Event type
   const event: Event = {
-    id: eventRow.event_id!,
+    id: Number(eventRow.event_id),
     name: eventRow.event_name!,
     slug: eventRow.event_slug!,
     description: eventRow.event_description,
@@ -62,13 +61,11 @@ export default async function EventPage({
   };
 
   // Fetch images for THIS event immediately as they are part of the critical hero/gallery
-  const { data: eventImagesData } = await supabase
-    .from("event_images")
-    .select("*")
-    .eq("event_id", event.id)
-    .order("display_order", { ascending: true });
+  const { rows: eventImagesData } = await query(
+    `SELECT * FROM event_images WHERE event_id = $1 ORDER BY display_order ASC`,
+    [event.id],
+  );
 
-  // Explicitly cast to prevent type errors with nulls from Supabase
   const eventImages = (eventImagesData || []) as EventImage[];
 
   // Get hero images from event_images table
@@ -219,21 +216,13 @@ export async function generateMetadata({
 }: {
   params: Promise<{ slug: string }>;
 }) {
-  // Use createClient at build time (no cookies needed for public data)
-  const { createClient } = await import("@supabase/supabase-js");
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-  );
-
   const { slug } = await params;
 
-  const { data: eventRow } = await supabase
-    .from("events_with_details")
-    .select("event_name, event_description")
-    .eq("event_slug", slug)
-    .single();
+  const { rows } = await query(
+    `SELECT event_name, event_description FROM events_with_details WHERE event_slug = $1 LIMIT 1`,
+    [slug],
+  );
+  const eventRow = rows[0];
 
   if (!eventRow) {
     return {

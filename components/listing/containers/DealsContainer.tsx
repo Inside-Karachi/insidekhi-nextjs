@@ -1,5 +1,5 @@
 
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { Deals } from "@/components/listing/Deals";
 
 interface DealsContainerProps {
@@ -11,24 +11,23 @@ export async function DealsContainer({
     listingId,
     businessName,
 }: DealsContainerProps) {
-    const supabase = await createServerSupabase({ publicAnon: true });
-
-    const { data: deals, error } = await supabase
-        .from("deals")
-        .select(
-            `
-      *,
-      banks(name, logo_url)
-    `
-        )
-        .eq("listing_id", listingId)
-        .eq("is_active", true)
-        // Show deals that either have no end date (open-ended) OR expire in the future
-        .or(`end_date.is.null,end_date.gte.${new Date().toISOString()}`)
-        .order("created_at", { ascending: false });
-
-    if (error) {
-        console.error("[DealsContainer] Supabase error:", error);
+    let deals;
+    try {
+        const { rows } = await query(
+            `SELECT d.*,
+                    b.name AS bank_name,
+                    b.logo_url AS bank_logo_url
+             FROM deals d
+             LEFT JOIN banks b ON b.id = d.bank_id
+             WHERE d.listing_id = $1
+               AND d.is_active = true
+               AND (d.end_date IS NULL OR d.end_date >= $2)
+             ORDER BY d.created_at DESC`,
+            [listingId, new Date().toISOString()],
+        );
+        deals = rows;
+    } catch (error) {
+        console.error("[DealsContainer] query error:", error);
         return null;
     }
 
@@ -40,7 +39,9 @@ export async function DealsContainer({
     const serializedDeals = deals.map((deal) => ({
         ...deal,
         // Ensure banks is null instead of undefined for proper serialization
-        banks: deal.banks || null,
+        banks: deal.bank_name
+            ? { name: deal.bank_name, logo_url: deal.bank_logo_url }
+            : null,
         // Ensure description is string or null (not undefined)
         description: deal.description || null,
     }));

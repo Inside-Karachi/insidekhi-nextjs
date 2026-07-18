@@ -99,7 +99,7 @@ export async function POST(
       booking: {
         id: booking.id,
         booking_reference: booking.booking_reference,
-        total_amount: booking.total_amount,
+        total_amount: Number(booking.total_amount),
         customer_name: booking.customer_name,
         customer_email: booking.customer_email,
         customer_phone: booking.customer_phone,

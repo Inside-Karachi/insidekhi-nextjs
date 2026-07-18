@@ -69,10 +69,16 @@ export async function POST(request: NextRequest) {
     let subtotal = 0;
     const verifiedItems = items.map(
       (item: { ticketTypeId: number; quantity: number }) => {
-        const tt = ticketTypes.find((t) => t.id === item.ticketTypeId);
+        // node-pg returns bigint/numeric columns as strings, so this must
+        // compare numerically rather than with strict === against the
+        // client-supplied number.
+        const tt = ticketTypes.find(
+          (t) => Number(t.id) === Number(item.ticketTypeId),
+        );
         if (!tt) throw new Error(`Invalid ticket type: ${item.ticketTypeId}`);
-        subtotal += tt.price * item.quantity;
-        return { ...item, price: tt.price, eventId: tt.event_id };
+        const price = Number(tt.price);
+        subtotal += price * item.quantity;
+        return { ...item, price, eventId: Number(tt.event_id) };
       },
     );
 

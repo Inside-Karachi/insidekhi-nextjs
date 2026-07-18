@@ -37,7 +37,12 @@ export async function GET(
       }
     }
 
-    return NextResponse.json(booking);
+    // node-pg returns numeric columns as strings - normalize before sending
+    // to the client, which does arithmetic (e.g. amount.toFixed(2)) on this.
+    return NextResponse.json({
+      ...booking,
+      total_amount: Number(booking.total_amount),
+    });
   } catch (error) {
     console.error("Error fetching booking:", error);
     return NextResponse.json(

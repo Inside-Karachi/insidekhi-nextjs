@@ -58,6 +58,7 @@ if (process.env.NODE_ENV !== "production") {
 const RETRYABLE_ERROR_PATTERNS = [
   "timeout exceeded when trying to connect",
   "Connection terminated due to connection timeout",
+  "Connection terminated unexpectedly",
   "ECONNRESET",
   "EAI_AGAIN",
 ];

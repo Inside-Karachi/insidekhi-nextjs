@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { FavoriteListing, FavoritesStore } from "@/types/favorites.types";
 import { useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
 
 // Zustand store for global favorites state
 export const useFavoritesStore = create<FavoritesStore>((set) => ({
@@ -68,7 +67,6 @@ export function useFavoritesRealtime(userId: string | null) {
       return;
     }
 
-    const supabase = createClient();
     const currentUserId = useFavoritesStore.getState().currentUserId;
     const initialized = useFavoritesStore.getState().initialized;
     const loading = useFavoritesStore.getState().loading;
@@ -86,25 +84,16 @@ export function useFavoritesRealtime(userId: string | null) {
       // Snapshot userId before async operation to detect user context changes
       const currentUserId = userId;
       try {
-        const { data: favorites, error } = await supabase
-          .from("favorite_listings")
-          .select(
-            `created_at, listings:listings_with_details!inner(*, listing_images!fkey_listing_images_listing_id(url, alt_text, is_primary, display_order))`
-          )
-          .eq("user_id", userId)
-          .order("created_at", { ascending: false });
+        const res = await fetch("/api/favorites/list");
+        const data = await res.json();
 
-        if (error) {
-          console.error("Failed to load favorites:", error);
-          setError(error.message);
+        if (!res.ok) {
+          console.error("Failed to load favorites:", data.error);
+          setError(data.error ?? "Failed to load favorites");
           return;
         }
 
-        const favoriteListings: FavoriteListing[] =
-          favorites?.map((fav) => ({
-            ...fav.listings,
-            favorited_at: fav.created_at,
-          })) || [];
+        const favoriteListings: FavoriteListing[] = data.favorites ?? [];
 
         // Only commit if the user hasn't changed since the fetch started
         if (useFavoritesStore.getState().currentUserId === currentUserId) {

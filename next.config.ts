@@ -79,6 +79,18 @@ const nextConfig: NextConfig = (() => {
       pathname: "/**",
     },
     {
+      protocol: "https",
+      hostname: "insidekhi.sgp1.digitaloceanspaces.com",
+      port: "",
+      pathname: "/**",
+    },
+    {
+      protocol: "https",
+      hostname: "*.digitaloceanspaces.com",
+      port: "",
+      pathname: "/**",
+    },
+    {
       // TEMP: legacy Supabase-hosted images not yet migrated to DO Spaces.
       // Remove once all listing image URLs point to DO.
       protocol: "https",

@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { ReviewsContainerClient } from "./ReviewsContainerClient";
 
 interface ReviewsContainerProps {
@@ -10,69 +10,81 @@ export async function ReviewsContainer({
   listingId,
   listingName,
 }: ReviewsContainerProps) {
-  const supabase = await createServerSupabase({ publicAnon: true });
-
   // Fetch branches for this listing
-  const { data: branches } = await supabase
-    .from("listing_branches")
-    .select("id, name")
-    .eq("listing_id", listingId)
-    .order("is_primary", { ascending: false });
+  const { rows: branchRows } = await query(
+    `SELECT id, name FROM listing_branches
+     WHERE listing_id = $1
+     ORDER BY is_primary DESC`,
+    [listingId],
+  );
 
-  if (!branches || branches.length === 0) {
+  if (!branchRows || branchRows.length === 0) {
     return null; // No branches = no reviews section
   }
 
-  // Fetch all approved reviews for all branches of this listing
-  const { data: reviewsData } = await supabase
-    .from("reviews")
-    .select(
-      `
-      *,
-      helpful_count,
-      profiles!user_id(full_name, avatar_url),
-      review_images(id, image_url, created_at)
-    `,
-    )
-    .eq("listing_id", listingId)
-    .eq("status", "approved")
-    .order("created_at", { ascending: false });
+  // node-pg returns bigint id columns as strings.
+  const branches = branchRows.map((b) => ({ ...b, id: Number(b.id) }));
 
-  // Type cast to include branch_id (will be added after migration)
-  const reviews = (reviewsData || []) as Array<{
-    id: number;
-    user_id: string;
-    listing_id: number;
-    branch_id: number;
-    rating: number;
-    comment: string | null;
-    created_at: string;
-    status: string | null;
-    helpful_count: number | null;
-    profiles: {
-      full_name: string | null;
-      avatar_url: string | null;
-    } | null;
-  }>;
+  // Fetch all approved reviews for all branches of this listing
+  const { rows: reviewRows } = await query(
+    `SELECT r.*, p.full_name, p.avatar_url
+     FROM reviews r
+     LEFT JOIN profiles p ON p.id = r.user_id
+     WHERE r.listing_id = $1 AND r.status = 'approved'
+     ORDER BY r.created_at DESC`,
+    [listingId],
+  );
+
+  const reviewIds = reviewRows.map((r) => Number(r.id));
+  let imagesByReview = new Map<number, Array<{ id: number; image_url: string; created_at: string }>>();
+  if (reviewIds.length > 0) {
+    const { rows: imageRows } = await query(
+      `SELECT id, review_id, image_url, created_at
+       FROM review_images WHERE review_id = ANY($1)`,
+      [reviewIds],
+    );
+    imagesByReview = new Map();
+    for (const img of imageRows) {
+      const reviewId = Number(img.review_id);
+      const list = imagesByReview.get(reviewId) ?? [];
+      list.push({
+        id: Number(img.id),
+        image_url: img.image_url,
+        created_at: img.created_at,
+      });
+      imagesByReview.set(reviewId, list);
+    }
+  }
+
+  const reviews = reviewRows.map((r) => ({
+    ...r,
+    id: Number(r.id),
+    listing_id: Number(r.listing_id),
+    branch_id: r.branch_id !== null ? Number(r.branch_id) : null,
+    rating: Number(r.rating),
+    helpful_count: r.helpful_count !== null ? Number(r.helpful_count) : null,
+    profiles: r.full_name !== null || r.avatar_url !== null
+      ? { full_name: r.full_name, avatar_url: r.avatar_url }
+      : null,
+    review_images: imagesByReview.get(Number(r.id)) ?? [],
+  }));
 
   // Get comment counts for each review
-  let reviewsWithCommentCount = reviews || [];
-  if (reviews && reviews.length > 0) {
-    const reviewIds = reviews.map((r) => r.id);
-    const { data: commentCounts } = await supabase
-      .from("review_comments")
-      .select("review_id")
-      .in("review_id", reviewIds)
-      .eq("status", "approved");
+  let reviewsWithCommentCount = reviews;
+  if (reviews.length > 0) {
+    const { rows: commentCounts } = await query(
+      `SELECT review_id, COUNT(*)::integer AS count
+       FROM review_comments
+       WHERE review_id = ANY($1) AND status = 'approved'
+       GROUP BY review_id`,
+      [reviewIds],
+    );
 
-    // Count comments per review
     const commentCountMap = new Map<number, number>();
-    commentCounts?.forEach((comment) => {
-      const count = commentCountMap.get(comment.review_id) || 0;
-      commentCountMap.set(comment.review_id, count + 1);
-    });
+    for (const row of commentCounts) {
+      commentCountMap.set(Number(row.review_id), Number(row.count));
+    }
 
-    // Add comment count to each review
     reviewsWithCommentCount = reviews.map((review) => ({
       ...review,
       comment_count: commentCountMap.get(review.id) || 0,

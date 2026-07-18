@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import React, { useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,6 @@ import { useRecaptcha } from "@/hooks/useRecaptcha";
 import { SignupRequest, UsernameCheckResponse } from "@/types/auth.types";
 
 function SignupContent() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const inviteCode = searchParams.get("invite");
   const { toast } = useToast();
@@ -226,9 +225,9 @@ function SignupContent() {
       // Show success message and redirect
       toast({
         title: "Account Created!",
-        description: "Please check your email to verify your account.",
+        description: "Welcome to Inside Karachi!",
       });
-      router.push(data.redirectTo);
+      window.location.href = data.redirectTo;
     } catch (error) {
       console.error("Signup error:", error);
       setError("An unexpected error occurred. Please try again.");
@@ -456,11 +455,22 @@ function SignupContent() {
                     onChange={(e) => {
                       setPassword(e.target.value);
                       if (error) setError(null);
+                      if (fieldErrors.password) {
+                        setFieldErrors((prev) => {
+                          const { password: _, ...rest } = prev;
+                          return rest;
+                        });
+                      }
                     }}
                     disabled={isLoading}
                     placeholder="Must be at least 8 characters"
                     className="bg-white/15 border-white/30 text-white placeholder:text-white/60 focus:border-white/50 focus:ring-white/30"
                   />
+                  {fieldErrors.password && (
+                    <p className="text-red-400 text-sm">
+                      {fieldErrors.password}
+                    </p>
+                  )}
                 </div>
 
                 {/* Confirm Password Field */}

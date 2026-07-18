@@ -9,6 +9,7 @@ import {
   compareSearchRankThenIds,
   stableReorderBySearchRank,
 } from "@/lib/listings/search-relevance";
+import { OPEN_NOW_EXISTS_CLAUSE } from "@/lib/listings/query-paginated-listings";
 import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 
@@ -103,7 +104,7 @@ export default async function CategoryListingsPage({
 
   // Apply open-now filter
   if (resolvedSearchParams.open_now === "true") {
-    whereClauses.push("is_open_now = true");
+    whereClauses.push(OPEN_NOW_EXISTS_CLAUSE);
   }
 
   // Apply deals filter

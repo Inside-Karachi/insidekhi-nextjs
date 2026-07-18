@@ -27,6 +27,27 @@ type ListingRow = Record<string, unknown> & { id?: number | null };
 const sortRequiresDeals = (sortKey?: string) =>
   sortKey === "max-discount" || sortKey === "best-deals";
 
+// listing_branches.is_open_now is a stale, never-computed import snapshot
+// (always false). Compute it live from `timings` ("HH:MM:SS-HH:MM:SS",
+// validated by regex so malformed rows are excluded rather than erroring
+// on the ::time cast) against the current time in Asia/Karachi, handling
+// ranges that span midnight (open > close).
+export const OPEN_NOW_EXISTS_CLAUSE = `EXISTS (
+  SELECT 1 FROM listing_branches lb
+  WHERE lb.listing_id = listings_with_details.id
+    AND lb.timings ~ '^[0-9]{2}:[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+    AND (
+      CASE
+        WHEN split_part(lb.timings, '-', 1)::time <= split_part(lb.timings, '-', 2)::time THEN
+          (now() AT TIME ZONE 'Asia/Karachi')::time
+            BETWEEN split_part(lb.timings, '-', 1)::time AND split_part(lb.timings, '-', 2)::time
+        ELSE
+          (now() AT TIME ZONE 'Asia/Karachi')::time >= split_part(lb.timings, '-', 1)::time
+          OR (now() AT TIME ZONE 'Asia/Karachi')::time <= split_part(lb.timings, '-', 2)::time
+      END
+    )
+)`;
+
 async function resolveCategoryNames(categorySlug?: string | null) {
   if (!categorySlug || categorySlug === "all") return [] as string[];
 
@@ -48,7 +69,7 @@ async function resolveCategoryNames(categorySlug?: string | null) {
   return [String(cat.name)];
 }
 
-async function attachListingImages(listings: ListingRow[]) {
+export async function attachListingImages(listings: ListingRow[]) {
   const listingIds = listings
     .map((l) => l.id)
     .filter((id): id is number => typeof id === "number");
@@ -113,7 +134,7 @@ export async function queryPaginatedListings(filters: QueryListingsFilters) {
   }
 
   if (filters.openNow) {
-    whereClauses.push("is_open_now = true");
+    whereClauses.push(OPEN_NOW_EXISTS_CLAUSE);
   }
 
   const needsDeals =
@@ -209,6 +230,14 @@ export async function queryPaginatedListings(filters: QueryListingsFilters) {
     case "name":
       orderByClause = "ORDER BY name ASC, id ASC";
       break;
+    case "trending":
+      // Mirrors the previous in-memory scoring formula:
+      // (is_featured ? 50 : 0) + avg_rating*10 - age_in_days
+      orderByClause =
+        "ORDER BY (CASE WHEN is_featured THEN 50 ELSE 0 END) " +
+        "+ COALESCE(avg_rating, 0) * 10 " +
+        "- EXTRACT(EPOCH FROM (now() - created_at)) / 86400 DESC, id ASC";
+      break;
   }
 
   const hasDistanceSort =
@@ -296,6 +325,13 @@ export async function queryPaginatedListings(filters: QueryListingsFilters) {
       ) as ListingRow[];
     }
   }
+
+  // node-pg returns bigint columns (id) as strings; attachListingImages
+  // requires a real number to collect/match listing IDs.
+  listings = listings.map((l) => ({
+    ...l,
+    id: l.id !== null && l.id !== undefined ? Number(l.id) : l.id,
+  }));
 
   const enrichedListings = await attachListingImages(listings);
   const totalPages = Math.ceil(totalItems / limit);

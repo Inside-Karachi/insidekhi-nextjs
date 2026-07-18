@@ -79,14 +79,11 @@ const nextConfig: NextConfig = (() => {
       pathname: "/**",
     },
     {
+      // ** matches any number of subdomain segments (e.g.
+      // listing-images.sgp1.digitaloceanspaces.com), unlike a single "*"
+      // which only matches one segment.
       protocol: "https",
-      hostname: "insidekhi.sgp1.digitaloceanspaces.com",
-      port: "",
-      pathname: "/**",
-    },
-    {
-      protocol: "https",
-      hostname: "*.digitaloceanspaces.com",
+      hostname: "**.digitaloceanspaces.com",
       port: "",
       pathname: "/**",
     },

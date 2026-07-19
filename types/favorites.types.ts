@@ -1,9 +1,20 @@
 import { Database } from "@/types/supabase";
 
-// FavoriteListing type: combines listings_with_details view row with favorited_at timestamp
+// FavoriteListing type: combines listings_with_details view row with favorited_at
+// timestamp and its images (fetched separately from listing_images).
 export type FavoriteListing =
   Database["public"]["Views"]["listings_with_details"]["Row"] & {
     favorited_at: string;
+    images?: Array<{
+      id: number;
+      listing_id: number;
+      url: string;
+      alt_text: string | null;
+      display_order: number | null;
+      is_primary: boolean | null;
+      created_at: string;
+      updated_at: string;
+    }>;
   };
 
 // FavoriteListingRaw: raw row from favorite_listings table

@@ -89,7 +89,7 @@ export function useFavoritesRealtime(userId: string | null) {
         const { data: favorites, error } = await supabase
           .from("favorite_listings")
           .select(
-            `created_at, listings:listings_with_details!inner(*, listing_images!fkey_listing_images_listing_id(url, alt_text, is_primary, display_order))`
+            `created_at, listings:listings_with_details!inner(*, images:listing_images!fkey_listing_images_listing_id(id, listing_id, url, alt_text, is_primary, display_order, created_at, updated_at))`
           )
           .eq("user_id", userId)
           .order("created_at", { ascending: false });

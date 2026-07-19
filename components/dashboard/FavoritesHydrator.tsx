@@ -2,12 +2,7 @@
 
 import { useEffect } from "react";
 import { useFavoritesStore } from "@/lib/context/favoritesStore";
-import { Database } from "@/types/supabase";
-
-type FavoriteListing =
-  Database["public"]["Views"]["listings_with_details"]["Row"] & {
-    favorited_at: string;
-  };
+import { FavoriteListing } from "@/types/favorites.types";
 
 /**
  * Seeds the client favorites store from server-fetched data (JWT session path).

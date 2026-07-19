@@ -1,38 +1,67 @@
 import React, { Suspense } from "react";
 import { PremiumFavoritesGrid } from "@/components/dashboard/PremiumFavoritesGrid";
 import { FavoritesHydrator } from "@/components/dashboard/FavoritesHydrator";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { requireSessionUser } from "@/lib/auth/require-session";
 import { Database } from "@/types/supabase";
+import { FavoriteListing } from "@/types/favorites.types";
 
 export const dynamic = "force-dynamic";
 
-type FavoriteListing =
-  Database["public"]["Views"]["listings_with_details"]["Row"] & {
-    favorited_at: string;
-  };
+type ListingRow = Database["public"]["Views"]["listings_with_details"]["Row"];
+type ListingImage = NonNullable<FavoriteListing["images"]>[number];
 
 export default async function FavoritesPage() {
   const { user } = await requireSessionUser({ withProfile: false });
-  const supabase = await createServerSupabase({ useServiceRole: true });
-
-  const { data: favorites, error } = await supabase
-    .from("favorite_listings")
-    .select(
-      `created_at, listings:listings_with_details!inner(*, listing_images!fkey_listing_images_listing_id(url, alt_text, is_primary, display_order))`
-    )
-    .eq("user_id", user.id)
-    .order("created_at", { ascending: false });
 
   let favoriteListings: FavoriteListing[] = [];
-  if (error) {
+  try {
+    const { rows: favRows } = await query(
+      `SELECT listing_id, created_at FROM favorite_listings
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [user.id],
+    );
+
+    const orderedIds = favRows.map((r) => r.listing_id as number);
+    const favoritedAtById = new Map<number, string>(
+      favRows.map((r) => [r.listing_id as number, r.created_at as string]),
+    );
+
+    if (orderedIds.length > 0) {
+      const { rows: listingRows } = await query(
+        `SELECT * FROM listings_with_details WHERE id = ANY($1)`,
+        [orderedIds],
+      );
+
+      const imagesByListing: Record<number, ListingImage[]> = {};
+      const { rows: imageRows } = await query(
+        `SELECT id, listing_id, url, alt_text, display_order, is_primary, created_at, updated_at
+         FROM listing_images
+         WHERE listing_id = ANY($1)
+         ORDER BY display_order ASC`,
+        [orderedIds],
+      );
+      for (const img of imageRows) {
+        const listingId = img.listing_id as number;
+        (imagesByListing[listingId] ??= []).push(img as ListingImage);
+      }
+
+      const byId = new Map<number, ListingRow>(
+        listingRows.map((r) => [(r as ListingRow).id as number, r as ListingRow]),
+      );
+
+      favoriteListings = orderedIds
+        .map((id) => byId.get(id))
+        .filter((r): r is ListingRow => r != null)
+        .map((r) => ({
+          ...r,
+          favorited_at: favoritedAtById.get(r.id as number)!,
+          images: imagesByListing[r.id as number] ?? [],
+        }));
+    }
+  } catch (error) {
     console.error("Failed to load favorites:", error);
-  } else {
-    favoriteListings =
-      favorites?.map((fav) => ({
-        ...fav.listings,
-        favorited_at: fav.created_at,
-      })) || [];
   }
 
   return (

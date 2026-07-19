@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Database } from "@/types/supabase";
 import { useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useRealtimeRefresh } from "@/lib/hooks/useRealtimeRefresh";
 
 // Extended Review type for listing pages
 export type ListingReview = Database["public"]["Tables"]["reviews"]["Row"] & {
@@ -79,7 +79,7 @@ export const useListingReviewsStore = create<ListingReviewsStore>((set) => ({
     }),
 }));
 
-// Custom hook with Supabase Realtime (replaces polling)
+// Custom hook with smart polling (replaces Supabase Realtime)
 export function useListingReviewsRealtime(listingId: number) {
   const setReviews = useListingReviewsStore((state) => state.setReviews);
   const setLoading = useListingReviewsStore((state) => state.setLoading);
@@ -91,124 +91,42 @@ export function useListingReviewsRealtime(listingId: number) {
     (state) => state.resetForListingChange,
   );
 
+  const fetchReviews = async () => {
+    try {
+      const res = await fetch(`/api/reviews?listing_id=${listingId}`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        console.error("Failed to load listing reviews:", data.error);
+        setError(data.error ?? "Failed to load reviews");
+        return;
+      }
+
+      setReviews(data.reviews ?? []);
+      setError(null);
+    } catch (err) {
+      console.error("Error loading listing reviews:", err);
+      setError(err instanceof Error ? err.message : "Unknown error");
+    }
+  };
+
   useEffect(() => {
     if (!listingId) return;
 
-    // Reset store for new listing context
     resetForListingChange(listingId);
 
-    const supabase = createClient();
-    let refreshTimer: NodeJS.Timeout | null = null;
-
-    // Fetch reviews with comment counts and images
-    const fetchReviews = async () => {
-      try {
-        const { data: reviews, error } = await supabase
-          .from("reviews")
-          .select(
-            `
-            *,
-            profiles!reviews_user_id_fkey(full_name, avatar_url),
-            review_images(id, image_url, created_at)
-          `,
-          )
-          .eq("listing_id", listingId)
-          .eq("status", "approved")
-          .order("created_at", { ascending: false });
-
-        if (error) {
-          console.error("Failed to load listing reviews:", error);
-          setError(error.message);
-          return;
-        }
-
-        // Fetch comment counts in parallel
-        const reviewsWithCommentCount = await Promise.all(
-          (reviews || []).map(async (review) => {
-            const { count } = await supabase
-              .from("review_comments")
-              .select("*", { count: "exact", head: true })
-              .eq("review_id", review.id)
-              .eq("status", "approved");
-
-            return {
-              ...review,
-              comment_count: count || 0,
-            };
-          }),
-        );
-
-        setReviews(reviewsWithCommentCount);
-        setError(null);
-      } catch (err) {
-        console.error("Error loading listing reviews:", err);
-        setError(err instanceof Error ? err.message : "Unknown error");
-      }
-    };
-
-    // Initial load
     setLoading(true);
     fetchReviews().finally(() => {
       setLoading(false);
       setInitialized(true);
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listingId]);
 
-    // Realtime subscription for reviews
-    const reviewsChannel = supabase
-      .channel(`listing-reviews-${listingId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "reviews",
-          filter: `listing_id=eq.${listingId}`,
-        },
-        () => {
-          // Debounce refresh to avoid rapid re-fetches
-          if (refreshTimer) clearTimeout(refreshTimer);
-          refreshTimer = setTimeout(() => {
-            void fetchReviews();
-          }, 500);
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "review_comments",
-        },
-        () => {
-          // Refresh on comment changes to update comment counts
-          if (refreshTimer) clearTimeout(refreshTimer);
-          refreshTimer = setTimeout(() => {
-            void fetchReviews();
-          }, 500);
-        },
-      )
-      .subscribe();
-
-    // Fallback: Refresh when tab becomes visible (handles network issues)
-    const handleVisibilityChange = () => {
-      if (!document.hidden) {
-        void fetchReviews();
-      }
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    return () => {
-      if (refreshTimer) clearTimeout(refreshTimer);
-      supabase.removeChannel(reviewsChannel);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [
-    listingId,
-    setReviews,
-    setLoading,
-    setError,
-    setInitialized,
-    resetForListingChange,
-  ]);
+  useRealtimeRefresh(
+    `listing-reviews-${listingId}`,
+    listingId ? [{ table: "reviews" }, { table: "review_comments" }] : [],
+    () => void fetchReviews(),
+    10_000,
+  );
 }

@@ -5,6 +5,7 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 import {
   fetchPayFastToken,
   generatePayFastFormFields,
@@ -36,7 +37,7 @@ const bodySchema = z.object({
  */
 export const POST = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
   const parsed = bodySchema.safeParse(await request.json().catch(() => null));
@@ -51,16 +52,12 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   const { basketId, customerMobile, customerEmail, transactionDescription } =
     parsed.data;
 
-  const { data: booking, error: bErr } = await supabase
-    .from("bookings")
-    .select("id, total_amount, basket_id, payment_status, expires_at")
-    .eq("booking_reference", basketId)
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (bErr) {
-    console.error("[mobile-api] token booking lookup failed:", bErr.message);
-    throw new MobileApiError("internal_error", "Failed to start payment.", 500);
-  }
+  const { rows: bookingRows } = await query(
+    `SELECT id, total_amount, basket_id, payment_status, expires_at
+     FROM bookings WHERE booking_reference = $1 AND user_id = $2`,
+    [basketId, user.id],
+  );
+  const booking = bookingRows[0];
   if (!booking) {
     throw new MobileApiError("not_found", "Booking not found.", 404);
   }

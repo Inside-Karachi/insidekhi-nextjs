@@ -6,8 +6,6 @@ import { Sparkles } from "lucide-react";
 import { PremiumHeading } from "@/components/brand/Typography";
 
 import { Database } from "@/types/supabase";
-import { createClient } from "@/lib/supabase/client";
-import { useEffect, useState } from "react";
 import {
   sectionVariants,
   cardGridVariants,
@@ -17,14 +15,16 @@ import {
 
 type Listing = Database["public"]["Views"]["listings_with_details"]["Row"];
 
-interface ListingFeaturesProps {
-  listing: Listing;
-}
-
 interface Feature {
   name: string;
   icon: string;
   description: string;
+}
+
+interface ListingFeaturesProps {
+  listing: Listing;
+  /** Server-fetched listing_features, joined with listing_features_master. */
+  initialFeatures?: Feature[];
 }
 
 // Feature icon mapping for better visuals
@@ -50,59 +50,11 @@ const featureIcons: Record<string, string> = {
   "Room Service": "🛎️",
 };
 
-export function ListingFeatures({ listing }: ListingFeaturesProps) {
-  const [databaseFeatures, setDatabaseFeatures] = useState<Feature[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  // Fetch features from database
-  useEffect(() => {
-    async function fetchFeatures() {
-      try {
-        const supabase = createClient();
-        const { data, error } = await supabase
-          .from("listing_features")
-          .select(
-            `
-            listing_features_master (
-              name,
-              description,
-              icon_emoji
-            )
-          `
-          )
-          .eq("listing_id", listing.id || 0);
-
-        if (error) {
-          console.error("Error fetching features:", error);
-          setLoading(false);
-          return;
-        }
-
-        if (data && data.length > 0) {
-          const features = data.map(
-            (item: {
-              listing_features_master: {
-                name: string;
-                description: string | null;
-                icon_emoji: string | null;
-              };
-            }) => ({
-              name: item.listing_features_master.name,
-              icon: item.listing_features_master.icon_emoji || "✨",
-              description: item.listing_features_master.description || "",
-            })
-          );
-          setDatabaseFeatures(features);
-        }
-      } catch (error) {
-        console.error("Error fetching features:", error);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchFeatures();
-  }, [listing.id]);
+export function ListingFeatures({
+  listing,
+  initialFeatures = [],
+}: ListingFeaturesProps) {
+  const databaseFeatures = initialFeatures;
 
   // Get feature descriptions
   const getFeatureDescription = (feature: string): string => {
@@ -180,40 +132,7 @@ export function ListingFeatures({ listing }: ListingFeaturesProps) {
   );
 
   const features =
-    uniqueFeatures.length > 0 ? uniqueFeatures : getFallbackFeatures(); // Show loading state while fetching database features (only if no features available yet)
-  if (
-    loading &&
-    databaseFeatures.length === 0 &&
-    customAmenities.length === 0
-  ) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="p-3 rounded-2xl bg-gradient-to-br from-primary/20 via-primary/10 to-primary/5 border border-primary/20 shadow-premium">
-              <Sparkles className="h-6 w-6 text-primary" />
-            </div>
-            <div>
-              <h2 className="text-xl sm:text-2xl md:text-3xl font-black tracking-tight">
-                Features &{" "}
-                <span className="gradient-text-primary">Amenities</span>
-              </h2>
-              <p className="text-sm text-muted-foreground mt-1">
-                Loading features...
-              </p>
-            </div>
-          </div>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="animate-pulse">
-              <div className="rounded-2xl bg-muted/50 h-24"></div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
+    uniqueFeatures.length > 0 ? uniqueFeatures : getFallbackFeatures();
 
   if (features.length === 0) return null;
 

@@ -1,6 +1,7 @@
 import { createServerSupabase } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionFromCookies } from "@/lib/auth/session";
+import { query } from "@/lib/db";
+import { requireSuperAdmin, getAdminAuthErrorStatus } from "@/lib/auth/admin";
 import { createNotification } from "@/lib/notifications/service";
 import crypto from "crypto";
 
@@ -67,224 +68,198 @@ export async function POST(
       );
     }
 
-    // Use regular client for auth check    // Check user is authenticated and is super_admin
-    const session = await getSessionFromCookies();
-
-    if (!session) {
+    // Check user is authenticated and is super_admin
+    let adminUserId: string;
+    try {
+      const { user } = await requireSuperAdmin(request);
+      adminUserId = user.id;
+    } catch (error) {
+      const status = getAdminAuthErrorStatus(error);
       return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 },
+        {
+          success: false,
+          error: error instanceof Error ? error.message : "Unauthorized",
+        },
+        { status: status ?? 500 },
       );
     }
 
-    // Check super_admin role (only super_admin can mark as paid manually)
-    const supabase = await createServerSupabase();
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profile?.role !== "super_admin") {
-      return NextResponse.json(
-        { success: false, error: "Super admin access required" },
-        { status: 403 },
-      );
-    }
-
-    // Use service role client for operations
+    // Use service role client for the notification call (shared lib still requires it).
     const adminSupabase = await createServerSupabase({ useServiceRole: true });
 
     // Try to use the atomic RPC function first (preferred)
-    // Call via direct REST API to avoid TypeScript RPC type constraints
     const signingSecret = process.env.TICKET_SIGNING_SECRET;
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-    if (supabaseUrl && serviceRoleKey) {
-      try {
-        const rpcResponse = await fetch(
-          `${supabaseUrl}/rest/v1/rpc/admin_mark_booking_paid`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              apikey: serviceRoleKey,
-              Authorization: `Bearer ${serviceRoleKey}`,
+    try {
+      // p_signing_secret has a DB-side default; only pass it when we actually
+      // have a value so an unset env var falls back to that default instead
+      // of being overridden with an explicit NULL.
+      const { rows: rpcRows } = signingSecret
+        ? await query(
+            `SELECT admin_mark_booking_paid(
+               p_admin_id => $1,
+               p_booking_id => $2,
+               p_signing_secret => $3
+             ) AS result`,
+            [adminUserId, bookingId, signingSecret],
+          )
+        : await query(
+            `SELECT admin_mark_booking_paid(
+               p_admin_id => $1,
+               p_booking_id => $2
+             ) AS result`,
+            [adminUserId, bookingId],
+          );
+      const rpcResult = rpcRows[0]?.result as MarkBookingPaidRpcResponse | null;
+
+      if (rpcResult && rpcResult.success) {
+        // === SEND NOTIFICATION: Payment Success (RPC Path) ===
+        try {
+          // Fetch booking details for notification
+          const { rows: bookingDataRows } = await query(
+            `SELECT b.user_id, b.booking_reference,
+                    CASE WHEN e.id IS NULL THEN NULL
+                         ELSE json_build_object('name', e.name)
+                    END AS event
+             FROM bookings b
+             LEFT JOIN events e ON e.id = b.event_id
+             WHERE b.id = $1`,
+            [bookingId],
+          );
+          const bookingData = bookingDataRows[0];
+
+          if (!bookingData) {
+            console.error("[RPC PATH] Booking data is null");
+            throw new Error("Booking data not found");
+          }
+
+          console.log("[RPC PATH] Booking data:", {
+            user_id: bookingData.user_id,
+            has_event: !!bookingData.event,
+            event: bookingData.event,
+          });
+
+          if (!bookingData.user_id) {
+            console.error("[RPC PATH] No user_id in booking");
+            throw new Error("Booking has no user_id");
+          }
+
+          if (!bookingData.event) {
+            console.error("[RPC PATH] No event data");
+            throw new Error("Event data not found");
+          }
+
+          const passesCreated = rpcResult.passes_created || 0;
+          const eventName = (bookingData.event as { name: string }).name;
+
+          console.log("[RPC PATH] Creating notification:", {
+            recipientId: bookingData.user_id,
+            eventName,
+            passesCreated,
+          });
+
+          const notificationResult = await createNotification(
+            {
+              recipientId: bookingData.user_id,
+              roleScope: "public_user",
+              categorySlug: "public_booking_confirmation",
+              title: "🎉 Payment Confirmed!",
+              body: `Your tickets for ${eventName} are ready. ${passesCreated} pass${
+                passesCreated !== 1 ? "es" : ""
+              } issued.`,
+              priority: "high",
+              ctaLabel: "View My Tickets",
+              ctaUrl: `/dashboard/bookings`,
+              metadata: {
+                booking_id: bookingId,
+                booking_reference: bookingData.booking_reference,
+                event_name: eventName,
+                passes_count: passesCreated,
+              },
+              channelOverrides: {
+                bell: true,
+                email: true,
+                push: false,
+              },
             },
-            body: JSON.stringify({
-              p_booking_id: bookingId,
-              p_admin_id: session.userId,
-              p_signing_secret: signingSecret,
-            }),
-          },
-        );
+            { supabase: adminSupabase },
+          );
 
-        if (rpcResponse.ok) {
-          const rpcResult: MarkBookingPaidRpcResponse =
-            await rpcResponse.json();
+          console.log("[RPC PATH] Notification created:", {
+            notification_id: notificationResult.notification.id,
+            channels: notificationResult.channels.length,
+            outbox: notificationResult.outbox.length,
+          });
 
-          if (rpcResult.success) {
-            // === SEND NOTIFICATION: Payment Success (RPC Path) ===
+          console.log(
+            `[RPC PATH] Notification sent for booking ${bookingId} to user ${bookingData.user_id}`,
+          );
+
+          // Trigger email dispatch if there are outbox items
+          if (notificationResult.outbox.length > 0) {
             try {
-              // Fetch booking details for notification
-              const { data: bookingData, error: bookingFetchError } =
-                await adminSupabase
-                  .from("bookings")
-                  .select(
-                    `
-                  user_id, 
-                  booking_reference,
-                  event:events(name)
-                `,
-                  )
-                  .eq("id", bookingId)
-                  .single();
-
-              if (bookingFetchError) {
-                console.error(
-                  "[RPC PATH] Failed to fetch booking data:",
-                  bookingFetchError,
-                );
-                throw bookingFetchError;
-              }
-
-              if (!bookingData) {
-                console.error("[RPC PATH] Booking data is null");
-                throw new Error("Booking data not found");
-              }
-
-              console.log("[RPC PATH] Booking data:", {
-                user_id: bookingData.user_id,
-                has_event: !!bookingData.event,
-                event: bookingData.event,
+              console.log("[RPC PATH] Triggering email dispatch...");
+              const dispatchModule =
+                await import("@/lib/notifications/dispatcher");
+              const dispatchResult =
+                await dispatchModule.dispatchEmailOutboxBatch({
+                  supabase: adminSupabase,
+                  limit: 10,
+                });
+              console.log("[RPC PATH] Email dispatch result:", {
+                sent: dispatchResult.sent,
+                failed: dispatchResult.failed,
               });
-
-              if (!bookingData.user_id) {
-                console.error("[RPC PATH] No user_id in booking");
-                throw new Error("Booking has no user_id");
-              }
-
-              if (!bookingData.event) {
-                console.error("[RPC PATH] No event data");
-                throw new Error("Event data not found");
-              }
-
-              const passesCreated = rpcResult.passes_created || 0;
-              const eventName = bookingData.event.name;
-
-              console.log("[RPC PATH] Creating notification:", {
-                recipientId: bookingData.user_id,
-                eventName,
-                passesCreated,
-              });
-
-              const notificationResult = await createNotification(
-                {
-                  recipientId: bookingData.user_id,
-                  roleScope: "public_user",
-                  categorySlug: "public_booking_confirmation",
-                  title: "🎉 Payment Confirmed!",
-                  body: `Your tickets for ${eventName} are ready. ${passesCreated} pass${
-                    passesCreated !== 1 ? "es" : ""
-                  } issued.`,
-                  priority: "high",
-                  ctaLabel: "View My Tickets",
-                  ctaUrl: `/dashboard/bookings`,
-                  metadata: {
-                    booking_id: bookingId,
-                    booking_reference: bookingData.booking_reference,
-                    event_name: eventName,
-                    passes_count: passesCreated,
-                  },
-                  channelOverrides: {
-                    bell: true,
-                    email: true,
-                    push: false,
-                  },
-                },
-                { supabase: adminSupabase },
-              );
-
-              console.log("[RPC PATH] Notification created:", {
-                notification_id: notificationResult.notification.id,
-                channels: notificationResult.channels.length,
-                outbox: notificationResult.outbox.length,
-              });
-
-              console.log(
-                `[RPC PATH] Notification sent for booking ${bookingId} to user ${bookingData.user_id}`,
-              );
-
-              // Trigger email dispatch if there are outbox items
-              if (notificationResult.outbox.length > 0) {
-                try {
-                  console.log("[RPC PATH] Triggering email dispatch...");
-                  const dispatchModule =
-                    await import("@/lib/notifications/dispatcher");
-                  const dispatchResult =
-                    await dispatchModule.dispatchEmailOutboxBatch({
-                      supabase: adminSupabase,
-                      limit: 10,
-                    });
-                  console.log("[RPC PATH] Email dispatch result:", {
-                    sent: dispatchResult.sent,
-                    failed: dispatchResult.failed,
-                  });
-                } catch (dispatchError) {
-                  console.error(
-                    "[RPC PATH] Email dispatch failed:",
-                    dispatchError,
-                  );
-                }
-              }
-            } catch (notifError) {
+            } catch (dispatchError) {
               console.error(
-                "[RPC PATH] Failed to send notification:",
-                notifError,
+                "[RPC PATH] Email dispatch failed:",
+                dispatchError,
               );
-              console.error("[RPC PATH] Error stack:", notifError);
-              // Re-throw to see the error in response (during testing)
-              if (process.env.NEXT_DEBUG === "TRUE") {
-                throw notifError;
-              }
             }
-
-            return NextResponse.json({
-              success: true,
-              message: rpcResult.message,
-              passesCreated: rpcResult.passes_created || 0,
-            });
-          } else {
-            return NextResponse.json(
-              { success: false, error: rpcResult.error || "Operation failed" },
-              { status: 400 },
-            );
+          }
+        } catch (notifError) {
+          console.error(
+            "[RPC PATH] Failed to send notification:",
+            notifError,
+          );
+          console.error("[RPC PATH] Error stack:", notifError);
+          // Re-throw to see the error in response (during testing)
+          if (process.env.NEXT_DEBUG === "TRUE") {
+            throw notifError;
           }
         }
 
-        // RPC doesn't exist (404) or other error - fall through to fallback
-        if (rpcResponse.status !== 404) {
-          const errorText = await rpcResponse.text();
-          console.log("RPC call failed:", rpcResponse.status, errorText);
-        }
-      } catch (rpcErr) {
-        console.log("RPC call exception, using fallback:", rpcErr);
+        return NextResponse.json({
+          success: true,
+          message: rpcResult.message,
+          passesCreated: rpcResult.passes_created || 0,
+        });
+      } else if (rpcResult) {
+        return NextResponse.json(
+          { success: false, error: rpcResult.error || "Operation failed" },
+          { status: 400 },
+        );
+      } else {
+        // RPC returned no result at all - fall through to fallback
+        console.log("RPC call returned no result, using fallback");
       }
+    } catch (rpcErr) {
+      console.log("RPC call exception, using fallback:", rpcErr);
     }
 
     // Fallback to manual implementation if RPC doesn't exist
     console.log("Using fallback implementation (RPC not available)");
 
     // Get booking with service role
-    const { data: booking, error: bookingError } = await adminSupabase
-      .from("bookings")
-      .select("id, event_id, payment_status, status, customer_name, user_id")
-      .eq("id", bookingId)
-      .single();
+    const { rows: bookingRows } = await query(
+      `SELECT id, event_id, payment_status, status, customer_name, user_id
+       FROM bookings WHERE id = $1`,
+      [bookingId],
+    );
+    const booking = bookingRows[0];
 
-    if (bookingError || !booking) {
-      console.error("Booking fetch error:", bookingError);
+    if (!booking) {
+      console.error("Booking fetch error: not found");
       return NextResponse.json(
         { success: false, error: "Booking not found" },
         { status: 404 },
@@ -300,12 +275,15 @@ export async function POST(
     }
 
     // Get booking items
-    const { data: bookingItems, error: itemsError } = await adminSupabase
-      .from("booking_items")
-      .select("booking_id, quantity, ticket_type_id")
-      .eq("booking_id", bookingId);
-
-    if (itemsError) {
+    let bookingItems: { booking_id: number; quantity: number; ticket_type_id: number }[] =
+      [];
+    try {
+      ({ rows: bookingItems } = await query(
+        `SELECT booking_id, quantity, ticket_type_id
+         FROM booking_items WHERE booking_id = $1`,
+        [bookingId],
+      ));
+    } catch (itemsError) {
       console.error("Booking items fetch error:", itemsError);
     }
 
@@ -348,20 +326,19 @@ export async function POST(
 
     // === ATOMIC OPERATION: Update booking and create passes ===
     // First update the booking status
-    const { error: updateError } = await adminSupabase
-      .from("bookings")
-      .update({
-        payment_status: "paid",
-        status: "confirmed",
-      })
-      .eq("id", bookingId);
-
-    if (updateError) {
+    try {
+      await query(
+        `UPDATE bookings SET payment_status = 'paid', status = 'confirmed' WHERE id = $1`,
+        [bookingId],
+      );
+    } catch (updateError) {
       console.error("Failed to update booking:", updateError);
       return NextResponse.json(
         {
           success: false,
-          error: "Failed to update booking: " + updateError.message,
+          error:
+            "Failed to update booking: " +
+            (updateError instanceof Error ? updateError.message : "unknown"),
         },
         { status: 500 },
       );
@@ -370,21 +347,39 @@ export async function POST(
     // Create ticket passes if needed
     let passesCreated = 0;
     if (passesToCreate.length > 0) {
-      const { data: createdPasses, error: passError } = await adminSupabase
-        .from("ticket_passes")
-        .insert(passesToCreate)
-        .select("id");
-
-      if (passError) {
+      try {
+        const values: unknown[] = [];
+        const placeholders = passesToCreate
+          .map((p, idx) => {
+            const base = idx * 8;
+            values.push(
+              p.booking_id,
+              p.event_id,
+              p.ticket_type_id,
+              p.code,
+              p.signature,
+              p.guest_name,
+              p.status,
+              p.quantity_index,
+            );
+            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8})`;
+          })
+          .join(", ");
+        const { rows: createdPasses } = await query(
+          `INSERT INTO ticket_passes
+             (booking_id, event_id, ticket_type_id, code, signature, guest_name, status, quantity_index)
+           VALUES ${placeholders}
+           RETURNING id`,
+          values,
+        );
+        passesCreated = createdPasses.length || passesToCreate.length;
+      } catch (passError) {
         console.error("Failed to create ticket passes:", passError);
         // ROLLBACK: Revert the booking status since passes failed
-        await adminSupabase
-          .from("bookings")
-          .update({
-            payment_status: "awaiting_payment",
-            status: "pending",
-          })
-          .eq("id", bookingId);
+        await query(
+          `UPDATE bookings SET payment_status = 'awaiting_payment', status = 'pending' WHERE id = $1`,
+          [bookingId],
+        );
 
         return NextResponse.json(
           {
@@ -394,19 +389,21 @@ export async function POST(
           { status: 500 },
         );
       }
-
-      passesCreated = createdPasses?.length || passesToCreate.length;
     }
 
     // Record in booking status history if table exists
     // Note: booking_status_history uses booking_payment_status_enum, not booking_status
     try {
-      await adminSupabase.from("booking_status_history").insert({
-        booking_id: bookingId,
-        old_status: booking.payment_status, // Use payment_status, not status
-        new_status: "paid" as const, // This is booking_payment_status_enum
-        context: `Manually marked as paid by admin ${session.userId}. ${passesCreated} tickets generated.`,
-      });
+      await query(
+        `INSERT INTO booking_status_history (booking_id, old_status, new_status, context)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          bookingId,
+          booking.payment_status, // Use payment_status, not status
+          "paid", // This is booking_payment_status_enum
+          `Manually marked as paid by admin ${adminUserId}. ${passesCreated} tickets generated.`,
+        ],
+      );
     } catch {
       // Ignore if history table doesn't exist or insert fails
     }
@@ -415,28 +412,20 @@ export async function POST(
     if (booking.user_id) {
       try {
         // Fetch full booking details for notification
-        const { data: fullBooking } = await adminSupabase
-          .from("bookings")
-          .select(
-            `
-            id,
-            booking_reference,
-            customer_name,
-            customer_email,
-            total_amount,
-            event:events (
-              id,
-              name,
-              slug,
-              start_time
-            )
-          `,
-          )
-          .eq("id", bookingId)
-          .single();
+        const { rows: fullBookingRows } = await query(
+          `SELECT b.id, b.booking_reference, b.customer_name, b.customer_email, b.total_amount,
+                  CASE WHEN e.id IS NULL THEN NULL
+                       ELSE json_build_object('id', e.id, 'name', e.name, 'slug', e.slug, 'start_time', e.start_time)
+                  END AS event
+           FROM bookings b
+           LEFT JOIN events e ON e.id = b.event_id
+           WHERE b.id = $1`,
+          [bookingId],
+        );
+        const fullBooking = fullBookingRows[0];
 
         if (fullBooking && fullBooking.event) {
-          const eventName = fullBooking.event.name;
+          const eventName = (fullBooking.event as { name: string }).name;
 
           // Create in-app notification
           await createNotification(

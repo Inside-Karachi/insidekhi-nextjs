@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   BookingsDashboard,
   DashboardBooking,
@@ -45,37 +45,47 @@ type EventsWithDetailsRow = {
 
 export default async function DashboardBookingsPage() {
   const { user } = await requireSessionUser({ withProfile: false });
-  const supabase = await createServerSupabase({ useServiceRole: true });
 
-  const { data: bookingsData, error: bookingsError } = await supabase
-    .from("bookings")
-    .select(
-      `
-        id,
-        booking_reference,
-        payment_status,
-        status,
-        total_amount,
-        created_at,
-        event_id,
-        ticket_passes (
-          id,
-          booking_id,
-          code,
-          status,
-          quantity_index,
-          issued_at,
-          ticket_type_id,
-          guest_name,
-          cnic_last4
-        )
-      `,
-    )
-    .eq("user_id", user.id)
-    .order("created_at", { ascending: false })
-    .limit(50);
+  let bookings: BookingRow[];
+  try {
+    const { rows: bookingRows } = await query(
+      `SELECT id, booking_reference, payment_status, status, total_amount, created_at, event_id
+       FROM bookings WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+      [user.id],
+    );
 
-  if (bookingsError) {
+    const bookingIds = bookingRows.map((b) => Number(b.id));
+    let passesByBooking = new Map<number, BookingRow["ticket_passes"]>();
+
+    if (bookingIds.length > 0) {
+      const { rows: passRows } = await query(
+        `SELECT id, booking_id, code, status, quantity_index, issued_at, ticket_type_id, guest_name, cnic_last4
+         FROM ticket_passes WHERE booking_id = ANY($1)`,
+        [bookingIds],
+      );
+      passesByBooking = new Map();
+      for (const pass of passRows) {
+        const bookingId = Number(pass.booking_id);
+        const list = passesByBooking.get(bookingId) ?? [];
+        list.push({
+          ...pass,
+          id: Number(pass.id),
+          booking_id: bookingId,
+          quantity_index: Number(pass.quantity_index),
+          ticket_type_id: Number(pass.ticket_type_id),
+        });
+        passesByBooking.set(bookingId, list);
+      }
+    }
+
+    bookings = bookingRows.map((b) => ({
+      ...b,
+      id: Number(b.id),
+      event_id: b.event_id !== null ? Number(b.event_id) : null,
+      total_amount: Number(b.total_amount),
+      ticket_passes: passesByBooking.get(Number(b.id)) ?? [],
+    })) as BookingRow[];
+  } catch (bookingsError) {
     console.error("Failed to load bookings for dashboard", bookingsError);
     return (
       <div className="flex flex-col items-center justify-center min-h-[40vh] gap-3 text-center px-4">
@@ -88,8 +98,6 @@ export default async function DashboardBookingsPage() {
     );
   }
 
-  const bookings = (bookingsData ?? []) as BookingRow[];
-
   const eventIds = Array.from(
     new Set(
       bookings
@@ -101,31 +109,19 @@ export default async function DashboardBookingsPage() {
   let eventsMap = new Map<number, EventDetails>();
 
   if (eventIds.length > 0) {
-    const { data: eventsRows, error: eventsError } = await supabase
-      .from("events_with_details")
-      .select(
-        `
-          event_id,
-          event_name,
-          event_slug,
-          start_time,
-          end_time,
-          location_name
-        `,
-      )
-      .in("event_id", eventIds);
-
-    if (eventsError) {
-      console.error("Failed to load event details for bookings", eventsError);
-    } else if (eventsRows) {
-      const rows = eventsRows as EventsWithDetailsRow[];
+    try {
+      const { rows: eventsRows } = await query(
+        `SELECT event_id, event_name, event_slug, start_time, end_time, location_name
+         FROM events_with_details WHERE event_id = ANY($1)`,
+        [eventIds],
+      );
       eventsMap = new Map(
-        rows
+        (eventsRows as EventsWithDetailsRow[])
           .filter((row) => row?.event_id)
           .map((row) => [
-            row.event_id!,
+            Number(row.event_id),
             {
-              event_id: row.event_id!,
+              event_id: Number(row.event_id),
               event_name: row.event_name,
               event_slug: row.event_slug,
               start_time: row.start_time,
@@ -134,6 +130,8 @@ export default async function DashboardBookingsPage() {
             },
           ]),
       );
+    } catch (eventsError) {
+      console.error("Failed to load event details for bookings", eventsError);
     }
   }
 

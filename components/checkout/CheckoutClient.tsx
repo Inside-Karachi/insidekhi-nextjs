@@ -132,9 +132,9 @@ export function CheckoutClient() {
     if (user) {
       setBuyerDetails((prev) => ({
         ...prev,
-        name: user.user_metadata?.full_name || "",
+        name: user.full_name || "",
         email: user.email || "",
-        phone: user.phone || "",
+        phone: prev.phone || "",
       }));
     }
   }, [user]);

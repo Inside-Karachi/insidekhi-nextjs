@@ -1,8 +1,8 @@
 import React, { Suspense } from "react";
 import { PremiumFavoritesGrid } from "@/components/dashboard/PremiumFavoritesGrid";
 import { FavoritesHydrator } from "@/components/dashboard/FavoritesHydrator";
-import { query } from "@/lib/db";
 import { requireSessionUser } from "@/lib/auth/require-session";
+import { query } from "@/lib/db";
 import { Database } from "@/types/supabase";
 import { FavoriteListing } from "@/types/favorites.types";
 
@@ -18,19 +18,18 @@ export default async function FavoritesPage() {
   try {
     const { rows: favRows } = await query(
       `SELECT listing_id, created_at FROM favorite_listings
-       WHERE user_id = $1
-       ORDER BY created_at DESC`,
+       WHERE user_id = $1 ORDER BY created_at DESC`,
       [user.id],
     );
 
-    const orderedIds = favRows.map((r) => r.listing_id as number);
+    const orderedIds = favRows.map((r) => Number(r.listing_id));
     const favoritedAtById = new Map<number, string>(
-      favRows.map((r) => [r.listing_id as number, r.created_at as string]),
+      favRows.map((r) => [Number(r.listing_id), r.created_at as string]),
     );
 
     if (orderedIds.length > 0) {
       const { rows: listingRows } = await query(
-        `SELECT * FROM listings_with_details WHERE id = ANY($1)`,
+        `SELECT * FROM listings_with_details WHERE id = ANY($1::bigint[])`,
         [orderedIds],
       );
 
@@ -38,17 +37,17 @@ export default async function FavoritesPage() {
       const { rows: imageRows } = await query(
         `SELECT id, listing_id, url, alt_text, display_order, is_primary, created_at, updated_at
          FROM listing_images
-         WHERE listing_id = ANY($1)
+         WHERE listing_id = ANY($1::bigint[])
          ORDER BY display_order ASC`,
         [orderedIds],
       );
       for (const img of imageRows) {
-        const listingId = img.listing_id as number;
+        const listingId = Number(img.listing_id);
         (imagesByListing[listingId] ??= []).push(img as ListingImage);
       }
 
       const byId = new Map<number, ListingRow>(
-        listingRows.map((r) => [(r as ListingRow).id as number, r as ListingRow]),
+        listingRows.map((r) => [Number((r as ListingRow).id), r as ListingRow]),
       );
 
       favoriteListings = orderedIds
@@ -56,8 +55,8 @@ export default async function FavoritesPage() {
         .filter((r): r is ListingRow => r != null)
         .map((r) => ({
           ...r,
-          favorited_at: favoritedAtById.get(r.id as number)!,
-          images: imagesByListing[r.id as number] ?? [],
+          favorited_at: favoritedAtById.get(Number(r.id))!,
+          images: imagesByListing[Number(r.id)] ?? [],
         }));
     }
   } catch (error) {

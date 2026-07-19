@@ -53,6 +53,11 @@ export default async function ListingPage({ params }: ListingPageProps) {
     notFound();
   }
 
+  // node-pg returns bigint id columns as strings; normalize here so every
+  // downstream consumer (props, API request bodies, zod validation) gets a
+  // real number rather than a string that merely satisfies TS's `as number`.
+  listing.id = Number(listing.id);
+
   if (listing.status !== "published") {
     const sessionResult = await getOptionalSessionUser();
     const role = sessionResult?.profile?.role;
@@ -75,12 +80,12 @@ export default async function ListingPage({ params }: ListingPageProps) {
     hoursCountResult,
     branchesResult,
     _openingHoursResult,
+    featuresResult,
   ] = await Promise.all([
     query(
       `SELECT * FROM listing_images
        WHERE listing_id = $1
-       ORDER BY display_order ASC
-       LIMIT 50`,
+       ORDER BY display_order ASC`,
       [listingId],
     ),
     getFavoritedListingIdsForUser(null, [listingId]).catch(() => new Set()),
@@ -111,6 +116,13 @@ export default async function ListingPage({ params }: ListingPageProps) {
        ORDER BY day_of_week ASC`,
       [listingId],
     ),
+    query(
+      `SELECT m.name, m.description, m.icon_emoji
+       FROM listing_features lf
+       JOIN listing_features_master m ON m.id = lf.feature_id
+       WHERE lf.listing_id = $1 AND m.is_active = true`,
+      [listingId],
+    ),
   ]);
 
   const images = imagesResult.rows;
@@ -119,13 +131,16 @@ export default async function ListingPage({ params }: ListingPageProps) {
   const hoursCount = hoursCountResult.rows[0]?.count as number | undefined;
   const branches = branchesResult.rows;
   const _openingHours = _openingHoursResult.rows;
-
-  const MAX_GALLERY_IMAGES = 20;
+  const dbFeatures = featuresResult.rows.map((f) => ({
+    name: String(f.name),
+    icon: String(f.icon_emoji || "✨"),
+    description: String(f.description || ""),
+  }));
 
   // Filter out menu images from gallery (they have /menu/ in the URL path)
-  const galleryImages = (images || [])
-    .filter((img) => !String(img.url).includes("/menu/"))
-    .slice(0, MAX_GALLERY_IMAGES);
+  const galleryImages = (images || []).filter(
+    (img) => !String(img.url).includes("/menu/"),
+  );
 
   const menuImages = (images || [])
     .filter((img) => String(img.url).includes("/menu/"))
@@ -192,7 +207,7 @@ export default async function ListingPage({ params }: ListingPageProps) {
               )}
 
               {/* Features & Amenities */}
-              <ListingFeatures listing={listing} />
+              <ListingFeatures listing={listing} initialFeatures={dbFeatures} />
 
               {/* Menu Section - Only for Restaurants */}
               {isRestaurant && (

@@ -1,8 +1,7 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { deleteFile } from "@/lib/storage/spaces";
+import { deleteFile, getListingImageKeyFromUrl } from "@/lib/storage/spaces";
 
 /**
  * SUPER ADMIN ONLY: Bulk delete ALL listings
@@ -52,10 +51,10 @@ export async function DELETE(request: NextRequest) {
       const storageFilesToDelete: string[] = [];
       for (const image of allImages) {
         try {
-          const urlParts = image.url.split("/");
-          const folderName = urlParts[urlParts.length - 2];
-          const fileName = urlParts[urlParts.length - 1];
-          storageFilesToDelete.push(`${folderName}/${fileName}`);
+          const key = getListingImageKeyFromUrl(image.url);
+          if (key) {
+            storageFilesToDelete.push(key);
+          }
         } catch (error) {
           console.error("Error parsing image URL:", error);
         }
@@ -68,7 +67,7 @@ export async function DELETE(request: NextRequest) {
         let storageFailures = 0;
         for (const path of storageFilesToDelete) {
           try {
-            await deleteFile(path, "listing-images");
+            await deleteFile(path);
           } catch (storageError) {
             storageFailures += 1;
             console.error(

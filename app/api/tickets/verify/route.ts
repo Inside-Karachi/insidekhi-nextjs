@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import crypto from "crypto";
 
 // Ticket verification for organizer check-in. Verifies code + signature, enforces organizer
@@ -54,7 +55,6 @@ export async function POST(
   request: NextRequest,
 ): Promise<NextResponse<VerifyResponse>> {
   try {
-    const supabase = await createServerSupabase();
     const body: VerifyRequest = await request.json();
     const { code, eventId } = body;
 
@@ -86,12 +86,9 @@ export async function POST(
     }
 
     // Get authenticated user (organizer)
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         {
           success: false,
@@ -103,38 +100,23 @@ export async function POST(
     }
 
     // Fetch ticket pass with related data
-    const { data: ticketPass, error: ticketError } = await supabase
-      .from("ticket_passes")
-      .select(
-        `
-        id,
-        code,
-        signature,
-        status,
-        guest_name,
-        checked_in_at,
-        booking_id,
-        event_id,
-        ticket_type_id,
-        bookings!inner(
-          id,
-          user_id,
-          payment_status
-        ),
-        events!inner(
-          id,
-          name,
-          organizer_id
-        ),
-        ticket_types(
-          name
-        )
-      `,
-      )
-      .eq("code", normalizedCode)
-      .single();
+    const { rows: ticketPassRows } = await query(
+      `SELECT tp.id, tp.code, tp.signature, tp.status, tp.guest_name,
+              tp.checked_in_at, tp.booking_id, tp.event_id, tp.ticket_type_id,
+              b.id AS booking_row_id, b.user_id AS booking_user_id,
+              b.payment_status AS booking_payment_status,
+              e.id AS event_row_id, e.name AS event_name, e.organizer_id AS event_organizer_id,
+              tt.name AS ticket_type_name
+       FROM ticket_passes tp
+       INNER JOIN bookings b ON b.id = tp.booking_id
+       INNER JOIN events e ON e.id = tp.event_id
+       LEFT JOIN ticket_types tt ON tt.id = tp.ticket_type_id
+       WHERE tp.code = $1`,
+      [normalizedCode],
+    );
+    const ticketPass = ticketPassRows[0];
 
-    if (ticketError || !ticketPass) {
+    if (!ticketPass) {
       return NextResponse.json(
         {
           success: false,
@@ -145,27 +127,28 @@ export async function POST(
       );
     }
 
-    // Type assertions for nested relations
-    const booking = ticketPass.bookings as {
-      id: number;
-      user_id: string;
-      payment_status: string;
+    const booking = {
+      id: ticketPass.booking_row_id as number,
+      user_id: ticketPass.booking_user_id as string,
+      payment_status: ticketPass.booking_payment_status as string,
     };
-    const event = ticketPass.events as {
-      id: number;
-      name: string;
-      organizer_id: string;
+    const event = {
+      id: ticketPass.event_row_id as number,
+      name: ticketPass.event_name as string,
+      organizer_id: ticketPass.event_organizer_id as string,
     };
-    const ticketType = ticketPass.ticket_types as { name: string } | null;
+    const ticketType = ticketPass.ticket_type_name
+      ? { name: ticketPass.ticket_type_name as string }
+      : null;
 
     // Verify organizer owns this event
-    if (event.organizer_id !== user.id) {
+    if (event.organizer_id !== session.userId) {
       // Check if user is admin (can verify any ticket)
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
+      const { rows: profileRows } = await query(
+        `SELECT role FROM profiles WHERE id = $1`,
+        [session.userId],
+      );
+      const profile = profileRows[0];
 
       const isAdmin =
         profile?.role === "admin" || profile?.role === "super_admin";
@@ -255,17 +238,16 @@ export async function POST(
 
     if (!alreadyCheckedIn) {
       // Conditional update: only update if checked_in_at is still NULL (atomic race protection)
-      const { data: updatedRows, error: updateError } = await supabase
-        .from("ticket_passes")
-        .update({
-          status: "checked_in",
-          checked_in_at: new Date().toISOString(),
-        })
-        .eq("id", ticketPass.id)
-        .is("checked_in_at", null)
-        .select("id");
-
-      if (updateError) {
+      let updatedRows;
+      try {
+        ({ rows: updatedRows } = await query(
+          `UPDATE ticket_passes
+           SET status = 'checked_in', checked_in_at = $2
+           WHERE id = $1 AND checked_in_at IS NULL
+           RETURNING id`,
+          [ticketPass.id, new Date().toISOString()],
+        ));
+      } catch (updateError) {
         console.error("Failed to update ticket status:", updateError);
         return NextResponse.json(
           {
@@ -295,20 +277,17 @@ export async function POST(
       }
 
       // Award XP for attending event
-      const serviceSupabase = await createServerSupabase({
-        useServiceRole: true,
-      });
-
       // Get attend_event XP value from xp_activities
       // Note: activity_slug is "attend_event", activity_name is display name "Attend Event"
-      const { data: xpActivity, error: xpQueryError } = await serviceSupabase
-        .from("xp_activities")
-        .select("xp_value")
-        .eq("activity_slug", "attend_event")
-        .eq("is_active", true)
-        .single();
-
-      if (xpQueryError) {
+      let xpActivity;
+      try {
+        const { rows: xpActivityRows } = await query(
+          `SELECT xp_value FROM xp_activities
+           WHERE activity_slug = $1 AND is_active = true`,
+          ["attend_event"],
+        );
+        xpActivity = xpActivityRows[0];
+      } catch (xpQueryError) {
         console.error("Failed to fetch XP activity:", xpQueryError);
       }
 
@@ -316,16 +295,18 @@ export async function POST(
         xpAwarded = xpActivity.xp_value;
 
         // Award XP to ticket holder
-        const { error: xpError } = await serviceSupabase
-          .from("points_log")
-          .insert({
-            user_id: booking.user_id,
-            points: xpAwarded,
-            reason: `Attended event: ${event.name}`,
-            related_id: ticketPass.id, // Store ticket_pass id for audit
-          });
-
-        if (xpError) {
+        try {
+          await query(
+            `INSERT INTO points_log (user_id, points, reason, related_id)
+             VALUES ($1, $2, $3, $4)`,
+            [
+              booking.user_id,
+              xpAwarded,
+              `Attended event: ${event.name}`,
+              ticketPass.id, // Store ticket_pass id for audit
+            ],
+          );
+        } catch (xpError) {
           console.error("Failed to award XP:", xpError);
           // Don't fail the check-in, just log the error
         }
@@ -380,15 +361,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    const supabase = await createServerSupabase();
-
     // Get authenticated user
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
         { status: 401 },
@@ -398,50 +374,43 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const normalizedCode = code.toUpperCase().trim();
 
     // Fetch ticket pass
-    const { data: ticketPass, error } = await supabase
-      .from("ticket_passes")
-      .select(
-        `
-        id,
-        code,
-        status,
-        guest_name,
-        checked_in_at,
-        event_id,
-        events!inner(
-          id,
-          name,
-          organizer_id,
-          start_time
-        ),
-        ticket_types(name)
-      `,
-      )
-      .eq("code", normalizedCode)
-      .single();
+    const { rows: ticketPassRows } = await query(
+      `SELECT tp.id, tp.code, tp.status, tp.guest_name, tp.checked_in_at, tp.event_id,
+              e.id AS event_row_id, e.name AS event_name, e.organizer_id AS event_organizer_id,
+              e.start_time AS event_start_time,
+              tt.name AS ticket_type_name
+       FROM ticket_passes tp
+       INNER JOIN events e ON e.id = tp.event_id
+       LEFT JOIN ticket_types tt ON tt.id = tp.ticket_type_id
+       WHERE tp.code = $1`,
+      [normalizedCode],
+    );
+    const ticketPass = ticketPassRows[0];
 
-    if (error || !ticketPass) {
+    if (!ticketPass) {
       return NextResponse.json(
         { success: false, error: "Ticket not found" },
         { status: 404 },
       );
     }
 
-    const event = ticketPass.events as {
-      id: number;
-      name: string;
-      organizer_id: string;
-      start_time: string;
+    const event = {
+      id: ticketPass.event_row_id as number,
+      name: ticketPass.event_name as string,
+      organizer_id: ticketPass.event_organizer_id as string,
+      start_time: ticketPass.event_start_time as string,
     };
-    const ticketType = ticketPass.ticket_types as { name: string } | null;
+    const ticketType = ticketPass.ticket_type_name
+      ? { name: ticketPass.ticket_type_name as string }
+      : null;
 
     // Verify organizer owns this event
-    if (event.organizer_id !== user.id) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
+    if (event.organizer_id !== session.userId) {
+      const { rows: profileRows } = await query(
+        `SELECT role FROM profiles WHERE id = $1`,
+        [session.userId],
+      );
+      const profile = profileRows[0];
 
       const isAdmin =
         profile?.role === "admin" || profile?.role === "super_admin";

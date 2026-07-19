@@ -1,4 +1,3 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
@@ -384,9 +383,35 @@ export async function GET(request: NextRequest) {
         commentCountMap = new Map<number, number>();
       }
 
+      let imagesByReview = new Map<
+        number,
+        Array<{ id: number; image_url: string; created_at: string }>
+      >();
+      try {
+        const { rows: imageRows } = await query(
+          `SELECT id, review_id, image_url, to_json(created_at) #>> '{}' AS created_at
+           FROM review_images WHERE review_id = ANY($1::bigint[])`,
+          [reviewIds]
+        );
+        imagesByReview = new Map();
+        for (const img of imageRows) {
+          const reviewId = Number(img.review_id);
+          const list = imagesByReview.get(reviewId) ?? [];
+          list.push({
+            id: Number(img.id),
+            image_url: img.image_url,
+            created_at: img.created_at,
+          });
+          imagesByReview.set(reviewId, list);
+        }
+      } catch (error) {
+        console.error("Error fetching review images:", error);
+      }
+
       const reviewsWithCommentCount = reviews.map((review) => ({
         ...review,
         comment_count: commentCountMap.get(review.id) || 0,
+        review_images: imagesByReview.get(review.id) ?? [],
       }));
 
       return NextResponse.json({

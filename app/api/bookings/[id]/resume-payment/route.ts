@@ -1,4 +1,3 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 /**
  * Resume Payment API Route
  *
@@ -9,13 +8,13 @@ import { createServerSupabase } from "@/lib/supabase/server";
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionFromCookies } from "@/lib/auth/session";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-    const supabase = await createServerSupabase();
   try {
     const { id } = await params;
     const bookingId = parseInt(id);
@@ -25,21 +24,23 @@ export async function POST(
         { error: "Invalid booking ID" },
         { status: 400 }
       );
-    }    // Check Auth
-    const session = await getSessionFromCookies();
+    }
+
+    // Check Auth
+    const session = await getSession(request);
 
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Fetch booking
-    const { data: booking, error: bookingError } = await supabase
-      .from("bookings")
-      .select("*")
-      .eq("id", bookingId)
-      .single();
+    const { rows: bookingRows } = await query(
+      `SELECT * FROM bookings WHERE id = $1`,
+      [bookingId]
+    );
+    const booking = bookingRows[0];
 
-    if (bookingError || !booking) {
+    if (!booking) {
       return NextResponse.json({ error: "Booking not found" }, { status: 404 });
     }
 
@@ -76,17 +77,15 @@ export async function POST(
 
     // Extend expiration by 30 minutes
     const newExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
 
-    const { error: updateError } = await adminSupabase
-      .from("bookings")
-      .update({
-        expires_at: newExpiresAt,
-        payment_status: "awaiting_payment", // Reset to awaiting_payment
-      })
-      .eq("id", bookingId);
-
-    if (updateError) {
+    try {
+      await query(
+        `UPDATE bookings
+         SET expires_at = $2, payment_status = 'awaiting_payment'
+         WHERE id = $1`,
+        [bookingId, newExpiresAt]
+      );
+    } catch (updateError) {
       console.error("Failed to extend booking expiration:", updateError);
       return NextResponse.json(
         { error: "Failed to resume payment" },
@@ -100,7 +99,7 @@ export async function POST(
       booking: {
         id: booking.id,
         booking_reference: booking.booking_reference,
-        total_amount: booking.total_amount,
+        total_amount: Number(booking.total_amount),
         customer_name: booking.customer_name,
         customer_email: booking.customer_email,
         customer_phone: booking.customer_phone,

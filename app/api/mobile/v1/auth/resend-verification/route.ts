@@ -1,4 +1,3 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { type NextRequest } from "next/server";
 import { z } from "zod";
 import { mobileRoute } from "@/lib/mobile/handler";
@@ -8,7 +7,8 @@ import {
   enforceResendVerificationLimit,
 } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { createMobilePublicClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
+import { v4 as uuidv4 } from "uuid";
 
 export const dynamic = "force-dynamic";
 
@@ -38,15 +38,37 @@ export const POST = mobileRoute(async (request: NextRequest) => {
 
   await enforceResendVerificationLimit(email);
 
-  // No `emailRedirectTo`: the confirmation link uses the Supabase project's
-  // default Site URL (the web confirm page). A mobile deep-link target can be
-  // added here once the app defines its universal link.
-  const supabase = createMobilePublicClient();
-  const { error } = await supabase.auth.resend({ type: "signup", email });
-  // Swallow "already confirmed / not found"-style errors (enumeration-safe);
-  // only log genuinely unexpected failures.
-  if (error && !/already|not found|not confirmed/i.test(error.message)) {
-    console.error("[mobile-api] resend-verification failed:", error.message);
+  // Enumeration-safe: identical `{ sent: true }` response regardless of
+  // whether the address exists or is already confirmed; only unexpected DB
+  // errors are logged. Mirrors `app/api/auth/resend-verification`.
+  try {
+    const { rows } = await query(
+      `SELECT id, email_confirmed_at FROM auth.users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+      [email],
+    );
+    const user = rows[0];
+
+    if (user && !user.email_confirmed_at) {
+      const confirmationToken = uuidv4();
+      const now = new Date().toISOString();
+
+      await query(
+        `UPDATE auth.users SET confirmation_token = $1, confirmation_sent_at = $2 WHERE id = $3`,
+        [confirmationToken, now, user.id],
+      );
+
+      const baseUrl = (
+        process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"
+      ).replace(/\/+$/, "");
+      console.log(
+        `[VERIFICATION EMAIL LINK]: ${baseUrl}/api/auth/callback?token=${confirmationToken}`,
+      );
+    }
+  } catch (error) {
+    console.error(
+      "[mobile-api] resend-verification failed:",
+      error instanceof Error ? error.message : error,
+    );
   }
 
   return ok({ sent: true });

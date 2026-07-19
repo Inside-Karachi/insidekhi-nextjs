@@ -1,4 +1,3 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 /**
  * PayFast Token API Route
  *
@@ -16,7 +15,8 @@ import {
   formatPayFastMobile,
   getPayFastTransactionUrl,
 } from "@/lib/payments/payfast";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { z } from "zod";
 
 // Input validation schema
@@ -30,14 +30,9 @@ const TokenRequestSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-  const session = await getSessionFromCookies();
   try {
     // Require authenticated session
-    const authSupabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await authSupabase.auth.getUser();
+    const session = await getSession(request);
     if (!session) {
       return NextResponse.json(
         { success: false, error: "Authentication required" },
@@ -64,16 +59,13 @@ export async function POST(request: NextRequest) {
       validation.data;
 
     // Look up booking server-side and derive amount from DB (ignore client-supplied amount)
-    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
-    const { data: booking, error: bookingError } = await serviceSupabase
-      .from("bookings")
-      .select("id, user_id, total_amount")
-      .eq("basket_id", basketId)
-      .single();
+    const { rows: bookingRows } = await query(
+      `SELECT id, user_id, total_amount FROM bookings WHERE basket_id = $1`,
+      [basketId],
+    );
+    const booking = bookingRows[0];
 
-    if (bookingError || !booking) {
+    if (!booking) {
       return NextResponse.json(
         { success: false, error: "Booking not found" },
         { status: 404 },

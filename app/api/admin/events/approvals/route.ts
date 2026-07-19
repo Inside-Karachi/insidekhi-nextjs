@@ -1,4 +1,3 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query, pool } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
@@ -334,7 +333,7 @@ export async function POST(request: NextRequest) {
                 proposedData?.is_featured ?? false,
                 proposedData?.is_commission_based ?? false,
                 proposedData?.commission_rate ?? null,
-                proposedData?.status ?? "draft",
+                "published",
                 proposedData?.require_guest_details ?? false,
               ]
             );
@@ -355,10 +354,10 @@ export async function POST(request: NextRequest) {
                  is_featured = COALESCE($11, is_featured),
                  is_commission_based = COALESCE($12, is_commission_based),
                  commission_rate = COALESCE($13, commission_rate),
-                 status = COALESCE($14, status),
-                 require_guest_details = COALESCE($15, require_guest_details),
+                 status = 'published',
+                 require_guest_details = COALESCE($14, require_guest_details),
                  updated_at = NOW()
-               WHERE id = $16`,
+               WHERE id = $15`,
               [
                 proposedData?.name ?? null,
                 proposedData?.description ?? null,
@@ -373,7 +372,6 @@ export async function POST(request: NextRequest) {
                 proposedData?.is_featured ?? null,
                 proposedData?.is_commission_based ?? null,
                 proposedData?.commission_rate ?? null,
-                proposedData?.status ?? null,
                 proposedData?.require_guest_details ?? null,
                 changeRequest.event_id,
               ]

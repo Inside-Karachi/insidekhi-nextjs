@@ -4,6 +4,7 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 import { deriveStateCode } from "@/lib/payments/status-map";
 import type { BookingPaymentStatus } from "@/types/payments.types";
 
@@ -13,13 +14,14 @@ export const dynamic = "force-dynamic";
  * GET /api/mobile/v1/payments/status?booking_id=
  *
  * Poll a booking's payment state. Owner-scoped in-query (-> 404 if not the
- * caller's). `pass_count` uses the caller's RLS client - `ticket_passes` is
- * visible to the owner only once paid, so it naturally reads 0 until then.
- * Mirrors `app/api/payments/status`.
+ * caller's). `pass_count` is only fetched for paid bookings (previously
+ * enforced by RLS - `ticket_passes` visible to the owner only once paid - now
+ * an explicit guard since direct Postgres has no RLS), so it naturally reads
+ * 0 until then. Mirrors `app/api/payments/status`.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
   const idRaw = new URL(request.url).searchParams.get("booking_id");
@@ -33,29 +35,24 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const { data: booking, error: bErr } = await supabase
-    .from("bookings")
-    .select("id, booking_reference, payment_status")
-    .eq("id", bookingId)
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (bErr) {
-    console.error("[mobile-api] status booking lookup failed:", bErr.message);
-    throw new MobileApiError("internal_error", "Failed to load status.", 500);
-  }
+  const { rows: bookingRows } = await query(
+    `SELECT id, booking_reference, payment_status
+     FROM bookings WHERE id = $1 AND user_id = $2`,
+    [bookingId, user.id],
+  );
+  const booking = bookingRows[0];
   if (!booking) {
     throw new MobileApiError("not_found", "Booking not found.", 404);
   }
 
-  const { count, error: cErr } = await supabase
-    .from("ticket_passes")
-    .select("id", { count: "exact", head: true })
-    .eq("booking_id", bookingId);
-  if (cErr) {
-    console.error("[mobile-api] status pass count failed:", cErr.message);
-    throw new MobileApiError("internal_error", "Failed to load status.", 500);
+  let passCount = 0;
+  if (booking.payment_status === "paid") {
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*)::int AS count FROM ticket_passes WHERE booking_id = $1`,
+      [bookingId],
+    );
+    passCount = countRows[0]?.count ?? 0;
   }
-  const passCount = count ?? 0;
 
   return ok({
     booking_id: booking.id,

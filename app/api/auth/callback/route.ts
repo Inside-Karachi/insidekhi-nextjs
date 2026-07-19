@@ -1,28 +1,25 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { query } from "@/lib/db";
 import { setSession } from "@/lib/auth/session";
 
 export async function GET(request: NextRequest) {
-  const session = await getSessionFromCookies();
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get("code");
   const token = requestUrl.searchParams.get("token") || code; // Support both naming styles
-  
+
   if (token) {
     try {
       // Find user with this confirmation/recovery token
       const { rows } = await query(
-        `SELECT id, email, role, email_confirmed_at 
-         FROM public.profiles 
+        `SELECT id, email, role, email_confirmed_at
+         FROM public.profiles
          LEFT JOIN auth.users ON public.profiles.id = auth.users.id
-         WHERE auth.users.confirmation_token = $1 
+         WHERE auth.users.confirmation_token = $1
             OR auth.users.recovery_token = $1 LIMIT 1`,
         [token]
       );
-      
+
       const user = rows[0];
 
       if (!user) {
@@ -36,16 +33,16 @@ export async function GET(request: NextRequest) {
 
       // Update email verification status in database
       await query(
-        `UPDATE auth.users 
-         SET email_confirmed_at = $1, confirmation_token = NULL, recovery_token = NULL 
+        `UPDATE auth.users
+         SET email_confirmed_at = $1, confirmation_token = NULL, recovery_token = NULL
          WHERE id = $2`,
-        [now, session.userId]
+        [now, user.id]
       );
 
       // Create local session cookie
       const response = NextResponse.redirect(new URL("/dashboard", requestUrl.origin));
       await setSession(response, {
-        userId: session.userId,
+        userId: user.id,
         email: user.email,
         role: user.role,
       });
@@ -58,7 +55,7 @@ export async function GET(request: NextRequest) {
         // Keep session set but redirect to verification success page
         const redirectResponse = NextResponse.redirect(successUrl);
         await setSession(redirectResponse, {
-          userId: session.userId,
+          userId: user.id,
           email: user.email,
           role: user.role,
         });
@@ -80,4 +77,3 @@ export async function GET(request: NextRequest) {
   // Fallback: redirect to home page
   return NextResponse.redirect(requestUrl.origin);
 }
-

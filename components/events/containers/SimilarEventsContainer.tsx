@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { SimilarEventsCarousel } from "@/components/events/SimilarEventsCarousel";
 import { Event } from "@/types/events.types";
 
@@ -9,16 +9,12 @@ interface SimilarEventsContainerProps {
 export async function SimilarEventsContainer({
   eventId,
 }: SimilarEventsContainerProps) {
-  const supabase = await createServerSupabase({ publicAnon: true });
-
-  const { data: similarEvents } = await supabase
-    .from("events_with_details")
-    .select("*")
-    .neq("event_id", eventId)
-    .eq("event_status", "published")
-    .gte("start_time", new Date().toISOString())
-    .order("start_time", { ascending: true })
-    .limit(6);
+  const { rows: similarEvents } = await query(
+    `SELECT * FROM events_with_details
+     WHERE event_id != $1 AND event_status = 'published' AND start_time >= $2
+     ORDER BY start_time ASC LIMIT 6`,
+    [eventId, new Date().toISOString()],
+  );
 
   if (!similarEvents || similarEvents.length === 0) {
     return null;
@@ -26,17 +22,16 @@ export async function SimilarEventsContainer({
 
   // Fetch images for similar events
   const similarEventIds = similarEvents
-    .map((e) => e.event_id)
+    .map((e) => Number(e.event_id))
     .filter((id): id is number => Boolean(id));
 
-  const { data: similarEventImages } =
+  const { rows: similarEventImages } =
     similarEventIds.length > 0
-      ? await supabase
-          .from("event_images")
-          .select("*")
-          .in("event_id", similarEventIds)
-          .order("display_order", { ascending: true })
-      : { data: [] };
+      ? await query(
+          `SELECT * FROM event_images WHERE event_id = ANY($1) ORDER BY display_order ASC`,
+          [similarEventIds],
+        )
+      : { rows: [] as { event_id: number }[] };
 
   // Map similar events to Event type
   const mappedSimilarEvents: Event[] = similarEvents
@@ -51,7 +46,7 @@ export async function SimilarEventsContainer({
         row.organizer_id,
     )
     .map((row) => ({
-      id: row.event_id!,
+      id: Number(row.event_id),
       name: row.event_name!,
       slug: row.event_slug!,
       description: row.event_description,
@@ -66,8 +61,9 @@ export async function SimilarEventsContainer({
       latitude: row.latitude,
       longitude: row.longitude,
       images:
-        similarEventImages?.filter((img) => img.event_id === row.event_id) ||
-        [],
+        similarEventImages?.filter(
+          (img) => Number(img.event_id) === Number(row.event_id),
+        ) || [],
     }));
 
   if (mappedSimilarEvents.length === 0) {

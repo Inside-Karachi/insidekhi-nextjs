@@ -24,7 +24,7 @@ function createRequestId(): string {
 function listingPatchError(
   requestId: string,
   status: number,
-  code: "FORBIDDEN" | "NOT_FOUND" | "VALIDATION_ERROR" | "UPDATE_FAILED" | "INTERNAL_ERROR",
+  code: "FORBIDDEN" | "NOT_FOUND" | "VALIDATION_ERROR" | "UPDATE_FAILED" | "PENDING_REQUEST_EXISTS" | "INTERNAL_ERROR",
   error: string,
   details?: Record<string, unknown>,
 ) {
@@ -372,7 +372,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         return listingPatchError(
           requestId,
           409,
-          "UPDATE_FAILED",
+          "PENDING_REQUEST_EXISTS",
           "You already have a pending change request for this listing. Please wait for admin review or cancel the existing request.",
           {
             existingRequestId: existingRequest.id,
@@ -508,6 +508,11 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       "facebook_url",
       "instagram_url",
       "whatsapp_number",
+      "youtube_url",
+      "google_maps_url",
+      "latitude",
+      "longitude",
+      "custom_attributes",
       "parking_information",
       "parking_amenities",
       "status",
@@ -521,12 +526,46 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       ALLOWED_UPDATE_COLUMNS.includes(key),
     );
 
+    // Reject unknown fields explicitly rather than silently ignoring them
+    const rejectedKeys = Object.keys(updateData).filter(
+      (key) => !ALLOWED_UPDATE_COLUMNS.includes(key),
+    );
+    if (rejectedKeys.length > 0 && updateKeys.length === 0) {
+      return listingPatchError(
+        requestId,
+        400,
+        "VALIDATION_ERROR",
+        `No valid update fields provided. Unsupported fields: ${rejectedKeys.join(", ")}`,
+        { rejectedKeys },
+      );
+    }
+
+    if (updateKeys.length === 0) {
+      return listingPatchError(
+        requestId,
+        400,
+        "VALIDATION_ERROR",
+        "No valid update fields provided",
+      );
+    }
+
     const setClauses = updateKeys.map(
       (key, idx) => `"${key}" = $${idx + 1}`,
     );
     setClauses.push(`updated_at = $${updateKeys.length + 1}`);
     const values = [
-      ...updateKeys.map((key) => (updateData as Record<string, unknown>)[key]),
+      ...updateKeys.map((key) => {
+        const value = (updateData as Record<string, unknown>)[key];
+        // JSON/JSONB columns need stringified objects/arrays for node-pg
+        if (
+          (key === "custom_attributes" || key === "parking_amenities") &&
+          value !== null &&
+          typeof value === "object"
+        ) {
+          return JSON.stringify(value);
+        }
+        return value;
+      }),
       new Date().toISOString(),
     ];
     values.push(listingId);

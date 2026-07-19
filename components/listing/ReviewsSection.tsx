@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { PaginatedReviews } from "@/components/listing/PaginatedReviews";
 import { ReviewCreationModal } from "@/components/review/ReviewCreationModal";
 import { FullScreenReview } from "@/components/review/FullScreenReview";
-import { createClient } from "@/lib/supabase/client";
+import { useSupabaseUser } from "@/hooks/useSupabaseUser";
 import { useToast } from "@/hooks/use-toast";
 import { useBranchSelection } from "@/lib/context/BranchSelectionContext";
 import { useMediaQuery } from "@/lib/hooks/use-media-query";
@@ -56,16 +56,10 @@ export function ReviewsSection({
   listingName,
   branches,
 }: ReviewsSectionProps) {
-  const supabaseRef = React.useRef(createClient());
-  const supabase = supabaseRef.current;
   const { toast } = useToast();
   const { selectedBranchId } = useBranchSelection();
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
-  const [_currentUser, _setCurrentUser] = useState<{
-    id: string;
-    email?: string;
-  } | null>(null);
-  const [isCheckingAuth, setIsCheckingAuth] = useState(false);
+  const { user: _currentUser, isLoading: isCheckingAuth } = useSupabaseUser();
 
   // Check if desktop (lg breakpoint = 1024px, same as ListingPageWrapper)
   const isDesktop = useMediaQuery("(min-width: 1024px)");
@@ -91,59 +85,8 @@ export function ReviewsSection({
     ? allReviews.filter((review) => review.branch_id === selectedBranchId)
     : allReviews;
 
-  // Check if user is authenticated on mount - deferred to next tick
-  useEffect(() => {
-    // Use setTimeout to defer this to next event loop
-    // This prevents it from blocking the initial render
-    const timeoutId = setTimeout(async () => {
-      try {
-        const {
-          data: { user },
-          error,
-        } = await supabase.auth.getUser();
-        if (error) throw error;
-        _setCurrentUser(user);
-      } catch (error) {
-        // Suppress AuthSessionMissingError - it's expected when user is not logged in
-        if (
-          error instanceof Error &&
-          error.name !== "AuthSessionMissingError"
-        ) {
-          console.error("Initial auth check failed:", error);
-        }
-        _setCurrentUser(null);
-      }
-    }, 0);
-
-    return () => clearTimeout(timeoutId);
-  }, [supabase.auth]);
-
-  // Check if user is authenticated
-  const checkAuth = async () => {
-    setIsCheckingAuth(true);
-    try {
-      const {
-        data: { user },
-        error,
-      } = await supabase.auth.getUser();
-      if (error) throw error;
-      _setCurrentUser(user);
-      return !!user;
-    } catch (error) {
-      // Suppress AuthSessionMissingError - it's expected when user is not logged in
-      if (error instanceof Error && error.name !== "AuthSessionMissingError") {
-        console.error("Auth check failed:", error);
-      }
-      _setCurrentUser(null);
-      return false;
-    } finally {
-      setIsCheckingAuth(false);
-    }
-  };
-
-  const handleWriteReview = async () => {
-    const isAuthenticated = await checkAuth();
-    if (!isAuthenticated) {
+  const handleWriteReview = () => {
+    if (!_currentUser) {
       toast({
         title: "Login Required",
         description: "Please log in to write a review for this place.",

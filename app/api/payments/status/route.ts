@@ -1,11 +1,10 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import { deriveStateCode } from "@/lib/payments/status-map";
 import { BookingPaymentStatus } from "@/types/payments.types";
 
 export async function GET(req: NextRequest) {
-  const session = await getSessionFromCookies();
   const url = new URL(req.url);
   const bookingIdParam = url.searchParams.get("booking_id");
   if (!bookingIdParam) {
@@ -20,31 +19,27 @@ export async function GET(req: NextRequest) {
   }
 
   // Require authenticated session
-  const authSupabase = await createServerSupabase();
-  const {
-    data: { user },
-    error: authError,
-  } = await authSupabase.auth.getUser();
+  const session = await getSession(req);
   if (!session) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   }
 
-  // Use service role for the lookup but restrict by user_id to prevent IDOR
-  const supabase = await createServerSupabase({ useServiceRole: true });
-  const { data: booking, error } = await supabase
-    .from("bookings")
-    .select("id, booking_reference, payment_status")
-    .eq("id", bookingId)
-    .eq("user_id", session.userId)
-    .single();
-  if (error || !booking) {
+  // Restrict by user_id to prevent IDOR
+  const { rows: bookingRows } = await query(
+    `SELECT id, booking_reference, payment_status
+     FROM bookings WHERE id = $1 AND user_id = $2`,
+    [bookingId, session.userId],
+  );
+  const booking = bookingRows[0];
+  if (!booking) {
     return NextResponse.json({ error: "Booking not found" }, { status: 404 });
   }
 
-  const { count: passCount } = await supabase
-    .from("ticket_passes")
-    .select("id", { count: "exact", head: true })
-    .eq("booking_id", bookingId);
+  const { rows: passRows } = await query(
+    `SELECT COUNT(*)::int AS count FROM ticket_passes WHERE booking_id = $1`,
+    [bookingId],
+  );
+  const passCount = passRows[0]?.count ?? 0;
 
   return NextResponse.json({
     booking_id: booking.id,

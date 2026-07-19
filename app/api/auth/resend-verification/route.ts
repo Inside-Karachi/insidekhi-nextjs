@@ -1,6 +1,6 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
-import { getAuthCallbackUrl } from "@/lib/auth/url";
+import { query } from "@/lib/db";
+import { v4 as uuidv4 } from "uuid";
 
 // Rate limiting configuration
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
@@ -85,44 +85,34 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = await createServerSupabase();
+    // For security, we don't reveal whether the email exists or is already
+    // verified - the response is identical either way to prevent email
+    // enumeration attacks.
+    try {
+      const { rows } = await query(
+        `SELECT id, email_confirmed_at FROM auth.users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+        [normalizedEmail],
+      );
+      const user = rows[0];
 
-    // For security, we can't directly check if a user exists without admin privileges
-    // Instead, we'll attempt to resend and handle the response appropriately
-    // This prevents email enumeration attacks
+      if (user && !user.email_confirmed_at) {
+        const confirmationToken = uuidv4();
+        const now = new Date().toISOString();
 
-    // Attempt to resend verification email
-    // Note: Supabase doesn't provide a direct way to check if email exists without admin access
-    // We'll use the resend method and handle the response
-    const { error: resendError } = await supabase.auth.resend({
-      type: "signup",
-      email: normalizedEmail,
-      options: {
-        emailRedirectTo: getAuthCallbackUrl(request.url),
-      },
-    });
+        await query(
+          `UPDATE auth.users SET confirmation_token = $1, confirmation_sent_at = $2 WHERE id = $3`,
+          [confirmationToken, now, user.id],
+        );
 
-    if (resendError) {
-      // Check if the error indicates the email doesn't exist or is already verified
-      if (
-        resendError.message?.includes("User not found") ||
-        resendError.message?.includes("Email not confirmed") ||
-        resendError.message?.includes("already")
-      ) {
-        // Don't reveal specific error for security
-        return NextResponse.json(
-          {
-            message:
-              "If an account with this email exists and is not verified, a new verification email has been sent.",
-          },
-          { status: 200 },
+        const baseUrl = (
+          process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"
+        ).replace(/\/+$/, "");
+        console.log(
+          `[VERIFICATION EMAIL LINK]: ${baseUrl}/api/auth/callback?token=${confirmationToken}`,
         );
       }
-
-      console.error("RESEND VERIFICATION: Failed to resend email:", {
-        error: resendError.message,
-        email: normalizedEmail,
-      });
+    } catch (dbError) {
+      console.error("RESEND VERIFICATION: Failed to resend email:", dbError);
 
       return NextResponse.json(
         {

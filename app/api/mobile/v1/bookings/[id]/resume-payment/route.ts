@@ -5,7 +5,7 @@ import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { parsePathId } from "@/lib/mobile/params";
-import { createMobileServiceClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -17,35 +17,25 @@ type RouteContext = { params: Promise<Record<string, string>> };
  * Re-arms an unpaid booking (extends `expires_at` +30min, resets to
  * `awaiting_payment`) so the caller can retry payment without creating a new
  * booking. Owner-scoped in-query (-> 404). Already paid / cancelled -> 400;
- * expired -> 410. The bookings UPDATE is service_role-only, so it runs through a
- * service client after the ownership + state checks. Redacted response (no
- * email/phone). Mirrors `app/api/bookings/[id]/resume-payment`.
+ * expired -> 410. Redacted response (no email/phone). Mirrors
+ * `app/api/bookings/[id]/resume-payment`.
  */
 export const POST = mobileRoute(
   async (request: NextRequest, context: RouteContext) => {
     await enforceMobileRateLimit(request);
-    const { user, supabase } = await requireMobileUser(request);
+    const { user } = await requireMobileUser(request);
     await enforceMobileRateLimit(request, user.id);
 
     const { id } = await context.params;
     const bookingId = parsePathId(id, "id");
 
-    const { data: booking, error: bErr } = await supabase
-      .from("bookings")
-      .select(
-        "id, booking_reference, total_amount, customer_name, status, payment_status, expires_at",
-      )
-      .eq("id", bookingId)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (bErr) {
-      console.error("[mobile-api] resume booking lookup failed:", bErr.message);
-      throw new MobileApiError(
-        "internal_error",
-        "Failed to resume payment.",
-        500,
-      );
-    }
+    const { rows: bookingRows } = await query(
+      `SELECT id, booking_reference, total_amount, customer_name, status, payment_status, expires_at
+       FROM bookings
+       WHERE id = $1 AND user_id = $2`,
+      [bookingId, user.id],
+    );
+    const booking = bookingRows[0];
     if (!booking) {
       throw new MobileApiError("not_found", "Booking not found.", 404);
     }
@@ -79,15 +69,15 @@ export const POST = mobileRoute(
     }
 
     const newExpiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-    const service = createMobileServiceClient();
-    const { error } = await service
-      .from("bookings")
-      .update({ expires_at: newExpiresAt, payment_status: "awaiting_payment" })
-      .eq("id", bookingId);
-    if (error) {
+    try {
+      await query(
+        `UPDATE bookings SET expires_at = $2, payment_status = 'awaiting_payment' WHERE id = $1`,
+        [bookingId, newExpiresAt],
+      );
+    } catch (error) {
       console.error(
         "[mobile-api] resume-payment update failed:",
-        error.message,
+        error instanceof Error ? error.message : error,
       );
       throw new MobileApiError(
         "internal_error",

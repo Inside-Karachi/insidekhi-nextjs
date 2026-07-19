@@ -1,4 +1,3 @@
-"use client";
 import { type NextRequest } from "next/server";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
@@ -7,13 +6,12 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { uploadFile, deleteFile } from "@/lib/storage/spaces";
+import { uploadPrefixedFile, deletePrefixedFile, PROFILES_AVATAR_PREFIX } from "@/lib/storage/spaces";
 import { query } from "@/lib/db";
 
 export const runtime = "nodejs"; // sharp needs the Node runtime
 export const dynamic = "force-dynamic";
 
-const BUCKET = "profiles_avatar";
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // matches the bucket's 5MB limit
 const MAX_INPUT_PIXELS = 24_000_000; // ~24MP - decompression-bomb guard
 const ALLOWED_DECODED = new Set(["jpeg", "png", "webp", "avif"]);
@@ -91,11 +89,18 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   const path = `${user.id}/avatar-${Date.now()}-${randomUUID()}.webp`;
   
   let avatarUrl;
+  let uploadedPath: string | undefined;
   try {
-    const uploadResult = await uploadFile(path, webp, { bucket: BUCKET, contentType: "image/webp" });
+    const uploadResult = await uploadPrefixedFile(
+      PROFILES_AVATAR_PREFIX,
+      path,
+      webp,
+      { contentType: "image/webp" },
+    );
     avatarUrl = uploadResult.publicUrl;
-  } catch (upErr: any) {
-    console.error("[mobile-api] avatar upload failed:", upErr.message || upErr);
+    uploadedPath = uploadResult.path;
+  } catch (upErr: unknown) {
+    console.error("[mobile-api] avatar upload failed:", upErr instanceof Error ? upErr.message : upErr);
     throw new MobileApiError("internal_error", "Failed to upload avatar.", 500);
   }
 
@@ -104,13 +109,15 @@ export const POST = mobileRoute(async (request: NextRequest) => {
       "UPDATE public.profiles SET avatar_url = $1 WHERE id = $2",
       [avatarUrl, user.id]
     );
-  } catch (updErr: any) {
+  } catch (updErr: unknown) {
     try {
-      await deleteFile(path, BUCKET);
-    } catch (rmErr: any) {
-      console.error("[mobile-api] avatar cleanup failed:", rmErr.message || rmErr, path);
+      if (uploadedPath) {
+        await deletePrefixedFile(PROFILES_AVATAR_PREFIX, uploadedPath);
+      }
+    } catch (rmErr: unknown) {
+      console.error("[mobile-api] avatar cleanup failed:", rmErr instanceof Error ? rmErr.message : rmErr, path);
     }
-    console.error("[mobile-api] avatar profile update failed:", updErr.message || updErr);
+    console.error("[mobile-api] avatar profile update failed:", updErr instanceof Error ? updErr.message : updErr);
     throw new MobileApiError("internal_error", "Failed to save avatar.", 500);
   }
 

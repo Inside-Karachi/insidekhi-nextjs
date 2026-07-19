@@ -13,18 +13,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Star, User, Loader2, CheckCircle, Upload, X } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { Star, User as UserIcon, Loader2, CheckCircle, Upload, X } from "lucide-react";
+import { useSupabaseUser } from "@/hooks/useSupabaseUser";
 import { useToast } from "@/hooks/use-toast";
-
-interface User {
-  id: string;
-  email?: string;
-  user_metadata?: {
-    full_name?: string;
-    avatar_url?: string;
-  };
-}
 
 interface ReviewCreationModalProps {
   listingId: number;
@@ -49,8 +40,7 @@ export function ReviewCreationModal({
   const [hoverRating, setHoverRating] = React.useState<number>(0);
   const [comment, setComment] = React.useState<string>("");
   const [isSubmitting, setIsSubmitting] = React.useState<boolean>(false);
-  const [user, setUser] = React.useState<User | null>(null);
-  const [isLoadingUser, setIsLoadingUser] = React.useState<boolean>(true);
+  const { user, isLoading: isLoadingUser } = useSupabaseUser();
   const [uploadedImages, setUploadedImages] = React.useState<
     Array<{
       id: number;
@@ -63,63 +53,43 @@ export function ReviewCreationModal({
     React.useState<boolean>(false);
 
   const { toast } = useToast();
-  const supabaseRef = React.useRef(createClient());
-  const supabase = supabaseRef.current;
 
   // Track temp images for cleanup
   const tempImagesRef = React.useRef<string[]>([]);
 
-  // Get current user
+  // Close and warn if the modal opened without an authenticated user
   React.useEffect(() => {
-    const getUser = async () => {
-      try {
-        const {
-          data: { user },
-          error,
-        } = await supabase.auth.getUser();
-        if (error) throw error;
-        setUser(user);
-      } catch (error) {
-        console.error("Error getting user:", error);
-        toast({
-          title: "Authentication Required",
-          description: "Please log in to write a review.",
-          variant: "destructive",
-        });
-        onClose();
-      } finally {
-        setIsLoadingUser(false);
-      }
-    };
-
-    if (isOpen) {
-      getUser();
+    if (isOpen && !isLoadingUser && !user) {
+      toast({
+        title: "Authentication Required",
+        description: "Please log in to write a review.",
+        variant: "destructive",
+      });
+      onClose();
     }
-  }, [isOpen, toast, onClose, supabase.auth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, isLoadingUser, user]);
 
   // Cleanup temp images when modal closes without submission
   React.useEffect(() => {
     return () => {
       // Only cleanup if modal is closing (not on unmount during submission)
       if (!isOpen && tempImagesRef.current.length > 0) {
-        // Async cleanup - don't block modal close
-        const cleanupImages = async () => {
-          try {
-            await supabase.storage
-              .from("review-images")
-              .remove(tempImagesRef.current);
-            console.log(
-              `Cleaned up ${tempImagesRef.current.length} temp images`,
-            );
-          } catch (error) {
-            console.error("Error cleaning up temp images:", error);
-          }
-        };
-        cleanupImages();
+        // Async, best-effort cleanup - don't block modal close
+        const filesToClean = [...tempImagesRef.current];
         tempImagesRef.current = [];
+        for (const tempFileName of filesToClean) {
+          fetch("/api/reviews/temp-images", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tempFileName }),
+          }).catch((error) => {
+            console.error("Error cleaning up temp image:", error);
+          });
+        }
       }
     };
-  }, [isOpen, supabase.storage]);
+  }, [isOpen]);
 
   // Prevent body scroll when modal is open
   React.useEffect(() => {
@@ -313,41 +283,29 @@ export function ReviewCreationModal({
     setIsUploadingImage(true);
 
     try {
-      // Upload directly to Supabase Storage (RLS allows authenticated users)
-      const fileExt = file.name.split(".").pop();
-      const fileName = `temp/${user!.id}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+      const formData = new FormData();
+      formData.append("file", file);
 
-      const { error: uploadError } = await supabase.storage
-        .from("review-images")
-        .upload(fileName, file, {
-          cacheControl: "3600",
-          upsert: false,
-          contentType: file.type,
-        });
+      const response = await fetch("/api/reviews/temp-images", {
+        method: "POST",
+        body: formData,
+      });
+      const result = await response.json();
 
-      if (uploadError) {
-        throw uploadError;
-      }
-
-      // Get public URL
-      const { data: publicUrlData } = supabase.storage
-        .from("review-images")
-        .getPublicUrl(fileName);
-
-      if (!publicUrlData?.publicUrl) {
-        throw new Error("Failed to get public URL");
+      if (!response.ok) {
+        throw new Error(result.error || "Failed to upload image");
       }
 
       // Track temp file for cleanup
-      tempImagesRef.current.push(fileName);
+      tempImagesRef.current.push(result.data.tempFileName);
 
       // Add to uploaded images state
       setUploadedImages((prev) => [
         ...prev,
         {
           id: Date.now(),
-          image_url: publicUrlData.publicUrl,
-          tempFileName: fileName,
+          image_url: result.data.image_url,
+          tempFileName: result.data.tempFileName,
           uploading: false,
         },
       ]);
@@ -375,9 +333,11 @@ export function ReviewCreationModal({
     const image = uploadedImages.find((img) => img.id === imageId);
     if (image?.tempFileName) {
       try {
-        await supabase.storage
-          .from("review-images")
-          .remove([image.tempFileName]);
+        await fetch("/api/reviews/temp-images", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tempFileName: image.tempFileName }),
+        });
 
         // Remove from temp tracking
         tempImagesRef.current = tempImagesRef.current.filter(
@@ -428,14 +388,14 @@ export function ReviewCreationModal({
           {user && (
             <div className="flex items-center gap-3 p-4 bg-muted/50 rounded-lg">
               <Avatar className="h-10 w-10">
-                <AvatarImage src={user.user_metadata?.avatar_url} />
+                <AvatarImage src={user.avatar_url ?? undefined} />
                 <AvatarFallback>
-                  <User className="h-4 w-4" />
+                  <UserIcon className="h-4 w-4" />
                 </AvatarFallback>
               </Avatar>
               <div>
                 <p className="font-medium text-sm">
-                  {user.user_metadata?.full_name || user.email}
+                  {user.full_name || user.email}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   Your review will be published after moderation

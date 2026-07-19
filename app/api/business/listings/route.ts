@@ -33,9 +33,9 @@ export async function GET(request: NextRequest) {
     // Calculate offset
     const offset = (page - 1) * limit;
 
-    // Build WHERE clause: always filter by owner, optionally by status
+    // Build WHERE clause: always filter by owner (or legacy created_by), optionally by status
     const whereParams: unknown[] = [userId];
-    let whereSql = "owner_id = $1";
+    let whereSql = "(owner_id = $1 OR created_by = $1)";
     if (status) {
       whereParams.push(status);
       whereSql += ` AND status = $${whereParams.length}`;

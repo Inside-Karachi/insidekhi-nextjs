@@ -4,7 +4,7 @@ import {
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
 import { query } from "@/lib/db";
-import { uploadFile, deleteFile } from "@/lib/storage/spaces";
+import { uploadListingImage, deleteFile } from "@/lib/storage/spaces";
 
 export async function GET(
   request: NextRequest,
@@ -118,15 +118,16 @@ export async function POST(
     // Generate unique filename with folder structure
     const fileExt = file.name.split(".").pop();
     const fileName = `${listingId}/${listingId}-${Date.now()}.${fileExt}`;
-    // Upload to DigitalOcean Spaces
-    let publicUrl;
+    // Upload to DigitalOcean Spaces (default bucket, listing-images/ prefix)
+    let publicUrl: string;
+    let uploadedPath: string;
     try {
       const buffer = Buffer.from(await file.arrayBuffer());
-      const uploadResult = await uploadFile(fileName, buffer, {
-        bucket: "listing-images",
+      const uploadResult = await uploadListingImage(fileName, buffer, {
         contentType: file.type,
       });
       publicUrl = uploadResult.publicUrl;
+      uploadedPath = uploadResult.path;
     } catch {
       return NextResponse.json(
         { error: "Failed to upload image" },
@@ -161,7 +162,7 @@ export async function POST(
       imageData = rows[0];
     } catch (dbError) {
       console.error("Database insert error details:", dbError);
-      await deleteFile(fileName, "listing-images");
+      await deleteFile(uploadedPath);
       return NextResponse.json(
         {
           error: "Failed to save image data",

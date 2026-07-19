@@ -15,6 +15,7 @@ import {
 import { verifyRecaptcha } from "@/lib/utils/recaptcha";
 import { query } from "@/lib/db";
 import { hashPassword } from "@/lib/auth/password";
+import { setSession } from "@/lib/auth/session";
 import { v4 as uuidv4 } from "uuid";
 
 // Username validation function
@@ -288,9 +289,9 @@ export async function POST(request: Request) {
       }
     }
 
-    const response: SignupResponse = {
-      message: "Registration successful. You can now log in.",
-      redirectTo: `${requestUrl.origin}/login?message=Registration successful. You can now log in.`,
+    const responseBody: SignupResponse = {
+      message: "Registration successful.",
+      redirectTo: `${requestUrl.origin}/dashboard`,
       user: {
         id: newUserId,
         email: sanitizedEmail,
@@ -299,7 +300,7 @@ export async function POST(request: Request) {
       },
     };
 
-    return NextResponse.json(response, {
+    const response = NextResponse.json(responseBody, {
       headers: {
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
@@ -307,6 +308,15 @@ export async function POST(request: Request) {
         "Referrer-Policy": "strict-origin-when-cross-origin",
       },
     });
+
+    // Log the new user in immediately - skip the separate login step.
+    await setSession(response, {
+      userId: newUserId,
+      email: sanitizedEmail,
+      role: "public_user",
+    });
+
+    return response;
   } catch (error) {
     console.error("Signup error:", error);
     captureRouteError(error, { route: "/api/auth/signup", method: "POST" });

@@ -9,6 +9,7 @@ import {
   compareSearchRankThenIds,
   stableReorderBySearchRank,
 } from "@/lib/listings/search-relevance";
+import { OPEN_NOW_EXISTS_CLAUSE } from "@/lib/listings/query-paginated-listings";
 import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 
@@ -79,7 +80,7 @@ export default async function CategoryListingsPage({
 
   // Build the WHERE clause dynamically
   const whereClauses: string[] = ["status = 'published'", "is_featured = false"];
-  const queryParams: any[] = [];
+  const queryParams: unknown[] = [];
 
   // Filter by category names
   queryParams.push(categoryNamesForFilter);
@@ -103,7 +104,7 @@ export default async function CategoryListingsPage({
 
   // Apply open-now filter
   if (resolvedSearchParams.open_now === "true") {
-    whereClauses.push("is_open_now = true");
+    whereClauses.push(OPEN_NOW_EXISTS_CLAUSE);
   }
 
   // Apply deals filter
@@ -205,6 +206,7 @@ export default async function CategoryListingsPage({
   }
 
   const INITIAL_PAGE_SIZE = 12;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let listings: any[] = [];
   let totalCount = 0;
 
@@ -307,6 +309,7 @@ export default async function CategoryListingsPage({
   listings.forEach((l) => l.id && allListingIds.push(l.id));
   featuredListingsRaw.forEach((l) => l.id && allListingIds.push(l.id));
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const imagesMap: Record<number, any[]> = {};
 
   if (allListingIds.length > 0) {
@@ -361,7 +364,9 @@ export default async function CategoryListingsPage({
 
   // Compute SEO title & description
   const getCategoryContent = (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     currentCategory: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     categoriesList: any[],
   ) => {
     if (!currentCategory || currentCategory.slug === "all") {

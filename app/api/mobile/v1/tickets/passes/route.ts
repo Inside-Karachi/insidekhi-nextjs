@@ -4,6 +4,7 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 import {
   PASS_COLUMNS,
   toPass,
@@ -16,14 +17,14 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/mobile/v1/tickets/passes?booking_id=
  *
- * The booking's passes. Owner-scoped in-query (-> 404). `ticket_passes` SELECT is
- * RLS-gated to paid bookings, so passes are empty until paid; `code` is withheld
- * until paid, and `signature`/`guest_cnic` are never selected. Mirrors
- * `app/api/tickets/passes`.
+ * The booking's passes. Owner-scoped in-query (-> 404). Passes are only
+ * fetched for paid bookings (previously enforced by RLS, now an explicit
+ * guard since direct Postgres has no RLS); `code` is withheld until paid, and
+ * `signature`/`guest_cnic` are never selected. Mirrors `app/api/tickets/passes`.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
   const idRaw = new URL(request.url).searchParams.get("booking_id");
@@ -37,33 +38,32 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const { data: booking, error: bErr } = await supabase
-    .from("bookings")
-    .select("id, booking_reference, payment_status, total_amount")
-    .eq("id", bookingId)
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (bErr) {
-    console.error("[mobile-api] passes booking lookup failed:", bErr.message);
-    throw new MobileApiError("internal_error", "Failed to load passes.", 500);
-  }
+  const { rows: bookingRows } = await query(
+    `SELECT id, booking_reference, payment_status, total_amount
+     FROM bookings
+     WHERE id = $1 AND user_id = $2`,
+    [bookingId, user.id],
+  );
+  const booking = bookingRows[0];
   if (!booking) {
     throw new MobileApiError("not_found", "Booking not found.", 404);
   }
 
   const paid = isBookingPaid(booking.payment_status);
-  const { data: passes } = await supabase
-    .from("ticket_passes")
-    .select(PASS_COLUMNS)
-    .eq("booking_id", bookingId)
-    .order("quantity_index", { ascending: true })
-    .returns<PassRow[]>();
+  const passes = paid
+    ? (
+        await query(
+          `SELECT ${PASS_COLUMNS} FROM ticket_passes WHERE booking_id = $1 ORDER BY quantity_index ASC`,
+          [bookingId],
+        )
+      ).rows
+    : [];
 
   return ok({
     booking_id: booking.id,
     booking_reference: booking.booking_reference,
     payment_status: booking.payment_status,
     total_amount: booking.total_amount,
-    passes: (passes ?? []).map((p) => toPass(p, paid)),
+    passes: (passes as PassRow[]).map((p) => toPass(p, paid)),
   });
 });

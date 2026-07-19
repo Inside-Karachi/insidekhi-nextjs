@@ -67,6 +67,7 @@ export function BusinessListingsPage({
 }: BusinessListingsPageProps) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<string>("all");
+  const [page, setPage] = React.useState(1);
   const [isCreateModalOpen, setIsCreateModalOpen] = React.useState(false);
   const [editingListingId, setEditingListingId] = React.useState<number | null>(null);
   const [submittingId, setSubmittingId] = React.useState<number | null>(null);
@@ -74,20 +75,27 @@ export function BusinessListingsPage({
   const [listingToDelete, setListingToDelete] = React.useState<BusinessOwnerListing | null>(null);
   const [deleteReason, setDeleteReason] = React.useState("");
   const [deletingListingId, setDeletingListingId] = React.useState<number | null>(null);
-  const { listings, loading, refetch } = useBusinessListings();
+  const { listings, loading, error, pagination, refetch } = useBusinessListings({
+    status: statusFilter,
+    page,
+    limit: 20,
+  });
   const { toast } = useToast();
 
-  // Filter listings based on search and status
+  // Reset to first page whenever the status filter changes
+  React.useEffect(() => {
+    setPage(1);
+  }, [statusFilter]);
+
+  // Filter listings based on search (status is handled server-side)
   const filteredListings = React.useMemo(() => {
     return listings.filter((listing) => {
-      const matchesSearch = 
+      return (
         searchQuery === "" ||
-        listing.name.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesStatus =
-        statusFilter === "all" || listing.status === statusFilter;
-      return matchesSearch && matchesStatus;
+        listing.name.toLowerCase().includes(searchQuery.toLowerCase())
+      );
     });
-  }, [listings, searchQuery, statusFilter]);
+  }, [listings, searchQuery]);
 
   const handleSubmitForApproval = async (listingId: number) => {
     try {
@@ -241,6 +249,19 @@ export function BusinessListingsPage({
             </Card>
           ))}
         </div>
+      ) : error ? (
+        <div className={BUSINESS_OWNER_EMPTY_STATE}>
+          <div className="p-4 rounded-full bg-destructive/10 w-fit mx-auto mb-6">
+            <AlertCircle className="h-12 w-12 text-destructive" />
+          </div>
+          <h3 className="text-2xl font-semibold text-foreground mb-3">
+            Couldn&apos;t load listings
+          </h3>
+          <p className="text-muted-foreground mb-6 max-w-xl mx-auto">{error}</p>
+          <Button variant="outline" onClick={() => refetch()}>
+            Try again
+          </Button>
+        </div>
       ) : filteredListings.length === 0 ? (
         <div className={BUSINESS_OWNER_EMPTY_STATE}>
           <div className="p-4 rounded-full bg-primary/10 w-fit mx-auto mb-6">
@@ -262,6 +283,7 @@ export function BusinessListingsPage({
               onClick={() => {
                 setSearchQuery("");
                 setStatusFilter("all");
+                setPage(1);
               }}
             >
               Clear filters
@@ -274,6 +296,7 @@ export function BusinessListingsPage({
           )}
         </div>
       ) : (
+        <>
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -394,6 +417,32 @@ export function BusinessListingsPage({
             </motion.div>
           ))}
         </motion.div>
+
+        {pagination && pagination.total_pages > 1 && (
+          <div className="flex items-center justify-center gap-2 mt-8">
+            <Button
+              variant="outline"
+              disabled={!pagination.has_prev || loading}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+            >
+              Previous
+            </Button>
+            <span className="text-sm text-muted-foreground">
+              Page {pagination.page} of {pagination.total_pages}
+              {typeof pagination.total === "number"
+                ? ` (${pagination.total} total)`
+                : ""}
+            </span>
+            <Button
+              variant="outline"
+              disabled={!pagination.has_next || loading}
+              onClick={() => setPage((current) => current + 1)}
+            >
+              Next
+            </Button>
+          </div>
+        )}
+        </>
       )}
 
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>

@@ -8,9 +8,8 @@ import {
   enforceCheckoutRateLimit,
 } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { createMobileServiceClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import { computeBasketHash, type CheckoutItem } from "@/lib/mobile/commerce";
-import type { Database } from "@/types/supabase";
 
 export const dynamic = "force-dynamic";
 
@@ -32,9 +31,6 @@ const bodySchema = z.object({
   }),
 });
 
-type CreateBookingArgs =
-  Database["public"]["Functions"]["create_booking_with_reservation"]["Args"];
-
 /**
  * POST /api/mobile/v1/checkout
  *
@@ -48,7 +44,7 @@ type CreateBookingArgs =
  */
 export const POST = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
   await enforceCheckoutRateLimit(user.id);
 
@@ -81,14 +77,17 @@ export const POST = mobileRoute(async (request: NextRequest) => {
 
   // Friendly pre-validation (the RPC re-checks authoritatively under a row lock).
   const ids = items.map((i) => i.ticket_type_id);
-  const { data: types, error: ttErr } = await supabase
-    .from("ticket_types")
-    .select("id, event_id, quantity_available, sale_starts_at, sale_ends_at")
-    .in("id", ids);
-  if (ttErr) {
+  let types;
+  try {
+    ({ rows: types } = await query(
+      `SELECT id, event_id, quantity_available, sale_starts_at, sale_ends_at
+       FROM ticket_types WHERE id = ANY($1::int[])`,
+      [ids],
+    ));
+  } catch (ttErr) {
     console.error(
       "[mobile-api] checkout ticket_types lookup failed:",
-      ttErr.message,
+      ttErr instanceof Error ? ttErr.message : ttErr,
     );
     throw new MobileApiError(
       "internal_error",
@@ -154,38 +153,51 @@ export const POST = mobileRoute(async (request: NextRequest) => {
 
   // Reuse an existing unpaid booking for this basket (drives the UX `reused`
   // flag); the RPC's ON CONFLICT is the real atomic dedup.
-  const { data: existing } = await supabase
-    .from("bookings")
-    .select("id")
-    .eq("user_id", user.id)
-    .eq("event_id", eventId)
-    .eq("basket_id", basket)
-    .in("payment_status", ["awaiting_payment", "pending"])
-    .order("id", { ascending: false })
-    .maybeSingle();
+  const { rows: existingRows } = await query(
+    `SELECT id FROM bookings
+     WHERE user_id = $1 AND event_id = $2 AND basket_id = $3
+       AND payment_status = ANY($4::text[])
+     ORDER BY id DESC
+     LIMIT 1`,
+    [user.id, eventId, basket, ["awaiting_payment", "pending"]],
+  );
+  const existing = existingRows[0];
 
-  const service = createMobileServiceClient();
   let bookingId: number;
   let reused = false;
   if (existing) {
     bookingId = existing.id;
     reused = true;
   } else {
-    const args: CreateBookingArgs = {
-      p_user_id: user.id,
-      p_items: items as CreateBookingArgs["p_items"],
-      p_customer_name: customer.name,
-      p_customer_email: customer.email,
-      p_customer_phone: customer.phone,
-      p_customer_cnic: customer.cnic,
-      p_basket_id: basket,
-    };
-    const { data: newId, error: rpcErr } = await service.rpc(
-      "create_booking_with_reservation",
-      args,
-    );
-    if (rpcErr || newId == null) {
-      const msg = rpcErr?.message ?? "";
+    let newId: number | null = null;
+    let rpcErrMsg: string | undefined;
+    try {
+      const { rows: rpcRows } = await query(
+        `SELECT create_booking_with_reservation(
+           p_user_id => $1,
+           p_items => $2::jsonb,
+           p_customer_name => $3,
+           p_customer_email => $4,
+           p_customer_phone => $5,
+           p_customer_cnic => $6,
+           p_basket_id => $7
+         ) AS result`,
+        [
+          user.id,
+          JSON.stringify(items),
+          customer.name,
+          customer.email,
+          customer.phone,
+          customer.cnic,
+          basket,
+        ],
+      );
+      newId = (rpcRows[0]?.result as number | null) ?? null;
+    } catch (err) {
+      rpcErrMsg = err instanceof Error ? err.message : String(err);
+    }
+    if (rpcErrMsg || newId == null) {
+      const msg = rpcErrMsg ?? "";
       if (/sale window/i.test(msg))
         throw new MobileApiError(
           "sale_window_closed",
@@ -220,36 +232,41 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     bookingId = newId;
   }
 
-  const { data: booking, error: bErr } = await service
-    .from("bookings")
-    .select("id, booking_reference, total_amount, payment_status")
-    .eq("id", bookingId)
-    .single();
-  if (bErr || !booking) {
-    console.error("[mobile-api] checkout booking fetch failed:", bErr?.message);
+  const { rows: bookingRows } = await query(
+    `SELECT id, booking_reference, total_amount, payment_status
+     FROM bookings WHERE id = $1`,
+    [bookingId],
+  );
+  const booking = bookingRows[0];
+  if (!booking) {
+    console.error("[mobile-api] checkout booking fetch failed: not found");
     throw new MobileApiError("internal_error", "Failed to load booking.", 500);
   }
 
   // Ensure a payment row exists (mirrors the website).
-  const { data: payExisting } = await service
-    .from("payments")
-    .select("id")
-    .eq("booking_id", bookingId)
-    .eq("gateway_code", "payfast")
-    .maybeSingle();
+  const { rows: payExistingRows } = await query(
+    `SELECT id FROM payments WHERE booking_id = $1 AND gateway_code = $2`,
+    [bookingId, "payfast"],
+  );
+  const payExisting = payExistingRows[0];
   if (!payExisting) {
-    const { error: payErr } = await service.from("payments").insert({
-      booking_id: bookingId,
-      gateway_code: "payfast",
-      amount: booking.total_amount,
-      currency: "PKR",
-      status: "AWAITING_DETAILS",
-      normalized_status: "awaiting_payment",
-    });
-    if (payErr) {
+    try {
+      await query(
+        `INSERT INTO payments (booking_id, gateway_code, amount, currency, status, normalized_status)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          bookingId,
+          "payfast",
+          booking.total_amount,
+          "PKR",
+          "AWAITING_DETAILS",
+          "awaiting_payment",
+        ],
+      );
+    } catch (payErr) {
       console.error(
         "[mobile-api] checkout payment init failed:",
-        payErr.message,
+        payErr instanceof Error ? payErr.message : payErr,
       );
       throw new MobileApiError(
         "internal_error",

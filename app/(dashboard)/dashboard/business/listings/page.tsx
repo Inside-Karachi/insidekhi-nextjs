@@ -12,12 +12,13 @@ export default async function ListingsManagementPage() {
     redirect("/login");
   }
 
-  // Verify business owner access
+  // Verify business owner access using effective role (active_role || role)
+  // to match API authorization in verifyBusinessOwner()
+  const effectiveRole = profile.active_role || profile.role;
   const canAccessBusiness =
-    profile.role === "business_owner" ||
-    profile.active_role === "business_owner" ||
-    profile.role === "admin" ||
-    profile.role === "super_admin";
+    effectiveRole === "business_owner" ||
+    effectiveRole === "admin" ||
+    effectiveRole === "super_admin";
 
   if (!canAccessBusiness) {
     redirect("/dashboard");

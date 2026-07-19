@@ -3,6 +3,11 @@ import {
   assertListingRouteAccess,
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
+import { query } from "@/lib/db";
+import {
+  deleteFile,
+  getListingImageKeyFromUrl,
+} from "@/lib/storage/spaces";
 
 export async function PATCH(
   request: NextRequest,
@@ -16,11 +21,10 @@ export async function PATCH(
       return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
     const body = await request.json();
     // Only allow is_primary and alt_text updates
@@ -28,33 +32,25 @@ export async function PATCH(
 
     // If setting is_primary to true, unset for all other images in this listing
     if (is_primary === true) {
-      // First, unset all others
-      const { error: unsetError } = await adminSupabase
-        .from("listing_images")
-        .update({ is_primary: false })
-        .eq("listing_id", listingId)
-        .neq("id", imgId); // Important: exclude the current image
-
-      if (unsetError) {
-        return NextResponse.json(
-          { error: "Failed to update other images" },
-          { status: 500 },
-        );
-      }
+      await query(
+        `UPDATE listing_images
+         SET is_primary = false
+         WHERE listing_id = $1 AND id <> $2`,
+        [listingId, imgId],
+      );
     }
 
-    // Update the target image
-    const { data: updated, error: updateError } = await adminSupabase
-      .from("listing_images")
-      .update({
-        is_primary: !!is_primary,
-        alt_text: alt_text ?? undefined,
-      })
-      .eq("id", imgId)
-      .eq("listing_id", listingId)
-      .select()
-      .single();
-    if (updateError || !updated) {
+    const { rows: updatedRows } = await query(
+      `UPDATE listing_images
+       SET is_primary = $1,
+           alt_text = COALESCE($2, alt_text)
+       WHERE id = $3 AND listing_id = $4
+       RETURNING *`,
+      [!!is_primary, alt_text ?? null, imgId, listingId],
+    );
+    const updated = updatedRows[0];
+
+    if (!updated) {
       return NextResponse.json(
         { error: "Failed to update image" },
         { status: 500 },
@@ -74,7 +70,7 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string; imageId: string }> },
 ) {
   try {
@@ -85,83 +81,50 @@ export async function DELETE(
       return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const adminSupabase = access.adminSupabase;
 
-    // First, get the image to extract the filename from URL for storage deletion
-    const { data: image, error: fetchError } = await adminSupabase
-      .from("listing_images")
-      .select("url")
-      .eq("id", imgId)
-      .eq("listing_id", listingId)
-      .single();
+    const { rows: imageRows } = await query(
+      `SELECT id, url FROM listing_images
+       WHERE id = $1 AND listing_id = $2`,
+      [imgId, listingId],
+    );
+    const image = imageRows[0];
 
-    if (fetchError || !image) {
+    if (!image) {
       return NextResponse.json({ error: "Image not found" }, { status: 404 });
     }
 
-    // Extract filename from URL for storage deletion
-    // URL formats:
-    // Manual: https://xxx.supabase.co/storage/v1/object/public/listing-images/35/35-file.jpg
-    // Peekaboo: https://xxx.supabase.co/storage/v1/object/public/listing-images/peekaboo/35/file.jpg
-    // We need everything after "listing-images/"
-
-    const bucketName = "listing-images";
-    const bucketMarker = `/storage/v1/object/public/${bucketName}/`;
-    const markerIndex = image.url.indexOf(bucketMarker);
-
-    if (markerIndex === -1) {
-      console.error(`[DELETE IMAGE] Invalid URL format: ${image.url}`);
-      return NextResponse.json(
-        { error: "Invalid image URL format" },
-        { status: 500 },
-      );
-    }
-
-    // Extract full path after bucket name (handles both manual and peekaboo folders)
-    const fullFileName = image.url.substring(markerIndex + bucketMarker.length);
-
-    if (!fullFileName) {
-      console.error(`[DELETE IMAGE] Empty file path for URL: ${image.url}`);
-      return NextResponse.json(
-        { error: "Could not extract file path from URL" },
-        { status: 500 },
-      );
-    }
+    const storagePath = getListingImageKeyFromUrl(image.url);
 
     // Delete from database first
-    const { error: deleteError } = await adminSupabase
-      .from("listing_images")
-      .delete()
-      .eq("id", imgId)
-      .eq("listing_id", listingId);
-
-    if (deleteError) {
-      return NextResponse.json(
-        { error: "Failed to delete image from database" },
-        { status: 500 },
-      );
-    }
-
-    // Delete from storage
-    console.log(
-      "[DELETE IMAGE] Attempting to delete from storage:",
-      fullFileName,
+    await query(
+      `DELETE FROM listing_images WHERE id = $1 AND listing_id = $2`,
+      [imgId, listingId],
     );
-    const { error: storageError } = await adminSupabase.storage
-      .from("listing-images")
-      .remove([fullFileName]);
 
-    if (storageError) {
-      console.error("[DELETE IMAGE] Storage deletion failed:", storageError);
-      // Don't return error here as DB deletion succeeded
+    // Delete from storage when we can resolve a Spaces key
+    if (storagePath) {
+      try {
+        console.log(
+          "[DELETE IMAGE] Attempting to delete from storage:",
+          storagePath,
+        );
+        await deleteFile(storagePath);
+        console.log(
+          "[DELETE IMAGE] Successfully deleted from storage:",
+          storagePath,
+        );
+      } catch (storageError) {
+        console.error("[DELETE IMAGE] Storage deletion failed:", storageError);
+        // Don't return error here as DB deletion succeeded
+      }
     } else {
-      console.log(
-        "[DELETE IMAGE] Successfully deleted from storage:",
-        fullFileName,
+      console.warn(
+        "[DELETE IMAGE] Could not resolve Spaces key for URL:",
+        image.url,
       );
     }
 

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
-import { uploadFile } from "@/lib/storage/spaces";
+import {
+  PROFILES_AVATAR_PREFIX,
+  uploadPrefixedFile,
+} from "@/lib/storage/spaces";
 import { query } from "@/lib/db";
 
 export async function POST(request: NextRequest) {
@@ -32,7 +35,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const bucket = "profiles_avatar";
     const originalName = (file as unknown as { name?: string })?.name || "img";
     const fileName = `${session.userId}/avatar-${Date.now()}-${originalName}`;
 
@@ -54,13 +56,19 @@ export async function POST(request: NextRequest) {
     }
 
     let publicUrl: string;
+    let uploadedPath: string;
     try {
-      const uploadResult = await uploadFile(fileName, buffer, {
-        contentType,
-        isPublic: true,
-        bucket,
-      });
+      const uploadResult = await uploadPrefixedFile(
+        PROFILES_AVATAR_PREFIX,
+        fileName,
+        buffer,
+        {
+          contentType,
+          isPublic: true,
+        },
+      );
       publicUrl = uploadResult.publicUrl;
+      uploadedPath = uploadResult.path;
     } catch (err) {
       console.error("[avatar] storage.upload exception:", err);
       return NextResponse.json(
@@ -79,10 +87,9 @@ export async function POST(request: NextRequest) {
       console.error("[avatar] profile update exception:", err);
     }
 
-    return NextResponse.json({ publicUrl, path: fileName });
+    return NextResponse.json({ publicUrl, path: uploadedPath });
   } catch (err) {
     console.error("[avatar] unexpected exception:", err);
     return NextResponse.json({ error: "unexpected_error" }, { status: 500 });
   }
 }
-

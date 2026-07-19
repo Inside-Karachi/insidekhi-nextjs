@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { uploadFile, deleteFile } from "@/lib/storage/spaces";
+import {
+  uploadPrefixedFile,
+  deleteFile,
+  getPrefixedKeyFromUrl,
+  LISTING_PDFS_PREFIX,
+} from "@/lib/storage/spaces";
 import {
   assertListingRouteAccess,
   toListingAccessResponse,
@@ -64,12 +69,14 @@ export async function POST(
 
     if (existingListing?.menu_pdf_url) {
       try {
-        // Extract filename from existing URL
-        const urlParts = existingListing.menu_pdf_url.split("/");
-        const existingFileName = urlParts.slice(-2).join("/"); // Get listingId/filename part
-
-        await deleteFile(existingFileName, "listing-pdfs");
-        console.log("[menu-pdf] deleted existing file:", existingFileName);
+        const existingKey = getPrefixedKeyFromUrl(
+          existingListing.menu_pdf_url,
+          LISTING_PDFS_PREFIX,
+        );
+        if (existingKey) {
+          await deleteFile(existingKey);
+          console.log("[menu-pdf] deleted existing file:", existingKey);
+        }
       } catch (deleteError) {
         // Log but don't fail the operation
         console.warn("[menu-pdf] failed to delete existing file:", deleteError);
@@ -79,14 +86,20 @@ export async function POST(
     // Generate consistent filename (no timestamp to avoid duplicates)
     const fileName = `${listingId}/menu-${listingId}.pdf`;
 
-    // Upload to DigitalOcean Spaces
-    let publicUrl;
+    // Upload to DigitalOcean Spaces (default bucket, listing-pdfs/ prefix)
+    let publicUrl: string;
+    let uploadedPath: string;
     try {
-      const uploadResult = await uploadFile(fileName, buffer, {
-        bucket: "listing-pdfs",
-        contentType: "application/pdf",
-      });
+      const uploadResult = await uploadPrefixedFile(
+        LISTING_PDFS_PREFIX,
+        fileName,
+        buffer,
+        {
+          contentType: "application/pdf",
+        },
+      );
       publicUrl = uploadResult.publicUrl;
+      uploadedPath = uploadResult.path;
     } catch (uploadError) {
       console.error(
         "[menu-pdf] storage.upload error:",
@@ -111,10 +124,10 @@ export async function POST(
       );
       // Try to clean up uploaded file
       try {
-        await deleteFile(fileName, "listing-pdfs");
+        await deleteFile(uploadedPath);
         console.log(
           "[menu-pdf] cleaned up uploaded file after db error:",
-          fileName,
+          uploadedPath,
         );
       } catch (cleanupError) {
         console.warn(
@@ -132,7 +145,7 @@ export async function POST(
       success: true,
       data: {
         pdf_url: publicUrl,
-        file_name: fileName,
+        file_name: uploadedPath,
       },
     });
   } catch (error) {
@@ -196,21 +209,14 @@ export async function DELETE(
     // Try to delete file from storage if it exists
     if (listing.menu_pdf_url) {
       try {
-        // Extract filename from URL - handle different URL formats
-        const url = new URL(listing.menu_pdf_url);
-        const pathParts = url.pathname.split("/");
-        // Find the part after 'listing-pdfs' in the path
-        const listingPdfsIndex = pathParts.findIndex(
-          (part) => part === "listing-pdfs",
+        const storageKey = getPrefixedKeyFromUrl(
+          listing.menu_pdf_url,
+          LISTING_PDFS_PREFIX,
         );
-        if (
-          listingPdfsIndex !== -1 &&
-          pathParts.length > listingPdfsIndex + 1
-        ) {
-          const fileName = pathParts.slice(listingPdfsIndex + 1).join("/");
-          console.log("[menu-pdf] attempting to delete file:", fileName);
-          await deleteFile(fileName, "listing-pdfs");
-          console.log("[menu-pdf] successfully deleted file:", fileName);
+        if (storageKey) {
+          console.log("[menu-pdf] attempting to delete file:", storageKey);
+          await deleteFile(storageKey);
+          console.log("[menu-pdf] successfully deleted file:", storageKey);
         } else {
           console.warn(
             "[menu-pdf] could not extract filename from URL:",

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { query } from "@/lib/db";
-import { uploadFile, deleteFile } from "@/lib/storage/spaces";
+import { uploadListingImage, deleteFile } from "@/lib/storage/spaces";
 import {
   verifyBusinessOwner,
   verifyListingOwnership,
@@ -162,11 +162,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
           .substring(0, 50);
         const filename = `listings/${listingId}/${timestamp}-${randomSuffix}-${sanitizedName}`;
 
-        // Upload to DigitalOcean Spaces
+        // Upload to DigitalOcean Spaces (default bucket, listing-images/ prefix)
         let uploadData;
         try {
-          uploadData = await uploadFile(filename, processedBuffer, {
-            bucket: "listing-images",
+          uploadData = await uploadListingImage(filename, processedBuffer, {
             contentType: "image/jpeg",
           });
         } catch (uploadError) {
@@ -190,7 +189,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
           imageRecord = rows[0];
         } catch (dbError) {
           // Clean up uploaded file if database insert fails
-          await deleteFile(uploadData.path, "listing-images");
+          await deleteFile(uploadData.path);
           errors.push(
             `File ${i + 1}: Database error - ${dbError instanceof Error ? dbError.message : "Unknown error"}`,
           );

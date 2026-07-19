@@ -85,8 +85,7 @@ export default async function ListingPage({ params }: ListingPageProps) {
     query(
       `SELECT * FROM listing_images
        WHERE listing_id = $1
-       ORDER BY display_order ASC
-       LIMIT 50`,
+       ORDER BY display_order ASC`,
       [listingId],
     ),
     getFavoritedListingIdsForUser(null, [listingId]).catch(() => new Set()),
@@ -138,12 +137,10 @@ export default async function ListingPage({ params }: ListingPageProps) {
     description: String(f.description || ""),
   }));
 
-  const MAX_GALLERY_IMAGES = 20;
-
   // Filter out menu images from gallery (they have /menu/ in the URL path)
-  const galleryImages = (images || [])
-    .filter((img) => !String(img.url).includes("/menu/"))
-    .slice(0, MAX_GALLERY_IMAGES);
+  const galleryImages = (images || []).filter(
+    (img) => !String(img.url).includes("/menu/"),
+  );
 
   const menuImages = (images || [])
     .filter((img) => String(img.url).includes("/menu/"))

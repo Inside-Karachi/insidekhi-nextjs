@@ -304,8 +304,19 @@ export function ListingGalleryUpload({
   // Immediate delete for temp images only
   const handleImmediateDelete = async (imageId: number) => {
     try {
+      const image = images.find((img) => img.id === imageId);
+      const params = new URLSearchParams({
+        imageId: String(imageId),
+      });
+      if (tempSessionId) {
+        params.set("tempSessionId", tempSessionId);
+      }
+      if (image?.url) {
+        params.set("url", image.url);
+      }
+
       const response = await fetch(
-        `/api/admin/listings/temp-images?imageId=${imageId}`,
+        `/api/admin/listings/temp-images?${params.toString()}`,
         {
           method: "DELETE",
         },

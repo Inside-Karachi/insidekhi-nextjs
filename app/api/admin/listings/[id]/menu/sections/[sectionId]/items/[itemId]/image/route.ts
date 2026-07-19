@@ -4,7 +4,7 @@ import {
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
 import { query } from "@/lib/db";
-import { uploadFile, deleteFile } from "@/lib/storage/spaces";
+import { uploadPrefixedFile, deleteFile, getPrefixedKeyFromUrl, MENU_ITEM_IMAGES_PREFIX } from "@/lib/storage/spaces";
 
 export async function POST(
   request: NextRequest,
@@ -168,15 +168,21 @@ export async function POST(
     const fileExt = processedFile.name.split(".").pop() || "jpg";
     const fileName = `listing-${listingId}/menu-item-${itemIdNum}-${Date.now()}.${fileExt}`;
 
-    // Upload to DigitalOcean Spaces
-    let publicUrl;
+    // Upload to DigitalOcean Spaces (default bucket, menu-item-images/ prefix)
+    let publicUrl: string;
+    let uploadedPath: string;
     try {
       const buffer = Buffer.from(await processedFile.arrayBuffer());
-      const uploadResult = await uploadFile(fileName, buffer, {
-        bucket: "menu-item-images",
-        contentType: processedFile.type || "application/octet-stream",
-      });
+      const uploadResult = await uploadPrefixedFile(
+        MENU_ITEM_IMAGES_PREFIX,
+        fileName,
+        buffer,
+        {
+          contentType: processedFile.type || "application/octet-stream",
+        },
+      );
       publicUrl = uploadResult.publicUrl;
+      uploadedPath = uploadResult.path;
     } catch (uploadError) {
       console.error("Upload error:", uploadError);
       return NextResponse.json(
@@ -196,7 +202,7 @@ export async function POST(
     } catch (updateError) {
       console.error("Update error:", updateError);
       // Try to clean up uploaded file
-      await deleteFile(fileName, "menu-item-images");
+      await deleteFile(uploadedPath);
 
       return NextResponse.json(
         { error: "Failed to update menu item" },
@@ -291,11 +297,13 @@ export async function DELETE(
     // Clean up file from storage if it exists
     if (menuItem.image_url) {
       try {
-        // Extract filename from URL
-        const urlParts = menuItem.image_url.split("/");
-        const fileName = urlParts[urlParts.length - 1];
-
-        await deleteFile(fileName, "menu-item-images");
+        const storageKey = getPrefixedKeyFromUrl(
+          menuItem.image_url,
+          MENU_ITEM_IMAGES_PREFIX,
+        );
+        if (storageKey) {
+          await deleteFile(storageKey);
+        }
       } catch (storageError) {
         console.warn("Failed to clean up storage file:", storageError);
         // Don't fail the request if cleanup fails

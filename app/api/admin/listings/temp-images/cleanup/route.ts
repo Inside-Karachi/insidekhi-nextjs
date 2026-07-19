@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
-import { listFiles, deleteFile } from "@/lib/storage/spaces";
+import { listListingImages, deleteFile } from "@/lib/storage/spaces";
 
 // POST: Delete all images in a temp session folder
 export async function POST(request: NextRequest) {
@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
     const tempFolder = `temp/${tempSessionId}`;
     let paths;
     try {
-      paths = await listFiles(tempFolder, "listing-images");
+      paths = await listListingImages(tempFolder);
     } catch (listError) {
       return NextResponse.json(
         { error: listError instanceof Error ? listError.message : "Unknown error" },
@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
     }
     // Remove all files
     try {
-      await Promise.all(paths.map((path) => deleteFile(path, "listing-images")));
+      await Promise.all(paths.map((path) => deleteFile(path)));
     } catch (removeError) {
       return NextResponse.json(
         { error: removeError instanceof Error ? removeError.message : "Unknown error" },

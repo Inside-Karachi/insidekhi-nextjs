@@ -28,7 +28,7 @@ export function useBusinessListings(options: UseBusinessListingsOptions = {}) {
       setError(null);
 
       const params = new URLSearchParams();
-      if (status) params.append("status", status);
+      if (status && status !== "all") params.append("status", status);
       params.append("page", page.toString());
       params.append("limit", limit.toString());
 
@@ -50,6 +50,7 @@ export function useBusinessListings(options: UseBusinessListingsOptions = {}) {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
+      setData(null);
     } finally {
       setLoading(false);
     }

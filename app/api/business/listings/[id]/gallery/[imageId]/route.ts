@@ -1,6 +1,9 @@
 import { NextRequest } from "next/server";
 import { query } from "@/lib/db";
-import { deleteFile } from "@/lib/storage/spaces";
+import {
+  deleteFile,
+  getListingImageKeyFromUrl,
+} from "@/lib/storage/spaces";
 import {
   verifyBusinessOwner,
   verifyListingOwnership,
@@ -47,19 +50,22 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
       return apiError("Image not found or does not belong to this listing", 404);
     }
 
-    // Extract storage path from URL
-    const urlParts = image.url.split("/listing-images/");
-    if (urlParts.length < 2) {
-      return apiError("Invalid image URL format", 500);
-    }
-    const storagePath = urlParts[1];
+    // Extract storage path from URL (CDN, legacy hostname, or Supabase)
+    const storagePath = getListingImageKeyFromUrl(image.url);
 
-    // Delete from storage
-    try {
-      await deleteFile(storagePath, "listing-images");
-    } catch (storageError) {
-      console.error("Storage deletion error:", storageError);
-      // Continue with database deletion even if storage fails
+    // Delete from storage when we can resolve a Spaces key
+    if (storagePath) {
+      try {
+        await deleteFile(storagePath);
+      } catch (storageError) {
+        console.error("Storage deletion error:", storageError);
+        // Continue with database deletion even if storage fails
+      }
+    } else {
+      console.warn(
+        "[DELETE IMAGE] Could not resolve Spaces key for URL:",
+        image.url,
+      );
     }
 
     // Delete from database

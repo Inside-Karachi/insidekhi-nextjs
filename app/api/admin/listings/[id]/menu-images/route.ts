@@ -4,9 +4,12 @@ import {
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
 import { query } from "@/lib/db";
-import { listFiles, getPublicUrl, deleteFile } from "@/lib/storage/spaces";
-
-const MENU_IMAGES_BUCKET = "listing-images";
+import {
+  listListingImages,
+  getListingImagePublicUrl,
+  getListingImageKeyFromUrl,
+  deleteFile,
+} from "@/lib/storage/spaces";
 
 /**
  * GET /api/admin/listings/[id]/menu-images
@@ -45,7 +48,7 @@ export async function GET(
       return NextResponse.json({ error: "Listing not found" }, { status: 404 });
     }
 
-    // Check both storage paths:
+    // Check both storage paths under listing-images/ in the default bucket:
     // 1. Scraped listings: peekaboo/{peekaboo_id}/menu/
     // 2. Manual listings: {listing_id}/menu/
     const allMenuImages: Array<{
@@ -63,7 +66,7 @@ export async function GET(
     // Path 1: Check peekaboo folder (for scraped listings)
     if (listing.peekaboo_id) {
       const peekabooPath = `peekaboo/${listing.peekaboo_id}/menu`;
-      const peekabooFiles = await listFiles(peekabooPath, MENU_IMAGES_BUCKET);
+      const peekabooFiles = await listListingImages(peekabooPath);
 
       const peekabooImages = peekabooFiles
         .map((key) => key.split("/").pop() ?? "")
@@ -71,7 +74,7 @@ export async function GET(
         .map((name) => ({
           id: -1 * ++imageIndex,
           listing_id: listingId,
-          url: getPublicUrl(`${peekabooPath}/${name}`, MENU_IMAGES_BUCKET),
+          url: getListingImagePublicUrl(`${peekabooPath}/${name}`),
           alt_text: "Menu image",
           display_order: imageIndex - 1,
           created_at: new Date().toISOString(),
@@ -83,7 +86,7 @@ export async function GET(
 
     // Path 2: Check manual upload folder (for manually created listings)
     const manualPath = `${listingId}/menu`;
-    const manualFiles = await listFiles(manualPath, MENU_IMAGES_BUCKET);
+    const manualFiles = await listListingImages(manualPath);
 
     const manualImages = manualFiles
       .map((key) => key.split("/").pop() ?? "")
@@ -91,7 +94,7 @@ export async function GET(
       .map((name) => ({
         id: -1 * ++imageIndex,
         listing_id: listingId,
-        url: getPublicUrl(`${manualPath}/${name}`, MENU_IMAGES_BUCKET),
+        url: getListingImagePublicUrl(`${manualPath}/${name}`),
         alt_text: "Menu image",
         display_order: imageIndex - 1,
         created_at: new Date().toISOString(),
@@ -151,22 +154,17 @@ export async function DELETE(
     }
 
     // Menu images are stored in storage only, not in database.
-    // Extract the storage key from the CDN/public URL.
-    const urlMatch = imageUrl.match(
-      /digitaloceanspaces\.com\/(.+)$/,
-    );
+    const storagePath = getListingImageKeyFromUrl(imageUrl);
 
-    if (!urlMatch) {
+    if (!storagePath) {
       return NextResponse.json(
         { error: "Invalid image URL format" },
         { status: 400 },
       );
     }
 
-    const storagePath = decodeURIComponent(urlMatch[1]);
-
     try {
-      await deleteFile(storagePath, MENU_IMAGES_BUCKET);
+      await deleteFile(storagePath);
     } catch (storageError) {
       console.error("[MENU IMAGES] Storage delete error:", storageError);
       return NextResponse.json(

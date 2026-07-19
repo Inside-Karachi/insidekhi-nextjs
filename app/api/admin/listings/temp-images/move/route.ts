@@ -1,9 +1,16 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
 import {
   assertListingRouteAccess,
   toListingAccessResponse,
 } from "@/lib/listings/route-access";
+import { query } from "@/lib/db";
+import {
+  copyFile,
+  deleteFile,
+  getPublicUrl,
+  listListingImages,
+  toListingImageObjectKey,
+} from "@/lib/storage/spaces";
 
 export async function POST(request: NextRequest) {
   let parsedBody = null;
@@ -25,20 +32,28 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId: Number(listingId),
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
-    // List all files in temp folder
+    // List all files in temp folder on DigitalOcean Spaces
     const tempFolder = `temp/${tempSessionId}`;
-    const { data: files, error: listError } = await supabase.storage
-      .from("listing-images")
-      .list(tempFolder);
-    if (listError) {
-      return NextResponse.json({ error: listError.message }, { status: 500 });
+    let files: string[];
+    try {
+      files = await listListingImages(tempFolder);
+    } catch (listError) {
+      return NextResponse.json(
+        {
+          error:
+            listError instanceof Error
+              ? listError.message
+              : "Failed to list temp images",
+        },
+        { status: 500 },
+      );
     }
+
     if (!files || files.length === 0) {
       return NextResponse.json({ success: true, moved: 0 });
     }
@@ -46,60 +61,78 @@ export async function POST(request: NextRequest) {
     // Move each file to listing folder and insert DB record
     let displayOrder = 1;
     const movedFiles = [];
-    for (const file of files) {
-      const fromPath = `${tempFolder}/${file.name}`;
-      const toPath = `${listingId}/${file.name}`;
-      // Copy file
-      const { error: copyError } = await supabase.storage
-        .from("listing-images")
-        .copy(fromPath, toPath);
-      if (copyError) {
-        return NextResponse.json({ error: copyError.message }, { status: 500 });
+    for (const fromPath of files) {
+      const fileName = fromPath.split("/").pop();
+      if (!fileName) {
+        continue;
       }
-      // Remove from temp
-      const { error: removeError } = await supabase.storage
-        .from("listing-images")
-        .remove([fromPath]);
-      if (removeError) {
+
+      const toPath = toListingImageObjectKey(`${listingId}/${fileName}`);
+
+      try {
+        await copyFile(fromPath, toPath);
+      } catch (copyError) {
         return NextResponse.json(
-          { error: removeError.message },
-          { status: 500 }
+          {
+            error:
+              copyError instanceof Error
+                ? copyError.message
+                : "Failed to copy temp image",
+          },
+          { status: 500 },
         );
       }
-      // Get public URL
-      const { data: publicUrlData } = supabase.storage
-        .from("listing-images")
-        .getPublicUrl(toPath);
-      const publicUrl = publicUrlData?.publicUrl;
-      if (typeof publicUrl !== "string") {
+
+      try {
+        await deleteFile(fromPath);
+      } catch (removeError) {
         return NextResponse.json(
-          { error: "Failed to get public URL" },
-          { status: 500 }
+          {
+            error:
+              removeError instanceof Error
+                ? removeError.message
+                : "Failed to remove temp image",
+          },
+          { status: 500 },
         );
       }
-      // Insert into listing_images
-      const { error: dbError } = await supabase.from("listing_images").insert({
-        listing_id: Number(listingId),
-        url: publicUrl,
-        alt_text: file.name,
-        display_order: displayOrder,
-        is_primary: displayOrder === 1,
-      });
-      if (dbError) {
-        return NextResponse.json({ error: dbError.message }, { status: 500 });
+
+      const publicUrl = getPublicUrl(toPath);
+
+      try {
+        await query(
+          `INSERT INTO listing_images
+             (listing_id, url, alt_text, display_order, is_primary)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            Number(listingId),
+            publicUrl,
+            fileName,
+            displayOrder,
+            displayOrder === 1,
+          ],
+        );
+      } catch (dbError) {
+        return NextResponse.json(
+          {
+            error:
+              dbError instanceof Error
+                ? dbError.message
+                : "Failed to save listing image",
+          },
+          { status: 500 },
+        );
       }
+
       movedFiles.push(toPath);
       displayOrder++;
     }
 
-    // No-op: don't log in production
     return NextResponse.json({ success: true, moved: movedFiles.length });
   } catch (_err) {
     if (_err instanceof Error && _err.name === "ListingRouteAccessError") {
       return toListingAccessResponse(_err);
     }
-    // Only log critical API errors in production
-    // console.error("[MOVE API] Unexpected error:", _err);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }

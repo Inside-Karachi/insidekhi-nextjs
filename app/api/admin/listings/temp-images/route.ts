@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
-import { uploadFile, deleteFile, listFiles } from "@/lib/storage/spaces";
+import {
+  uploadListingImage,
+  deleteFile,
+  listListingImages,
+  getListingImageKeyFromUrl,
+} from "@/lib/storage/spaces";
 
 import { v4 as uuidv4 } from "uuid";
 
@@ -26,21 +31,25 @@ export async function POST(request: NextRequest) {
     // Generate unique filename
     const ext = file.name.split(".").pop();
     const filename = `${uuidv4()}.${ext}`;
-    const path = `temp/${tempSessionId}/${filename}`;
+    const relativePath = `temp/${tempSessionId}/${filename}`;
 
-    // Upload to DO Spaces Storage (uses default bucket listing-images equivalent folder structure)
+    // Upload to DO Spaces under listing-images/temp/...
     const arrayBuffer = await file.arrayBuffer();
-    const uploadResult = await uploadFile(path, Buffer.from(arrayBuffer), {
-      contentType: file.type,
-      isPublic: true,
-      bucket: "listing-images"
-    });
+    const uploadResult = await uploadListingImage(
+      relativePath,
+      Buffer.from(arrayBuffer),
+      {
+        contentType: file.type,
+        isPublic: true,
+      }
+    );
 
     // Return image info (simulate ListingImage)
     const newImage = {
-      id: Date.now(), // temp id, not persisted
+      id: Date.now(), // temp UI id; deletion resolves via URL/path
       listing_id: null,
       url: uploadResult.publicUrl,
+      path: uploadResult.path,
       alt_text: null,
       is_primary: false,
       display_order: 0,
@@ -62,10 +71,11 @@ export async function DELETE(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const tempSessionId = searchParams.get("tempSessionId");
     const imageId = searchParams.get("imageId");
+    const imageUrl = searchParams.get("url");
 
-    if (!tempSessionId || !imageId) {
+    if (!tempSessionId || (!imageId && !imageUrl)) {
       return NextResponse.json(
-        { error: "Missing tempSessionId or imageId" },
+        { error: "Missing tempSessionId and image identifier" },
         { status: 400 }
       );
     }
@@ -76,24 +86,36 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Find and delete file in temp folder
-    const folder = `temp/${tempSessionId}`;
-    
+    // Prefer deleting by URL/path when provided (most reliable after UUID filenames)
+    if (imageUrl) {
+      const key = getListingImageKeyFromUrl(imageUrl);
+      if (key) {
+        await deleteFile(key);
+        return NextResponse.json({ success: true });
+      }
+    }
+
     // List files in temp folder on Spaces
-    const files = await listFiles(folder, "listing-images");
-    
-    // Find file by id (filename contains imageId)
-    const fileToDelete = files?.find((f) => {
-      const parts = f.split("/");
-      const name = parts[parts.length - 1];
-      return name.startsWith(imageId);
+    const files = await listListingImages(`temp/${tempSessionId}`);
+
+    // Match by full filename, filename stem, or path containing imageId
+    const fileToDelete = files.find((f) => {
+      if (!imageId) return false;
+      const name = f.split("/").pop() || "";
+      const stem = name.replace(/\.[^.]+$/, "");
+      return (
+        name === imageId ||
+        stem === imageId ||
+        name.startsWith(imageId) ||
+        f.includes(imageId)
+      );
     });
 
     if (!fileToDelete) {
       return NextResponse.json({ error: "File not found" }, { status: 404 });
     }
 
-    await deleteFile(fileToDelete, "listing-images");
+    await deleteFile(fileToDelete);
 
     return NextResponse.json({ success: true });
   } catch (_err) {
@@ -104,4 +126,3 @@ export async function DELETE(request: NextRequest) {
     );
   }
 }
-

@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { z } from "zod";
@@ -25,8 +25,8 @@ const UpdateSettingsSchema = z.object({
 
 // GET /api/user/settings - Get current user settings
 export async function GET() {
-    const supabase = await createServerSupabase();
-  try {    const session = await getSessionFromCookies();
+  try {
+    const session = await getSessionFromCookies();
 
     if (!session) {
       return NextResponse.json(
@@ -35,19 +35,11 @@ export async function GET() {
       );
     }
 
-    const { data: profile, error } = await supabase
-      .from("profiles")
-      .select("id, user_preferences")
-      .eq("id", session.userId)
-      .single();
-
-    if (error) {
-      console.error("Error fetching user settings:", error);
-      return NextResponse.json(
-        { error: "Failed to fetch settings" },
-        { status: 500 }
-      );
-    }
+    const { rows } = await query(
+      `SELECT id, user_preferences FROM profiles WHERE id = $1 LIMIT 1`,
+      [session.userId]
+    );
+    const profile = rows[0];
 
     return NextResponse.json({
       success: true,
@@ -64,8 +56,8 @@ export async function GET() {
 
 // PATCH /api/user/settings - Update user settings
 export async function PATCH(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    const session = await getSessionFromCookies();
+  try {
+    const session = await getSessionFromCookies();
 
     if (!session) {
       return NextResponse.json(
@@ -91,17 +83,17 @@ export async function PATCH(request: NextRequest) {
     const { userPreferences } = validationResult.data;
 
     // Update user preferences in database
-    const { data, error } = await supabase
-      .from("profiles")
-      .update({
-        user_preferences: userPreferences,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", session.userId)
-      .select("user_preferences")
-      .single();
-
-    if (error) {
+    let updatedPreferences: unknown;
+    try {
+      const { rows } = await query(
+        `UPDATE profiles
+         SET user_preferences = $1, updated_at = NOW()
+         WHERE id = $2
+         RETURNING user_preferences`,
+        [userPreferences, session.userId]
+      );
+      updatedPreferences = rows[0]?.user_preferences;
+    } catch (error) {
       console.error("Error updating user settings:", error);
       return NextResponse.json(
         { error: "Failed to update settings" },
@@ -112,7 +104,7 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({
       success: true,
       message: "Settings updated successfully",
-      settings: data?.user_preferences,
+      settings: updatedPreferences,
     });
   } catch (error) {
     console.error("Unexpected error in PATCH /api/user/settings:", error);

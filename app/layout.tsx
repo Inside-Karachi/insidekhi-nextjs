@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { ThemeProvider } from "@/components/layout/theme-provider";
 import { UnifiedPremiumHeader } from "@/components/layout/UnifiedPremiumHeader";
 import { Footer } from "@/components/layout/Footer";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { ScrollProvider } from "@/lib/context/scroll-context";
 import { RoleProvider } from "@/lib/context/RoleContext";
 import { Toaster } from "@/components/ui/toaster";
@@ -22,14 +22,11 @@ import { Suspense } from "react";
 const getCachedCategories = unstable_cache(
   async () => {
     try {
-      const supabase = await createServerSupabase();
-      const { data, error } = await supabase
-        .from("categories")
-        .select("name, slug")
-        .is("parent_id", null)
-        .order("name", { ascending: true });
-      if (!error && Array.isArray(data)) {
-        return data.filter((c) => c && c.name && c.slug);
+      const { rows } = await query(
+        `SELECT name, slug FROM categories WHERE parent_id IS NULL ORDER BY name ASC`,
+      );
+      if (Array.isArray(rows)) {
+        return rows.filter((c) => c && c.name && c.slug);
       }
     } catch (_err) {
       // Fail silently

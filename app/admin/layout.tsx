@@ -1,7 +1,6 @@
 import { redirect } from "next/navigation";
 import { PremiumDashboardLayout } from "@/components/dashboard/PremiumDashboardLayout";
 import { requireSessionUser } from "@/lib/auth/require-session";
-import type { User } from "@supabase/supabase-js";
 
 // All admin pages require auth - must be dynamic
 export const dynamic = "force-dynamic";
@@ -27,7 +26,7 @@ export default async function AdminLayout({
     redirect("/dashboard");
   }
 
-  const layoutUser = { id: user.id, email: user.email } as User;
+  const layoutUser = { id: user.id, email: user.email };
 
   return (
     <PremiumDashboardLayout

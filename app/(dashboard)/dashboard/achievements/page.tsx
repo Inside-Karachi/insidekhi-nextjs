@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import React from "react";
 import Image from "next/image";
 import Link from "next/link";
@@ -7,17 +7,39 @@ import { requireSessionUser } from "@/lib/auth/require-session";
 
 export default async function AchievementsPage() {
   const { user } = await requireSessionUser({ withProfile: false });
-  const supabase = await createServerSupabase({ useServiceRole: true });
 
-  const { data: userBadges, error } = await supabase
-    .from("user_badges")
-    .select(
-      `badge:badges(id, name, description, icon_url, min_points_required), awarded_at`
-    )
-    .eq("user_id", user.id)
-    .order("awarded_at", { ascending: false });
+  let userBadges: {
+    badge: {
+      id?: number;
+      name?: string | null;
+      description?: string | null;
+      icon_url?: string | null;
+      min_points_required?: number | null;
+    } | null;
+    awarded_at: string;
+  }[] = [];
 
-  if (error) console.error("Failed to load user badges:", error);
+  try {
+    const { rows } = await query(
+      `SELECT
+         json_build_object(
+           'id', b.id,
+           'name', b.name,
+           'description', b.description,
+           'icon_url', b.icon_url,
+           'min_points_required', b.min_points_required
+         ) AS badge,
+         to_json(ub.awarded_at) #>> '{}' AS awarded_at
+       FROM public.user_badges ub
+       JOIN public.badges b ON b.id = ub.badge_id
+       WHERE ub.user_id = $1
+       ORDER BY ub.awarded_at DESC`,
+      [user.id],
+    );
+    userBadges = rows as typeof userBadges;
+  } catch (error) {
+    console.error("Failed to load user badges:", error);
+  }
 
   return (
     <>

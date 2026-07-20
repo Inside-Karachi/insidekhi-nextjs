@@ -4,7 +4,6 @@ import * as React from "react";
 import ReactDOM from "react-dom";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -175,74 +174,15 @@ export function PremiumDiscoveryPanel({
 
   const fetchDiscoveryData = async () => {
     try {
-      const supabase = createClient();
+      const res = await fetch("/api/discovery");
+      const data = await res.json();
 
-      // Fetch categories with subcategories
-      const { data: categoriesData } = await supabase
-        .from("categories")
-        .select(
-          `
-          id,
-          name,
-          slug,
-          subcategories:categories(id, name, slug)
-        `,
-        )
-        .is("parent_id", null)
-        .eq("is_enabled", true)
-        .order("name");
-
-      // Fetch content counts
-      const [listingsCount, postsCount, eventsCount] = await Promise.all([
-        supabase.from("listings").select("id", { count: "exact", head: true }),
-        supabase.from("posts").select("id", { count: "exact", head: true }),
-        // Only count upcoming events (not past/ended events)
-        supabase
-          .from("events")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "published")
-          .gte("end_time", new Date().toISOString()),
-      ]);
-
-      // Fetch trending listings (top rated with recent reviews)
-      const { data: trendingData } = await supabase
-        .from("listings")
-        .select(
-          `
-          id,
-          name,
-          slug,
-          address,
-          category:categories(name),
-          reviews(rating)
-        `,
-        )
-        .eq("status", "published")
-        .limit(6)
-        .order("created_at", { ascending: false });
-
-      // Process trending data
-      const processedTrending =
-        trendingData?.map((listing) => ({
-          id: listing.id,
-          name: listing.name,
-          slug: listing.slug,
-          address: listing.address,
-          category_name: listing.category?.name || null,
-          avg_rating:
-            listing.reviews?.length > 0
-              ? listing.reviews.reduce((sum, r) => sum + r.rating, 0) /
-                listing.reviews.length
-              : null,
-          review_count: listing.reviews?.length || 0,
-        })) || [];
-
-      setCategories(categoriesData || []);
-      setTrendingListings(processedTrending);
+      setCategories(data.categories || []);
+      setTrendingListings(data.trendingListings || []);
       setContentCounts({
-        listings: listingsCount.count || 0,
-        posts: postsCount.count || 0,
-        events: eventsCount.count || 0,
+        listings: data.contentCounts?.listings || 0,
+        posts: data.contentCounts?.posts || 0,
+        events: data.contentCounts?.events || 0,
       });
     } catch (error) {
       console.error("Error fetching discovery data:", error);

@@ -3,7 +3,7 @@
  * Provides utilities for checking category types based on database hierarchy
  */
 
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 // Cache for category lookups (in-memory, resets per request)
 const categoryCache = new Map<
@@ -34,31 +34,26 @@ export async function isRestaurantCategory(
   }
 
   try {
-    const supabase = await createServerSupabase({ publicAnon: true });
-
     // Fetch category with optional parent in single query
-    const { data: category, error } = await supabase
-      .from("categories")
-      .select(
-        `
-        id,
-        slug,
-        parent:parent_id (
-          slug
-        )
-      `,
-      )
-      .eq("id", categoryId)
-      .single();
+    const { rows } = await query(
+      `SELECT c.id, c.slug, p.slug AS parent_slug
+       FROM categories c
+       LEFT JOIN categories p ON p.id = c.parent_id
+       WHERE c.id = $1
+       LIMIT 1`,
+      [categoryId],
+    );
+    const category = rows[0];
 
-    if (error || !category) {
+    if (!category) {
       return false;
     }
 
     // Extract slugs
-    const categorySlug = category.slug.toLowerCase();
-    const parentSlug =
-      (category.parent as { slug: string } | null)?.slug?.toLowerCase() || null;
+    const categorySlug = String(category.slug).toLowerCase();
+    const parentSlug = category.parent_slug
+      ? String(category.parent_slug).toLowerCase()
+      : null;
 
     // Check if current category or parent is food-related
     const foodRelatedSlugs = [

@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
@@ -13,7 +13,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const { id } = await params;    const session = await getSessionFromCookies();
+    const { id } = await params;    const session = await getSessionFromCookies();
 
     if (!session) {
       return NextResponse.json(
@@ -22,15 +22,13 @@ export async function POST(
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
+    const { rows: profileRows } = await query(
+      "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+      [session.userId],
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
@@ -66,29 +64,29 @@ export async function POST(
       );
     }
 
-    const { data: reviewData, error: reviewFetchError } = await adminSupabase
-      .from("reviews")
-      .select("listing_id, user_id")
-      .eq("id", reviewId)
-      .single();
+    const { rows: reviewRows } = await query(
+      "SELECT listing_id, user_id FROM public.reviews WHERE id = $1 LIMIT 1",
+      [reviewId],
+    );
+    const reviewData = reviewRows[0] as
+      | { listing_id: number; user_id: string }
+      | undefined;
 
-    if (reviewFetchError || !reviewData) {
+    if (!reviewData) {
       return NextResponse.json(
         { success: false, error: "Review not found" },
         { status: 404 },
       );
     }
 
-    const { error: reviewError } = await adminSupabase
-      .from("reviews")
-      .update({
-        status,
-        moderated_by: session.userId,
-        moderated_at: new Date().toISOString(),
-      })
-      .eq("id", reviewId);
-
-    if (reviewError) {
+    try {
+      await query(
+        `UPDATE public.reviews
+         SET status = $1, moderated_by = $2, moderated_at = NOW()
+         WHERE id = $3`,
+        [status, session.userId, reviewId],
+      );
+    } catch (reviewError) {
       console.error("Database update error:", reviewError);
       captureRouteError(reviewError, { route: ROUTE, method: "POST" });
       return NextResponse.json(
@@ -98,7 +96,6 @@ export async function POST(
     }
 
     await applyLeaveReviewXpForModeration(
-      adminSupabase,
       {
         reviewId,
         userId: reviewData.user_id,

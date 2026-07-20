@@ -1,10 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
-import {
-  ModerateCommentPayload,
-  CommentWithAuthor,
-} from "@/types/comment.types";
+
+type ReviewCommentRow = {
+  id: number;
+  review_id: number;
+  user_id: string;
+  content: string;
+  status: string;
+  parent_id: number | null;
+  moderated_at: string | null;
+  moderated_by: string | null;
+  created_at: string;
+  updated_at: string;
+  edit_count: number | null;
+  last_edited_at: string | null;
+};
 
 // POST /api/admin/comments/[commentId]/moderate - Moderate a comment
 export async function POST(
@@ -13,7 +24,6 @@ export async function POST(
 ) {
   try {
     const { commentId } = await params;
-    const supabase = (await createServerSupabase()) as any;
 
     // Check admin authentication
     const session = await getSessionFromCookies();
@@ -22,17 +32,13 @@ export async function POST(
     }
 
     // Verify admin or lister role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    if (
-      profileError ||
-      !profile ||
-      !["admin", "super_admin", "lister"].includes(profile.role)
-    ) {
+    if (!profile || !["admin", "super_admin", "lister"].includes(profile.role)) {
       return NextResponse.json(
         { error: "Admin or lister access required" },
         { status: 403 }
@@ -44,7 +50,7 @@ export async function POST(
       return NextResponse.json({ error: "Invalid comment ID" }, { status: 400 });
     }
 
-    const body = (await request.json()) as any;
+    const body = await request.json();
     const { status, remarks } = body;
 
     if (!status || !["approved", "rejected", "flagged"].includes(status)) {
@@ -55,30 +61,28 @@ export async function POST(
     }
 
     // 1. Get the comment
-    const { data: comment, error: fetchError } = await supabase
-      .from("comments")
-      .select("*, profile:profiles(*)")
-      .eq("id", commentIdNum)
-      .single();
+    const { rows: commentRows } = await query(
+      "SELECT * FROM public.review_comments WHERE id = $1 LIMIT 1",
+      [commentIdNum]
+    );
+    const comment = commentRows[0] as ReviewCommentRow | undefined;
 
-    if (fetchError || !comment) {
+    if (!comment) {
       return NextResponse.json({ error: "Comment not found" }, { status: 404 });
     }
 
     // 2. Perform moderation update
-    const { data: updatedComment, error: updateError } = await supabase
-      .from("comments")
-      .update({
-        moderation_status: status,
-        moderation_remarks: remarks || null,
-        moderated_at: new Date().toISOString(),
-        moderated_by: session.userId,
-      })
-      .eq("id", commentIdNum)
-      .select("*, profile:profiles(*)")
-      .single();
-
-    if (updateError || !updatedComment) {
+    let updatedComment: ReviewCommentRow | undefined;
+    try {
+      const { rows: updatedRows } = await query(
+        `UPDATE public.review_comments
+         SET status = $1, moderated_at = $2, moderated_by = $3
+         WHERE id = $4
+         RETURNING *`,
+        [status, new Date().toISOString(), session.userId, commentIdNum]
+      );
+      updatedComment = updatedRows[0] as ReviewCommentRow | undefined;
+    } catch (updateError) {
       console.error("[MODERATE COMMENT API] Update error:", updateError);
       return NextResponse.json(
         { error: "Failed to update comment status" },
@@ -86,22 +90,42 @@ export async function POST(
       );
     }
 
+    if (!updatedComment) {
+      console.error("[MODERATE COMMENT API] Update error: no row returned");
+      return NextResponse.json(
+        { error: "Failed to update comment status" },
+        { status: 500 }
+      );
+    }
+
+    // Attach profile info like the old `select("*, profile:profiles(*)")` did
+    const { rows: profileForCommentRows } = await query(
+      "SELECT * FROM public.profiles WHERE id = $1 LIMIT 1",
+      [updatedComment.user_id]
+    );
+    const commentWithProfile = {
+      ...updatedComment,
+      profile: profileForCommentRows[0] ?? null,
+    };
+
     // 3. Log audit event
     try {
       const { logAuditEvent } = await import("@/lib/audit");
       await logAuditEvent({
-        action: "moderate_comment" as any,
+        action: "moderate_comment" as Parameters<
+          typeof logAuditEvent
+        >[0]["action"],
         user_id: session.userId,
         entity_type: "comment",
         entity_id: commentId,
-        old_values: { moderation_status: comment.moderation_status },
-        new_values: { moderation_status: status, remarks },
+        old_values: { status: comment.status },
+        new_values: { status, remarks },
       });
     } catch (auditError) {
       console.error("[MODERATE COMMENT API] Failed to log audit event:", auditError);
     }
 
-    return NextResponse.json({ success: true, comment: updatedComment });
+    return NextResponse.json({ success: true, comment: commentWithProfile });
   } catch (error) {
     console.error("[MODERATE COMMENT API] Fatal error:", error);
     return NextResponse.json(
@@ -118,7 +142,6 @@ export async function DELETE(
 ) {
   try {
     const { commentId } = await params;
-    const supabase = (await createServerSupabase()) as any;
 
     // Check admin authentication
     const session = await getSessionFromCookies();
@@ -127,17 +150,13 @@ export async function DELETE(
     }
 
     // Verify admin or lister role (listers can moderate comments per requirements)
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    if (
-      profileError ||
-      !profile ||
-      !["admin", "super_admin", "lister"].includes(profile.role)
-    ) {
+    if (!profile || !["admin", "super_admin", "lister"].includes(profile.role)) {
       return NextResponse.json(
         { error: "Admin or lister access required" },
         { status: 403 }
@@ -150,23 +169,22 @@ export async function DELETE(
     }
 
     // 1. Get comment for audit logging
-    const { data: comment, error: fetchError } = await supabase
-      .from("comments")
-      .select("*")
-      .eq("id", commentIdNum)
-      .single();
+    const { rows: commentRows } = await query(
+      "SELECT * FROM public.review_comments WHERE id = $1 LIMIT 1",
+      [commentIdNum]
+    );
+    const comment = commentRows[0] as ReviewCommentRow | undefined;
 
-    if (fetchError || !comment) {
+    if (!comment) {
       return NextResponse.json({ error: "Comment not found" }, { status: 404 });
     }
 
     // 2. Delete comment (Atomic action)
-    const { error: deleteError } = await supabase
-      .from("comments")
-      .delete()
-      .eq("id", commentIdNum);
-
-    if (deleteError) {
+    try {
+      await query("DELETE FROM public.review_comments WHERE id = $1", [
+        commentIdNum,
+      ]);
+    } catch (deleteError) {
       console.error("[MODERATE COMMENT API] Delete error:", deleteError);
       return NextResponse.json(
         { error: "Failed to delete comment" },
@@ -178,7 +196,9 @@ export async function DELETE(
     try {
       const { logAuditEvent } = await import("@/lib/audit");
       await logAuditEvent({
-        action: "delete_comment" as any,
+        action: "delete_comment" as Parameters<
+          typeof logAuditEvent
+        >[0]["action"],
         user_id: session.userId,
         entity_type: "comment",
         entity_id: commentId,

@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { logAuditEvent } from "@/lib/audit";
@@ -12,22 +12,34 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
+type CategoryRow = {
+  id: number;
+  name: string;
+  slug: string;
+  parent_id: number | null;
+  icon_name: string | null;
+  show_in_nav: boolean;
+  show_in_featured: boolean;
+  show_in_filters: boolean;
+  is_enabled: boolean;
+  category_type: string;
+  display_order: number | null;
+  gradient_style: string | null;
+  created_at: string;
+};
+
 // Helper to get parent_id for a category
-async function getParentId(
-  supabase: Awaited<ReturnType<typeof createServerSupabase>>,
-  categoryId: number
-): Promise<number | null> {
-  const response = await supabase
-    .from("categories")
-    .select("parent_id")
-    .eq("id", categoryId)
-    .maybeSingle();
-  return response.data?.parent_id ?? null;
+async function getParentId(categoryId: number): Promise<number | null> {
+  const { rows } = await query(
+    "SELECT parent_id FROM public.categories WHERE id = $1 LIMIT 1",
+    [categoryId]
+  );
+  const row = rows[0] as { parent_id: number | null } | undefined;
+  return row?.parent_id ?? null;
 }
 
-// Helper to check circular reference without RPC (fallback)
+// Helper to check circular reference
 async function checkCircularReference(
-  supabase: Awaited<ReturnType<typeof createServerSupabase>>,
   categoryId: number,
   newParentId: number
 ): Promise<boolean> {
@@ -41,44 +53,38 @@ async function checkCircularReference(
 
   while (currentParentId !== null && depth < maxDepth) {
     if (currentParentId === categoryId) return true;
-    currentParentId = await getParentId(supabase, currentParentId);
+    currentParentId = await getParentId(currentParentId);
     depth++;
   }
 
   return false;
 }
 
-// Helper to get children count without RPC (fallback)
-async function getChildrenCount(
-  supabase: Awaited<ReturnType<typeof createServerSupabase>>,
-  categoryId: number
-): Promise<number> {
-  const { count } = await supabase
-    .from("categories")
-    .select("*", { count: "exact", head: true })
-    .eq("parent_id", categoryId);
-
-  return count || 0;
+// Helper to get children count
+async function getChildrenCount(categoryId: number): Promise<number> {
+  const { rows } = await query(
+    "SELECT COUNT(*)::int AS count FROM public.categories WHERE parent_id = $1",
+    [categoryId]
+  );
+  return (rows[0] as { count: number })?.count ?? 0;
 }
 
-// Helper to get usage count without RPC (fallback)
+// Helper to get usage count
 async function getUsageCount(
-  supabase: Awaited<ReturnType<typeof createServerSupabase>>,
   categoryId: number
 ): Promise<{ listingsCount: number; eventsCount: number }> {
-  const { count: listingsCount } = await supabase
-    .from("listings")
-    .select("*", { count: "exact", head: true })
-    .eq("category_id", categoryId);
-
-  const { count: eventsCount } = await supabase
-    .from("events")
-    .select("*", { count: "exact", head: true })
-    .eq("category_id", categoryId);
+  const { rows: listingRows } = await query(
+    "SELECT COUNT(*)::int AS count FROM public.listings WHERE category_id = $1",
+    [categoryId]
+  );
+  const { rows: eventRows } = await query(
+    "SELECT COUNT(*)::int AS count FROM public.events WHERE category_id = $1",
+    [categoryId]
+  );
 
   return {
-    listingsCount: listingsCount || 0,
-    eventsCount: eventsCount || 0,
+    listingsCount: (listingRows[0] as { count: number })?.count ?? 0,
+    eventsCount: (eventRows[0] as { count: number })?.count ?? 0,
   };
 }
 
@@ -87,7 +93,6 @@ async function getUsageCount(
  * Update an existing category
  */
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
-    const supabase = await createServerSupabase();
   try {
     const { id } = await params;
     const categoryId = parseInt(id);
@@ -97,7 +102,9 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         { success: false, error: "Invalid category ID" },
         { status: 400 }
       );
-    }    // Verify authentication
+    }
+
+    // Verify authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -105,13 +112,13 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     }
 
     // Verify super_admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
 
@@ -123,13 +130,13 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     }
 
     // Fetch existing category
-    const { data: existingCategory, error: fetchError } = await supabase
-      .from("categories")
-      .select("*")
-      .eq("id", categoryId)
-      .single();
+    const { rows: existingRows } = await query(
+      "SELECT * FROM public.categories WHERE id = $1 LIMIT 1",
+      [categoryId]
+    );
+    const existingCategory = existingRows[0] as CategoryRow | undefined;
 
-    if (fetchError || !existingCategory) {
+    if (!existingCategory) {
       return NextResponse.json(
         { success: false, error: "Category not found" },
         { status: 404 }
@@ -160,14 +167,12 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
     // Check slug uniqueness (exclude current category)
     if (updateData.slug) {
-      const { data: existingSlug } = await supabase
-        .from("categories")
-        .select("id")
-        .ilike("slug", updateData.slug)
-        .neq("id", categoryId)
-        .single();
+      const { rows: existingSlugRows } = await query(
+        "SELECT id FROM public.categories WHERE slug ILIKE $1 AND id != $2 LIMIT 1",
+        [updateData.slug, categoryId]
+      );
 
-      if (existingSlug) {
+      if (existingSlugRows.length > 0) {
         return NextResponse.json(
           {
             success: false,
@@ -195,11 +200,13 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         }
 
         // Check if parent exists
-        const { data: parentCategory } = await supabase
-          .from("categories")
-          .select("id, parent_id")
-          .eq("id", newParentId)
-          .single();
+        const { rows: parentRows } = await query(
+          "SELECT id, parent_id FROM public.categories WHERE id = $1 LIMIT 1",
+          [newParentId]
+        );
+        const parentCategory = parentRows[0] as
+          | { id: number; parent_id: number | null }
+          | undefined;
 
         if (!parentCategory) {
           return NextResponse.json(
@@ -225,7 +232,6 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
         // Check circular reference
         const hasCircularRef = await checkCircularReference(
-          supabase,
           categoryId,
           newParentId
         );
@@ -242,7 +248,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         }
 
         // Check if this category has children (cannot become a child if it has children)
-        const childrenCount = await getChildrenCount(supabase, categoryId);
+        const childrenCount = await getChildrenCount(categoryId);
 
         if (childrenCount > 0) {
           return NextResponse.json(
@@ -280,19 +286,33 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       updates.gradient_style = updateData.gradient_style;
 
     // Update category
-    const { data: updatedCategory, error: updateError } = await supabase
-      .from("categories")
-      .update(updates)
-      .eq("id", categoryId)
-      .select()
-      .single();
+    const updateKeys = Object.keys(updates);
+    let updatedCategory: CategoryRow;
 
-    if (updateError) {
-      console.error("Error updating category:", updateError);
-      return NextResponse.json(
-        { success: false, error: "Failed to update category" },
-        { status: 500 }
-      );
+    if (updateKeys.length === 0) {
+      // Nothing to update; return existing category as-is
+      updatedCategory = existingCategory;
+    } else {
+      const setClauses = updateKeys.map((key, idx) => `${key} = $${idx + 1}`);
+      const values = updateKeys.map((key) => updates[key]);
+      values.push(categoryId);
+
+      try {
+        const { rows: updatedRows } = await query(
+          `UPDATE public.categories
+           SET ${setClauses.join(", ")}
+           WHERE id = $${updateKeys.length + 1}
+           RETURNING *`,
+          values
+        );
+        updatedCategory = updatedRows[0] as CategoryRow;
+      } catch (updateError) {
+        console.error("Error updating category:", updateError);
+        return NextResponse.json(
+          { success: false, error: "Failed to update category" },
+          { status: 500 }
+        );
+      }
     }
 
     // Log audit event
@@ -338,7 +358,6 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
  * Delete a category (with safety checks)
  */
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
-    const supabase = await createServerSupabase();
   try {
     const { id } = await params;
     const categoryId = parseInt(id);
@@ -348,7 +367,9 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
         { success: false, error: "Invalid category ID" },
         { status: 400 }
       );
-    }    // Verify authentication
+    }
+
+    // Verify authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -356,13 +377,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     }
 
     // Verify super_admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
 
@@ -374,13 +395,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     }
 
     // Fetch existing category
-    const { data: existingCategory, error: fetchError } = await supabase
-      .from("categories")
-      .select("*")
-      .eq("id", categoryId)
-      .single();
+    const { rows: existingRows } = await query(
+      "SELECT * FROM public.categories WHERE id = $1 LIMIT 1",
+      [categoryId]
+    );
+    const existingCategory = existingRows[0] as CategoryRow | undefined;
 
-    if (fetchError || !existingCategory) {
+    if (!existingCategory) {
       return NextResponse.json(
         { success: false, error: "Category not found" },
         { status: 404 }
@@ -388,7 +409,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     }
 
     // Check for child categories
-    const childrenCount = await getChildrenCount(supabase, categoryId);
+    const childrenCount = await getChildrenCount(categoryId);
 
     if (childrenCount > 0) {
       return NextResponse.json(
@@ -402,7 +423,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     }
 
     // Check for listings and events using this category
-    const usageStats = await getUsageCount(supabase, categoryId);
+    const usageStats = await getUsageCount(categoryId);
 
     const listingsCount = usageStats.listingsCount;
     const eventsCount = usageStats.eventsCount;
@@ -432,12 +453,9 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     }
 
     // Delete category
-    const { error: deleteError } = await supabase
-      .from("categories")
-      .delete()
-      .eq("id", categoryId);
-
-    if (deleteError) {
+    try {
+      await query("DELETE FROM public.categories WHERE id = $1", [categoryId]);
+    } catch (deleteError) {
       console.error("Error deleting category:", deleteError);
       return NextResponse.json(
         { success: false, error: "Failed to delete category" },

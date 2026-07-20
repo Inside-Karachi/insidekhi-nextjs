@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query, pool } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { createServerSupabase } from "@/lib/supabase/server";
+import {
+  copyFile,
+  deleteFile,
+  getKeyFromPublicUrl,
+  getPublicUrl,
+  listFiles,
+} from "@/lib/storage/spaces";
 import type {
   EventChangeRequestWithDetails,
   ProcessEventChangeResponse,
@@ -445,10 +451,6 @@ export async function POST(request: NextRequest) {
     const proposedData = changeRequestDetails?.proposed_data ?? null;
 
     // If approved and there are temp images, migrate them to permanent storage.
-    // Storage access is still Supabase-based here (deferred to the
-    // file-storage migration phase, which moves this to
-    // lib/storage/spaces.ts) - unrelated to the event_images table write,
-    // which is now direct Postgres.
     if (action === "approve" && response.event_id && proposedData?.temp_images) {
       try {
         const tempImages = proposedData.temp_images as Array<{
@@ -462,24 +464,19 @@ export async function POST(request: NextRequest) {
           | undefined;
 
         if (tempImages.length > 0 && tempSessionId) {
-          const adminSupabase = await createServerSupabase({
-            useServiceRole: true,
-          });
-
           for (let i = 0; i < tempImages.length; i++) {
             const img = tempImages[i];
-            const tempPath = img.url.split("/event-images/")[1];
+            const tempKey = getKeyFromPublicUrl(img.url);
 
-            if (tempPath && tempPath.startsWith("temp/")) {
-              const filename = tempPath.split("/").pop();
-              const permanentPath = `events/${response.event_id}/${filename}`;
+            if (tempKey && tempKey.startsWith("event-images/temp/")) {
+              const filename = tempKey.split("/").pop();
+              const permanentKey = `event-images/${response.event_id}/${filename}`;
 
-              const { error: moveError } = await adminSupabase.storage
-                .from("event-images")
-                .move(tempPath, permanentPath);
+              try {
+                await copyFile(tempKey, permanentKey);
+                await deleteFile(tempKey);
 
-              if (!moveError) {
-                const newUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/event-images/${permanentPath}`;
+                const newUrl = getPublicUrl(permanentKey);
 
                 await query(
                   `INSERT INTO event_images (event_id, url, alt_text, is_primary, display_order)
@@ -492,7 +489,7 @@ export async function POST(request: NextRequest) {
                     img.display_order ?? i,
                   ]
                 );
-              } else {
+              } catch (moveError) {
                 console.error("Error moving temp image:", moveError);
               }
             }
@@ -623,19 +620,12 @@ export async function POST(request: NextRequest) {
           | undefined;
 
         if (tempImages.length > 0 && tempSessionId) {
-          const adminSupabase = await createServerSupabase({
-            useServiceRole: true,
-          });
-
           // Delete the entire temp session folder
-          const tempFolderPath = `temp/${tempSessionId}`;
-          const { data: files } = await adminSupabase.storage
-            .from("event-images")
-            .list(tempFolderPath);
+          const tempFolderPath = `event-images/temp/${tempSessionId}/`;
+          const filePaths = await listFiles(tempFolderPath);
 
-          if (files && files.length > 0) {
-            const filePaths = files.map((f) => `${tempFolderPath}/${f.name}`);
-            await adminSupabase.storage.from("event-images").remove(filePaths);
+          if (filePaths.length > 0) {
+            await Promise.all(filePaths.map((filePath) => deleteFile(filePath)));
           }
         }
       } catch (cleanupError) {

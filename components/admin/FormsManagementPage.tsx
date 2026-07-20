@@ -220,9 +220,9 @@ export function FormsManagementPage() {
     React.useState<FormSubmissionWithAssets | null>(null);
   const [isModalOpen, setIsModalOpen] = React.useState(false);
 
-  const fetchSubmissions = React.useCallback(async () => {
+  const fetchSubmissions = React.useCallback(async (silent = false) => {
     try {
-      setIsLoading(true);
+      if (!silent) setIsLoading(true);
       const params = new URLSearchParams();
       params.set("page", String(page));
       params.set("limit", "12");
@@ -247,13 +247,15 @@ export function FormsManagementPage() {
       setMetrics(result.metrics);
     } catch (error) {
       console.error("Failed to fetch form submissions", error);
-      toast({
-        title: "Unable to load forms",
-        description: "We couldn't load the submissions feed. Please try again.",
-        variant: "destructive",
-      });
+      if (!silent) {
+        toast({
+          title: "Unable to load forms",
+          description: "We couldn't load the submissions feed. Please try again.",
+          variant: "destructive",
+        });
+      }
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, [
     page,
@@ -273,37 +275,16 @@ export function FormsManagementPage() {
     setPage(1);
   }, [selectedFormType, selectedStatus, debouncedSearch, dateFrom, dateTo]);
 
-  // Realtime subscription for form_submissions table
+  // Poll for form_submissions changes (Supabase Realtime is no longer
+  // available). Refreshes stats, counts, and the visible list on an
+  // interval, silently so the list doesn't flash a loading state.
   React.useEffect(() => {
-    const setupRealtime = async () => {
-      const { createClient } = await import("@/lib/supabase/client");
-      const supabase = createClient();
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void fetchSubmissions(true);
+    }, 25000);
 
-      const channel = supabase
-        .channel("form-submissions-changes")
-        .on(
-          "postgres_changes",
-          {
-            event: "*", // Listen to all events (INSERT, UPDATE, DELETE)
-            schema: "public",
-            table: "form_submissions",
-          },
-          (payload) => {
-            console.log("Form submission changed:", payload);
-
-            // Refresh data when any change occurs
-            // This ensures stats, counts, and individual submissions are all updated
-            fetchSubmissions();
-          }
-        )
-        .subscribe();
-
-      return () => {
-        supabase.removeChannel(channel);
-      };
-    };
-
-    setupRealtime();
+    return () => clearInterval(interval);
   }, [fetchSubmissions]);
 
   const handleRefresh = () => {

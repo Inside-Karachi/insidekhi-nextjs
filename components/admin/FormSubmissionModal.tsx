@@ -248,10 +248,10 @@ export function FormSubmissionModal({
 
   // Define fetchReplies before useEffect that uses it
   const fetchReplies = React.useCallback(
-    async (includeDeleted = false) => {
+    async (includeDeleted = false, silent = false) => {
       if (!submission) return;
 
-      setIsLoadingReplies(true);
+      if (!silent) setIsLoadingReplies(true);
       try {
         const params = new URLSearchParams();
         if (includeDeleted) params.set("include_deleted", "true");
@@ -266,7 +266,7 @@ export function FormSubmissionModal({
       } catch (error) {
         console.error("Failed to fetch replies:", error);
       } finally {
-        setIsLoadingReplies(false);
+        if (!silent) setIsLoadingReplies(false);
       }
     },
     [submission]
@@ -485,37 +485,17 @@ export function FormSubmissionModal({
     fetchUserRole();
   }, []);
 
-  // Realtime subscription for new replies
+  // Poll for new replies while the modal is open (Supabase Realtime is no
+  // longer available).
   React.useEffect(() => {
     if (!open || !submission) return;
 
-    const setupRealtime = async () => {
-      const { createClient } = await import("@/lib/supabase/client");
-      const supabase = createClient();
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void fetchReplies(showDeletedReplies, true);
+    }, 12000);
 
-      const channel = supabase
-        .channel(`submission-${submission.id}-replies`)
-        .on(
-          "postgres_changes",
-          {
-            event: "*", // Listen to all events (INSERT, UPDATE, DELETE)
-            schema: "public",
-            table: "form_submission_replies",
-            filter: `submission_id=eq.${submission.id}`,
-          },
-          () => {
-            // Refresh replies when any change occurs
-            fetchReplies(showDeletedReplies);
-          }
-        )
-        .subscribe();
-
-      return () => {
-        supabase.removeChannel(channel);
-      };
-    };
-
-    setupRealtime();
+    return () => clearInterval(interval);
   }, [open, submission, fetchReplies, showDeletedReplies]);
 
   // Retry failed email

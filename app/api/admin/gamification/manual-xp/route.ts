@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { awardXP } from "@/lib/gamification";
 import { logAuditEvent } from "@/lib/audit";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
     // Check admin authentication
     const session = await getSessionFromCookies();
 
@@ -17,11 +15,11 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify admin role
-    const { data: adminProfile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: adminProfileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId],
+    );
+    const adminProfile = adminProfileRows[0] as { role: string } | undefined;
 
     if (!adminProfile || !isGamificationOperatorRole(adminProfile.role)) {
       return NextResponse.json(
@@ -43,13 +41,13 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify target user exists
-    const { data: targetUser, error: userError } = await supabase
-      .from("profiles")
-      .select("id, full_name")
-      .eq("id", user_id)
-      .single();
+    const { rows: targetUserRows } = await query(
+      `SELECT id, full_name FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [user_id],
+    );
+    const targetUser = targetUserRows[0];
 
-    if (userError || !targetUser) {
+    if (!targetUser) {
       return NextResponse.json(
         { error: "Target user not found" },
         { status: 404 }
@@ -57,13 +55,16 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify activity exists and is active
-    const { data: activity, error: activityError } = await supabase
-      .from("xp_activities")
-      .select("activity_slug, activity_name, xp_value, is_active")
-      .eq("activity_slug", activity_slug)
-      .single();
+    const { rows: activityRows } = await query(
+      `SELECT activity_slug, activity_name, xp_value, is_active
+       FROM public.xp_activities
+       WHERE activity_slug = $1
+       LIMIT 1`,
+      [activity_slug],
+    );
+    const activity = activityRows[0];
 
-    if (activityError || !activity) {
+    if (!activity) {
       return NextResponse.json(
         { error: "Activity not found" },
         { status: 404 }

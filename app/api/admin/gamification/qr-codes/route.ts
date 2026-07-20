@@ -1,5 +1,5 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
 
@@ -22,10 +22,18 @@ function generateQRCode(): string {
   return code;
 }
 
+async function verifyAdmin(userId: string): Promise<boolean> {
+  const { rows } = await query(
+    `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+    [userId],
+  );
+  return isGamificationOperatorRole(rows[0]?.role);
+}
+
 // GET - Fetch all QR codes
 export async function GET(_request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    // Verify admin access
+  try {
+    // Verify admin access
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -33,13 +41,7 @@ export async function GET(_request: NextRequest) {
     }
 
     // Check admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !isGamificationOperatorRole(profile?.role)) {
+    if (!(await verifyAdmin(session.userId))) {
       return NextResponse.json(
         { error: "Admin access required" },
         { status: 403 }
@@ -47,12 +49,13 @@ export async function GET(_request: NextRequest) {
     }
 
     // Fetch QR codes
-    const { data: qrCodes, error } = await supabase
-      .from("qr_codes")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) {
+    let qrCodes;
+    try {
+      const { rows } = await query(
+        `SELECT * FROM public.qr_codes ORDER BY created_at DESC`,
+      );
+      qrCodes = rows;
+    } catch (error) {
       console.error("Error fetching QR codes:", error);
       return NextResponse.json(
         { error: "Failed to fetch QR codes" },
@@ -64,20 +67,20 @@ export async function GET(_request: NextRequest) {
     const qrCodesWithStats = await Promise.all(
       (qrCodes || []).map(async (qr) => {
         // Get scan count
-        const { count } = await supabase
-          .from("qr_scans")
-          .select("*", { count: "exact", head: true })
-          .eq("qr_code_id", qr.id);
+        const { rows: countRows } = await query(
+          `SELECT COUNT(*) FROM public.qr_scans WHERE qr_code_id = $1`,
+          [qr.id],
+        );
+        const count = Number(countRows[0]?.count ?? 0);
 
         // Get listing name if related_id exists and > 0
         let listingName = null;
         if (qr.related_id && qr.related_id > 0) {
-          const { data: listing } = await supabase
-            .from("listings")
-            .select("name")
-            .eq("id", qr.related_id)
-            .single();
-          listingName = listing?.name || null;
+          const { rows: listingRows } = await query(
+            `SELECT name FROM public.listings WHERE id = $1 LIMIT 1`,
+            [qr.related_id],
+          );
+          listingName = listingRows[0]?.name || null;
         }
 
         return {
@@ -109,8 +112,8 @@ export async function GET(_request: NextRequest) {
 
 // POST - Create a new QR code
 export async function POST(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    // Verify admin access
+  try {
+    // Verify admin access
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -118,13 +121,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !isGamificationOperatorRole(profile?.role)) {
+    if (!(await verifyAdmin(session.userId))) {
       return NextResponse.json(
         { error: "Admin access required" },
         { status: 403 }
@@ -173,13 +170,12 @@ export async function POST(request: NextRequest) {
 
     // Ensure uniqueness
     while (attempts < maxAttempts) {
-      const { data: existing } = await supabase
-        .from("qr_codes")
-        .select("id")
-        .eq("code", code)
-        .single();
+      const { rows: existingRows } = await query(
+        `SELECT id FROM public.qr_codes WHERE code = $1 LIMIT 1`,
+        [code],
+      );
 
-      if (!existing) break;
+      if (existingRows.length === 0) break;
       code = generateQRCode();
       attempts++;
     }
@@ -192,22 +188,25 @@ export async function POST(request: NextRequest) {
     }
 
     // Create the QR code record
-    const { data: qrCode, error: createError } = await supabase
-      .from("qr_codes")
-      .insert({
-        code,
-        qr_type: finalQrType,
-        xp_reward: xp_value || 50,
-        scan_limit_type: cooldown_type || "once",
-        is_active: true,
-        related_id: finalRelatedId,
-        expires_at: expires_at || null,
-        created_by: session.userId,
-      })
-      .select()
-      .single();
-
-    if (createError) {
+    let qrCode;
+    try {
+      const { rows } = await query(
+        `INSERT INTO public.qr_codes
+           (code, qr_type, xp_reward, scan_limit_type, is_active, related_id, expires_at, created_by)
+         VALUES ($1, $2, $3, $4, true, $5, $6, $7)
+         RETURNING *`,
+        [
+          code,
+          finalQrType,
+          xp_value || 50,
+          cooldown_type || "once",
+          finalRelatedId,
+          expires_at || null,
+          session.userId,
+        ],
+      );
+      qrCode = rows[0];
+    } catch (createError) {
       console.error("Error creating QR code:", createError);
       return NextResponse.json(
         { error: "Failed to create QR code" },
@@ -238,8 +237,8 @@ export async function POST(request: NextRequest) {
 
 // DELETE - Delete a QR code
 export async function DELETE(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    // Verify admin access
+  try {
+    // Verify admin access
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -247,13 +246,7 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Check admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !isGamificationOperatorRole(profile?.role)) {
+    if (!(await verifyAdmin(session.userId))) {
       return NextResponse.json(
         { error: "Admin access required" },
         { status: 403 }
@@ -271,12 +264,9 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Delete the QR code (scans will be orphaned but that's okay for history)
-    const { error: deleteError } = await supabase
-      .from("qr_codes")
-      .delete()
-      .eq("id", parseInt(id));
-
-    if (deleteError) {
+    try {
+      await query(`DELETE FROM public.qr_codes WHERE id = $1`, [parseInt(id)]);
+    } catch (deleteError) {
       console.error("Error deleting QR code:", deleteError);
       return NextResponse.json(
         { error: "Failed to delete QR code" },

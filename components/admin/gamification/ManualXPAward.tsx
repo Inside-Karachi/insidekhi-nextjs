@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { createClient } from "@/lib/supabase/client";
 
 interface XPActivity {
   activity_slug: string;
@@ -83,16 +82,16 @@ export function ManualXPAward() {
 
     setIsSearching(true);
     try {
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("id, full_name, points")
-        .or(`full_name.ilike.%${userSearch}%,username.ilike.%${userSearch}%`)
-        .limit(10);
+      const response = await fetch(
+        `/api/admin/gamification/user-search?q=${encodeURIComponent(userSearch)}`
+      );
+      const data = await response.json();
 
-      if (error) throw error;
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to search users");
+      }
 
-      setSearchResults(data || []);
+      setSearchResults(data.users || []);
     } catch (error) {
       console.error("User search error:", error);
       toast({

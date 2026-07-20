@@ -1,4 +1,3 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 /**
  * GET /api/gamification/ranks - Fetch all active ranks
  * PUT /api/gamification/ranks/:id - Update rank (super_admin only)
@@ -6,7 +5,8 @@ import { getSessionFromCookies } from "@/lib/auth/session";
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import type { RankUpsertRequest } from "@/types/gamification.types";
 
 /**
@@ -14,69 +14,65 @@ import type { RankUpsertRequest } from "@/types/gamification.types";
  */
 export async function GET(_request: NextRequest) {
   const session = await getSessionFromCookies();
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
-    const supabase = await createServerSupabase();
-
     // Get all active ranks
-    const { data: ranks, error: ranksError } = await supabase
-      .from("ranks")
-      .select(
-        "id, name, slug, color, icon_url, min_xp_required, max_slots, benefits, display_order, is_active"
-      )
-      .eq("is_active", true)
-      .order("min_xp_required", { ascending: true });
-
-    if (ranksError) {
+    let ranks;
+    try {
+      const { rows } = await query(
+        `SELECT id, name, slug, color, icon_url, min_xp_required, max_slots, benefits, display_order, is_active
+         FROM public.ranks
+         WHERE is_active = true
+         ORDER BY min_xp_required ASC`,
+      );
+      ranks = rows;
+    } catch (ranksError) {
       return NextResponse.json(
-        { error: "Failed to fetch ranks", details: ranksError.message },
+        {
+          error: "Failed to fetch ranks",
+          details:
+            ranksError instanceof Error ? ranksError.message : "Unknown error",
+        },
         { status: 500 }
       );
     }
 
-    // Get authenticated user if present
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    // Get user's XP and current rank
     let userRankInfo = null;
 
-    if (user) {
-      // Get user's XP
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("points")
-        .eq("id", session.userId)
-        .single();
+    const { rows: profileRows } = await query(
+      `SELECT points FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId],
+    );
+    const userXP = profileRows[0]?.points || 0;
 
-      const userXP = profile?.points || 0;
+    const { rows: userRankRows } = await query(
+      `SELECT rank_id, achieved_at
+       FROM public.user_ranks
+       WHERE user_id = $1 AND current_rank = true
+       LIMIT 1`,
+      [session.userId],
+    );
+    const userRankData = userRankRows[0] as { rank_id: number } | undefined;
 
-      // Get user's current rank
-      const { data: userRankData } = await supabase
-        .from("user_ranks")
-        .select("rank_id, achieved_at")
-        .eq("user_id", session.userId)
-        .eq("current_rank", true)
-        .single();
+    if (userRankData) {
+      const currentRank = ranks?.find((r) => r.id === userRankData.rank_id);
+      const nextRank = ranks?.find((r) => r.min_xp_required > userXP);
 
-      if (userRankData) {
-        const currentRank = ranks?.find((r) => r.id === userRankData.rank_id);
-        const nextRank = ranks?.find((r) => r.min_xp_required > userXP);
-
-        userRankInfo = {
-          current_rank: currentRank,
-          next_rank: nextRank || null,
-          current_xp: userXP,
-          xp_to_next_rank: nextRank ? nextRank.min_xp_required - userXP : 0,
-          progress_percent: nextRank
-            ? Math.round(
-                ((userXP - (currentRank?.min_xp_required || 0)) /
-                  (nextRank.min_xp_required -
-                    (currentRank?.min_xp_required || 0))) *
-                  100
-              )
-            : 100,
-        };
-      }
+      userRankInfo = {
+        current_rank: currentRank,
+        next_rank: nextRank || null,
+        current_xp: userXP,
+        xp_to_next_rank: nextRank ? nextRank.min_xp_required - userXP : 0,
+        progress_percent: nextRank
+          ? Math.round(
+              ((userXP - (currentRank?.min_xp_required || 0)) /
+                (nextRank.min_xp_required -
+                  (currentRank?.min_xp_required || 0))) *
+                100
+            )
+          : 100,
+      };
     }
 
     return NextResponse.json({
@@ -100,25 +96,14 @@ export async function GET(_request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   const session = await getSessionFromCookies();
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
-    // Get authenticated user
-    const supabase = await createServerSupabase({ useServiceRole: true });
-    const {
-      data: { user },
-      error: authError,
-    } = await (await createServerSupabase()).auth.getUser();
-
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
     // Verify super_admin role
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId],
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (profile?.role !== "super_admin") {
       return NextResponse.json(
@@ -149,13 +134,12 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if slug already exists
-    const { data: existing } = await supabase
-      .from("ranks")
-      .select("id")
-      .eq("slug", slug)
-      .limit(1);
+    const { rows: existing } = await query(
+      `SELECT id FROM public.ranks WHERE slug = $1 LIMIT 1`,
+      [slug],
+    );
 
-    if (existing && existing.length > 0) {
+    if (existing.length > 0) {
       return NextResponse.json(
         { error: "Slug already exists" },
         { status: 409 }
@@ -163,24 +147,32 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert new rank
-    const { data: newRank, error: insertError } = await supabase
-      .from("ranks")
-      .insert({
-        name,
-        slug,
-        min_xp_required: min_xp_required || 0,
-        max_slots: max_slots || null,
-        color: color || "#000000",
-        benefits: benefits || [],
-        display_order: display_order || 0,
-        is_active: is_active !== false,
-      })
-      .select()
-      .single();
-
-    if (insertError) {
+    let newRank;
+    try {
+      const { rows } = await query(
+        `INSERT INTO public.ranks
+           (name, slug, min_xp_required, max_slots, color, benefits, display_order, is_active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [
+          name,
+          slug,
+          min_xp_required || 0,
+          max_slots || null,
+          color || "#000000",
+          JSON.stringify(benefits || []),
+          display_order || 0,
+          is_active !== false,
+        ],
+      );
+      newRank = rows[0];
+    } catch (insertError) {
       return NextResponse.json(
-        { error: "Failed to create rank", details: insertError.message },
+        {
+          error: "Failed to create rank",
+          details:
+            insertError instanceof Error ? insertError.message : "Unknown error",
+        },
         { status: 500 }
       );
     }
@@ -203,28 +195,14 @@ export async function POST(request: NextRequest) {
  */
 export async function PUT(request: NextRequest) {
   const session = await getSessionFromCookies();
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
-    // Get authenticated user
-    const supabaseAuth = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabaseAuth.auth.getUser();
-
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Use service role for updates
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
     // Verify super_admin role
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId],
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (profile?.role !== "super_admin") {
       return NextResponse.json(
@@ -245,17 +223,61 @@ export async function PUT(request: NextRequest) {
     // Parse update data
     const body: Partial<RankUpsertRequest> = await request.json();
 
-    // Update rank
-    const { data: updatedRank, error: updateError } = await supabase
-      .from("ranks")
-      .update(body)
-      .eq("id", parseInt(rankId))
-      .select()
-      .single();
+    // Build a dynamic SET clause from only the provided fields, using our own
+    // fixed column names (never user-provided text) for the column side.
+    const allowedFields: Array<keyof RankUpsertRequest> = [
+      "name",
+      "slug",
+      "min_xp_required",
+      "max_slots",
+      "color",
+      "benefits",
+      "display_order",
+      "is_active",
+    ];
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+    let paramIndex = 1;
 
-    if (updateError || !updatedRank) {
+    for (const field of allowedFields) {
+      if (field in body) {
+        setClauses.push(`${field} = $${paramIndex}`);
+        const value = body[field];
+        values.push(field === "benefits" ? JSON.stringify(value ?? []) : value);
+        paramIndex++;
+      }
+    }
+
+    if (setClauses.length === 0) {
       return NextResponse.json(
-        { error: "Failed to update rank", details: updateError?.message },
+        { error: "Failed to update rank", details: "No fields to update" },
+        { status: 500 }
+      );
+    }
+
+    values.push(parseInt(rankId));
+
+    let updatedRank;
+    try {
+      const { rows } = await query(
+        `UPDATE public.ranks SET ${setClauses.join(", ")} WHERE id = $${paramIndex} RETURNING *`,
+        values,
+      );
+      updatedRank = rows[0];
+    } catch (updateError) {
+      return NextResponse.json(
+        {
+          error: "Failed to update rank",
+          details:
+            updateError instanceof Error ? updateError.message : "Unknown error",
+        },
+        { status: 500 }
+      );
+    }
+
+    if (!updatedRank) {
+      return NextResponse.json(
+        { error: "Failed to update rank", details: undefined },
         { status: 500 }
       );
     }

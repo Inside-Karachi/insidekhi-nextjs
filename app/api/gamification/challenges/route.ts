@@ -1,37 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
 
 /**
  * GET - List active challenges and user progress
  */
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const supabase = (await createServerSupabase()) as any;
-
     // Get optional authenticated user to show their progress
     const session = await getSessionFromCookies();
 
     // Fetch active challenges
-    const { data: challenges, error: fetchError } = await supabase
-      .from("xp_challenges")
-      .select("*")
-      .eq("is_active", true)
-      .order("created_at", { ascending: false });
-
-    if (fetchError) {
+    let challenges;
+    try {
+      const { rows } = await query(
+        `SELECT * FROM public.weekly_challenges WHERE is_active = true ORDER BY created_at DESC`,
+      );
+      challenges = rows;
+    } catch (fetchError) {
       return NextResponse.json(
-        { error: "Failed to fetch challenges", details: fetchError.message },
+        {
+          error: "Failed to fetch challenges",
+          details:
+            fetchError instanceof Error ? fetchError.message : "Unknown error",
+        },
         { status: 500 }
       );
     }
 
     if (!session?.userId) {
       // Return challenges without progress for unauthenticated users
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const challengesWithProgress = challenges.map((c: any) => ({
+      const challengesWithProgress = challenges.map((c) => ({
         ...c,
         user_progress: {
           current_count: 0,
@@ -42,29 +42,32 @@ export async function GET(request: NextRequest) {
     }
 
     // Fetch user progress for these challenges
-    const { data: progress, error: progressError } = await supabase
-      .from("user_challenges")
-      .select("challenge_id, current_count, is_completed, completed_at")
-      .eq("user_id", session.userId);
-
-    if (progressError) {
+    let progress;
+    try {
+      const { rows } = await query(
+        `SELECT challenge_id, current_progress, completed, completed_at
+         FROM public.user_challenge_progress
+         WHERE user_id = $1`,
+        [session.userId],
+      );
+      progress = rows;
+    } catch (progressError) {
       // Don't fail the whole request, just return challenges without progress
       console.error("Failed to fetch user challenge progress:", progressError);
       return NextResponse.json({ success: true, challenges });
     }
 
     // Map progress to challenges
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const progressMap = new Map(progress.map((p: any) => [p.challenge_id, p]));
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const challengesWithProgress = challenges.map((challenge: any) => {
-      const userProgress = progressMap.get(challenge.id) || {
-        current_count: 0,
-        is_completed: false,
-      };
+    const progressMap = new Map(progress.map((p) => [p.challenge_id, p]));
+    const challengesWithProgress = challenges.map((challenge) => {
+      const userProgress = progressMap.get(challenge.id);
       return {
         ...challenge,
-        user_progress: userProgress,
+        user_progress: {
+          current_count: userProgress?.current_progress ?? 0,
+          is_completed: userProgress?.completed ?? false,
+          completed_at: userProgress?.completed_at ?? null,
+        },
       };
     });
 
@@ -83,9 +86,6 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const supabase = (await createServerSupabase({ useServiceRole: true })) as any;
-
     // Get authenticated user
     const session = await getSessionFromCookies();
 
@@ -94,11 +94,11 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify admin role
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId],
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (!profile || !isGamificationOperatorRole(profile.role)) {
       return NextResponse.json(
@@ -115,7 +115,6 @@ export async function POST(request: NextRequest) {
       challenge_type,
       xp_reward,
       target_count,
-      activity_slug,
       start_date,
       end_date,
       is_active,
@@ -130,26 +129,33 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert challenge
-    const { data: challenge, error: insertError } = await supabase
-      .from("xp_challenges")
-      .insert({
-        title,
-        description,
-        challenge_type,
-        xp_reward,
-        target_count,
-        activity_slug: activity_slug || null,
-        created_by: session.userId,
-        start_date: start_date || null,
-        end_date: end_date || null,
-        is_active: is_active !== false,
-      })
-      .select()
-      .single();
-
-    if (insertError) {
+    let challenge;
+    try {
+      const { rows } = await query(
+        `INSERT INTO public.weekly_challenges
+           (title, description, challenge_type, xp_reward, target_count, created_by, start_date, end_date, is_active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          title,
+          description ?? null,
+          challenge_type,
+          xp_reward,
+          target_count,
+          session.userId,
+          start_date || null,
+          end_date || null,
+          is_active !== false,
+        ],
+      );
+      challenge = rows[0];
+    } catch (insertError) {
       return NextResponse.json(
-        { error: "Failed to create challenge", details: insertError.message },
+        {
+          error: "Failed to create challenge",
+          details:
+            insertError instanceof Error ? insertError.message : "Unknown error",
+        },
         { status: 500 }
       );
     }

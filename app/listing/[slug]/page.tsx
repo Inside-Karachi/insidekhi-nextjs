@@ -53,10 +53,18 @@ export default async function ListingPage({ params }: ListingPageProps) {
     notFound();
   }
 
-  // node-pg returns bigint id columns as strings; normalize here so every
+  // node-pg returns bigint/numeric columns as strings; normalize here so every
   // downstream consumer (props, API request bodies, zod validation) gets a
   // real number rather than a string that merely satisfies TS's `as number`.
   listing.id = Number(listing.id);
+  listing.avg_rating =
+    listing.avg_rating !== null && listing.avg_rating !== undefined
+      ? Number(listing.avg_rating)
+      : null;
+  listing.review_count =
+    listing.review_count !== null && listing.review_count !== undefined
+      ? Number(listing.review_count)
+      : 0;
 
   if (listing.status !== "published") {
     const sessionResult = await getOptionalSessionUser();

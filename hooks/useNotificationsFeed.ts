@@ -185,14 +185,24 @@ export function useNotificationsFeed(
       });
 
       try {
-        const response = await fetch(`/api/notifications${query}`, {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          signal: controller.signal,
-          cache: "no-store",
-        });
+        const doFetch = () =>
+          fetch(`/api/notifications${query}`, {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            signal: controller.signal,
+            cache: "no-store",
+          });
+
+        let response = await doFetch();
+        // A 5xx here is almost always a transient DB connection blip on the
+        // server, not a real failure - one retry after a short delay avoids
+        // surfacing a rare blip as a user-facing error.
+        if (!response.ok && response.status >= 500) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          response = await doFetch();
+        }
 
         if (!response.ok) {
           throw new Error(`Failed to load notifications: ${response.status}`);

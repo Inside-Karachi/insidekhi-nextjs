@@ -1,12 +1,12 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { Json } from "@/types/supabase";
 
 // GET /api/admin/settings - Get system settings
 export async function GET() {
-    const supabase = await createServerSupabase();
-  try {    // Check authentication
+  try {
+    // Check authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -14,11 +14,11 @@ export async function GET() {
     }
 
     // Check if user is super admin
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (!profile || profile.role !== "super_admin") {
       return NextResponse.json(
@@ -28,12 +28,13 @@ export async function GET() {
     }
 
     // Fetch all system settings
-    const { data: settings, error: settingsError } = await supabase
-      .from("system_config")
-      .select("*")
-      .order("config_key");
-
-    if (settingsError) {
+    let settings;
+    try {
+      const { rows } = await query(
+        "SELECT * FROM public.system_config ORDER BY config_key"
+      );
+      settings = rows;
+    } catch (settingsError) {
       console.error("[SETTINGS API] Error fetching settings:", settingsError);
       return NextResponse.json(
         { error: "Failed to fetch settings" },
@@ -53,8 +54,8 @@ export async function GET() {
 
 // PATCH /api/admin/settings - Update a system setting
 export async function PATCH(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    // Check authentication
+  try {
+    // Check authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -62,11 +63,11 @@ export async function PATCH(request: NextRequest) {
     }
 
     // Check if user is super admin
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (!profile || profile.role !== "super_admin") {
       return NextResponse.json(
@@ -99,20 +100,35 @@ export async function PATCH(request: NextRequest) {
 
     // Upsert - insert if key doesn't exist, update if it does.
     // updated_by references auth.users so we pass the current super_admin's id.
-    const upsertData = {
-      config_key,
-      config_value: config_value as Json,
-      config_type: resolvedConfigType,
-      updated_by: session.userId,
-    };
+    //
+    // config_value is jsonb. The pg driver sends parameters as raw text with
+    // no type hint, so a bare string like `hello` or a JS array serialized as
+    // a Postgres array literal ({a,b,c}) both fail Postgres's ::jsonb cast -
+    // neither is valid JSON text. JSON.stringify always produces valid JSON
+    // text for any JS value (including already-quoting plain strings), so it
+    // must run unconditionally here, not just for arrays/objects.
+    const serializedConfigValue = JSON.stringify(config_value);
 
-    const { data, error } = await supabase
-      .from("system_config")
-      .upsert(upsertData, { onConflict: "config_key" })
-      .select()
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      const { rows } = await query(
+        `INSERT INTO public.system_config (config_key, config_value, config_type, updated_by)
+         VALUES ($1, $2::jsonb, $3, $4)
+         ON CONFLICT (config_key)
+         DO UPDATE SET
+           config_value = EXCLUDED.config_value,
+           config_type = EXCLUDED.config_type,
+           updated_by = EXCLUDED.updated_by
+         RETURNING *`,
+        [
+          config_key,
+          serializedConfigValue as Json,
+          resolvedConfigType,
+          session.userId,
+        ]
+      );
+      data = rows[0];
+    } catch (error) {
       console.error("Error updating system setting:", error);
       return NextResponse.json(
         { error: "Failed to update setting" },

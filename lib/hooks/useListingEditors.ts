@@ -1,17 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
 
 export type ListingEditorInfo = { userId: string; fullName: string };
 
 const HEARTBEAT_MS = 15_000;
-/** Safety net if Realtime is off or a tab is backgrounded - not for steady-state updates. */
-const FALLBACK_POLL_MS = 120_000;
-const REALTIME_DEBOUNCE_MS = 400;
+/** Polling interval for who's-editing presence data (Supabase Realtime is no longer available). */
+const POLL_MS = 20_000;
 
 /**
  * Server-backed edit sessions (see /api/admin/listings/edit-presence) with:
- * - Initial fetch + Supabase Realtime `postgres_changes` on `listing_edit_sessions`
- * - Rare fallback polling when Realtime cannot deliver events
+ * - Initial fetch + interval polling on `listing_edit_sessions`
  * - Heartbeat POST while a listing modal is open
  */
 export function useListingEditors() {
@@ -19,7 +16,6 @@ export function useListingEditors() {
   const activeListingIdRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isPresenceEnabledRef = useRef(true);
-  const isRealtimeHealthyRef = useRef(false);
 
   const fetchEditors = useCallback(async () => {
     if (!isPresenceEnabledRef.current) return;
@@ -71,45 +67,11 @@ export function useListingEditors() {
   }, [fetchEditors]);
 
   useEffect(() => {
-    const supabase = createClient();
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const scheduleFetch = () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        debounceTimer = null;
-        void fetchEditors();
-      }, REALTIME_DEBOUNCE_MS);
-    };
-
-    const channel = supabase
-      .channel("listing-edit-sessions-realtime")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "listing_edit_sessions" },
-        scheduleFetch,
-      )
-      .subscribe((status) => {
-        const healthy = status === "SUBSCRIBED";
-        isRealtimeHealthyRef.current = healthy;
-        if (healthy) {
-          void fetchEditors();
-        }
-      });
-
-    return () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      supabase.removeChannel(channel);
-    };
-  }, [fetchEditors]);
-
-  useEffect(() => {
     const id = setInterval(() => {
       if (!isPresenceEnabledRef.current) return;
-      if (isRealtimeHealthyRef.current) return;
       if (typeof document !== "undefined" && document.hidden) return;
       void fetchEditors();
-    }, FALLBACK_POLL_MS);
+    }, POLL_MS);
     return () => clearInterval(id);
   }, [fetchEditors]);
 

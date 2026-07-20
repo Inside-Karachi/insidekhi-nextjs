@@ -176,15 +176,20 @@ export function FilterPanel({
         return;
       }
       setLoadingCards(true);
-      // Dynamic import for client-side Supabase
-      const { createClient } = await import("@/lib/supabase/client");
-      const supabase = createClient();
-      const { data } = await supabase
-        .from("card_variants")
-        .select("id, card_name, bank_id")
-        .eq("is_active", true)
-        .eq("bank_id", parseInt(filters.bank, 10));
-      setCardVariants(data || []);
+      try {
+        const res = await fetch(`/api/cards?bankId=${encodeURIComponent(filters.bank)}`);
+        const json = await res.json();
+        const cards = res.ok && Array.isArray(json?.cards) ? json.cards : [];
+        setCardVariants(
+          cards.map((c: { id: number; card_name: string }) => ({
+            id: c.id,
+            card_name: c.card_name,
+            bank_id: parseInt(filters.bank as string, 10),
+          })),
+        );
+      } catch {
+        setCardVariants([]);
+      }
       setLoadingCards(false);
     };
     fetchCards();

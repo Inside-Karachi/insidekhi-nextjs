@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
 import {
   assertListingRouteAccess,
   toListingAccessResponse,
@@ -17,11 +18,10 @@ export async function POST(
       return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     const body = await request.json();
     const {
@@ -48,22 +48,12 @@ export async function POST(
     }
 
     // Check for duplicate item name in the same section
-    const { data: existingItem, error: checkError } = await supabase
-      .from("menu_items")
-      .select("id")
-      .eq("section_id", sectionIdNum)
-      .eq("name", name.trim())
-      .single();
+    const { rows: existingRows } = await query(
+      `SELECT id FROM menu_items WHERE section_id = $1 AND name = $2 LIMIT 1`,
+      [sectionIdNum, name.trim()]
+    );
 
-    if (checkError && checkError.code !== "PGRST116") {
-      console.error("Error checking for duplicate item:", checkError);
-      return NextResponse.json(
-        { error: "Failed to validate item" },
-        { status: 500 }
-      );
-    }
-
-    if (existingItem) {
+    if (existingRows.length > 0) {
       return NextResponse.json(
         { error: "An item with this name already exists in this section" },
         { status: 409 }
@@ -71,21 +61,25 @@ export async function POST(
     }
 
     // Create menu item
-    const { data: item, error } = await supabase
-      .from("menu_items")
-      .insert({
-        section_id: sectionIdNum,
-        name: name.trim(),
-        description: description?.trim() || null,
-        price,
-        is_available,
-        display_order,
-        is_featured,
-      })
-      .select()
-      .single();
-
-    if (error) {
+    let item;
+    try {
+      const { rows } = await query(
+        `INSERT INTO menu_items
+           (section_id, name, description, price, is_available, display_order, is_featured)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [
+          sectionIdNum,
+          name.trim(),
+          description?.trim() || null,
+          price,
+          is_available,
+          display_order,
+          is_featured,
+        ]
+      );
+      item = rows[0];
+    } catch (error) {
       console.error("Error creating menu item:", error);
       return NextResponse.json(
         { error: "Failed to create menu item" },

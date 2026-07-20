@@ -301,7 +301,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         const { createNotification } =
           await import("@/lib/notifications/service");
         const { rows: admins } = await query(
-          `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+          `SELECT id FROM profiles WHERE role::text = ANY($1::text[])`,
           [["lister", "admin", "super_admin"]],
         );
 
@@ -449,7 +449,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         const { createNotification } =
           await import("@/lib/notifications/service");
         const { rows: admins } = await query(
-          `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+          `SELECT id FROM profiles WHERE role::text = ANY($1::text[])`,
           [["lister", "admin", "super_admin"]],
         );
 
@@ -869,7 +869,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     try {
       const { createNotification } = await import("@/lib/notifications/service");
       const { rows: admins } = await query(
-        `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+        `SELECT id FROM profiles WHERE role::text = ANY($1::text[])`,
         [["lister", "admin", "super_admin"]],
       );
 

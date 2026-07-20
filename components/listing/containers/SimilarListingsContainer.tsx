@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { SimilarListingsCarousel } from "@/components/listing/SimilarListingsCarousel";
 import { Badge } from "@/components/ui/badge";
 import { PremiumHeading } from "@/components/brand/Typography";
@@ -54,48 +54,47 @@ export async function SimilarListingsContainer({
   listingId,
   categoryId,
 }: SimilarListingsContainerProps) {
-  const supabase = await createServerSupabase({ publicAnon: true });
-
   // Resolve the parent category so we can match siblings (e.g. all "Eat & Drink" subcategories)
   let relatedCategoryIds: number[] = [];
 
   if (categoryId) {
-    const { data: category } = await supabase
-      .from("categories")
-      .select("id, parent_id")
-      .eq("id", categoryId)
-      .single();
+    const { rows: categoryRows } = await query(
+      `SELECT id, parent_id FROM categories WHERE id = $1 LIMIT 1`,
+      [categoryId],
+    );
+    const category = categoryRows[0];
 
     if (category) {
       const parentId = category.parent_id ?? category.id;
 
       // Get all categories under the same parent (siblings + self)
-      const { data: siblingCategories } = await supabase
-        .from("categories")
-        .select("id")
-        .eq("parent_id", parentId);
+      const { rows: siblingCategories } = await query(
+        `SELECT id FROM categories WHERE parent_id = $1`,
+        [parentId],
+      );
 
       relatedCategoryIds = [
         parentId,
-        ...(siblingCategories?.map((c) => c.id) ?? []),
+        ...siblingCategories.map((c) => c.id as number),
       ];
     }
   }
 
-  let query = supabase
-    .from("listings_with_details")
-    .select("*")
-    .neq("id", listingId)
-    .eq("status", "published");
+  const whereClauses: string[] = ["id != $1", "status = 'published'"];
+  const queryParams: unknown[] = [listingId];
 
   if (relatedCategoryIds.length > 0) {
-    query = query.in("category_id", relatedCategoryIds);
+    queryParams.push(relatedCategoryIds);
+    whereClauses.push(`category_id = ANY($${queryParams.length})`);
   }
 
-  const { data: similarListings } = await query
-    .order("display_order", { ascending: false })
-    .order("created_at", { ascending: false })
-    .limit(4);
+  const { rows: similarListings } = await query(
+    `SELECT * FROM listings_with_details
+     WHERE ${whereClauses.join(" AND ")}
+     ORDER BY display_order DESC, created_at DESC
+     LIMIT 4`,
+    queryParams,
+  );
 
   if (!similarListings || similarListings.length === 0) {
     return null;
@@ -106,21 +105,18 @@ export async function SimilarListingsContainer({
   const similarIds = similarListings.map((l) => l.id as number);
 
   if (similarIds.length > 0) {
-    const { data: images } = await supabase
-      .from("listing_images")
-      .select("*")
-      .in("listing_id", similarIds)
-      .order("display_order", { ascending: true });
+    const { rows: images } = await query(
+      `SELECT * FROM listing_images WHERE listing_id = ANY($1) ORDER BY display_order ASC`,
+      [similarIds],
+    );
 
-    if (images) {
-      // Attach images to listings
-      similarListings.forEach((l) => {
-        // Type assertion needed as listing type from view doesn't include images
-        (l as typeof l & { images: typeof images }).images = images.filter(
-          (img) => img.listing_id === l.id
-        );
-      });
-    }
+    // Attach images to listings
+    similarListings.forEach((l) => {
+      // Type assertion needed as listing type from view doesn't include images
+      (l as typeof l & { images: typeof images }).images = images.filter(
+        (img) => img.listing_id === l.id
+      );
+    });
   }
 
   return (

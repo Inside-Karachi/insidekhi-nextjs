@@ -1,12 +1,11 @@
 /**
- * Real-time Security Alerts Hook
- * Subscribes to critical security events via Supabase Realtime
+ * Security Alerts Hook
+ * Polls /api/admin/security/events for unresolved critical/high severity events
+ * (Supabase Realtime is no longer available - see MEMORY notes on the Supabase migration)
  * Provides browser notifications for super admins
  */
 
 import * as React from "react";
-import { createClient } from "@/lib/supabase/client";
-import type { RealtimeChannel } from "@supabase/supabase-js";
 
 export interface SecurityAlert {
   id: number;
@@ -48,6 +47,12 @@ interface UseSecurityAlertsOptions {
    * @default 30000 (30 seconds)
    */
   autoDismissMs?: number;
+
+  /**
+   * Polling interval (ms)
+   * @default 20000 (20 seconds)
+   */
+  pollIntervalMs?: number;
 }
 
 interface UseSecurityAlertsReturn {
@@ -62,7 +67,7 @@ interface UseSecurityAlertsReturn {
 }
 
 /**
- * Hook to subscribe to real-time security alerts
+ * Hook to poll for new security alerts
  */
 export function useSecurityAlerts(
   options: UseSecurityAlertsOptions = {}
@@ -72,6 +77,7 @@ export function useSecurityAlerts(
     severityLevels = ["critical", "high"],
     maxAlerts = 50,
     autoDismissMs = 30000,
+    pollIntervalMs = 20000,
   } = options;
 
   const [alerts, setAlerts] = React.useState<SecurityAlert[]>([]);
@@ -80,8 +86,8 @@ export function useSecurityAlerts(
   );
   const [isConnected, setIsConnected] = React.useState(false);
   const [connectionError, setConnectionError] = React.useState<string>();
-  const channelRef = React.useRef<RealtimeChannel | null>(null);
-  const supabase = createClient();
+  const seenIdsRef = React.useRef<Set<number>>(new Set());
+  const consecutiveFailuresRef = React.useRef(0);
 
   // Request notification permission
   const requestNotificationPermission =
@@ -165,6 +171,7 @@ export function useSecurityAlerts(
   const clearAlerts = React.useCallback(() => {
     setAlerts([]);
     setReadAlertIds(new Set());
+    seenIdsRef.current = new Set();
   }, []);
 
   // Auto-dismiss old alerts
@@ -184,116 +191,79 @@ export function useSecurityAlerts(
     return () => clearInterval(interval);
   }, [autoDismissMs]);
 
-  // Set up Realtime subscription
+  // Poll for new security alerts
   React.useEffect(() => {
     let mounted = true;
-    let retryCount = 0;
-    const MAX_RETRIES = 3;
-    const INITIAL_RETRY_DELAY = 1000; // 1 second
 
     // Request notification permission on mount
     if (enableNotifications && Notification.permission === "default") {
       requestNotificationPermission();
     }
 
-    const setupSubscription = (delay = 0) => {
-      if (delay > 0) {
-        const timeout = setTimeout(() => {
-          if (mounted) {
-            setupSubscription(0);
-          }
-        }, delay);
-        return () => clearTimeout(timeout);
-      }
-
-      // Subscribe to security_events table
-      // NOTE: security_events table must have Realtime enabled in Supabase
-      const channel = supabase
-        .channel(`security-alerts-${Date.now()}`, {
-          config: {
-            broadcast: { self: false },
-            presence: { key: "" },
-          },
-        })
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "security_events",
-          },
-          (payload) => {
-            if (!mounted) return;
-
-            const newAlert = payload.new as SecurityAlert;
-
-            // Filter by severity locally
-            if (!severityLevels.includes(newAlert.severity)) {
-              return;
-            }
-
-            // Add to alerts list
-            setAlerts((prev) => {
-              const updated = [newAlert, ...prev];
-              // Keep only maxAlerts most recent
-              return updated.slice(0, maxAlerts);
-            });
-
-            // Show browser notification
-            showNotification(newAlert);
-          }
-        )
-        .subscribe((status) => {
-          if (!mounted) return;
-
-          if (status === "SUBSCRIBED") {
-            setIsConnected(true);
-            setConnectionError(undefined);
-            retryCount = 0; // Reset retry count on successful connection
-          } else if (status === "CHANNEL_ERROR") {
-            setIsConnected(false);
-
-            // Retry with exponential backoff if we haven't exceeded max retries
-            if (retryCount < MAX_RETRIES) {
-              retryCount++;
-              const delay = INITIAL_RETRY_DELAY * Math.pow(2, retryCount - 1);
-              console.warn(
-                `[SECURITY ALERTS] Connection failed. Retrying in ${delay}ms (attempt ${retryCount}/${MAX_RETRIES})...`
-              );
-              setConnectionError(
-                `Realtime connection failed. Retrying... (${retryCount}/${MAX_RETRIES})`
-              );
-              supabase.removeChannel(channel).catch(() => {
-                // Ignore cleanup errors
-              });
-              setupSubscription(delay);
-            } else {
-              const errorMsg =
-                "Realtime connection failed after retries. Check RLS policies on security_events table.";
-              setConnectionError(errorMsg);
-              console.error("[SECURITY ALERTS]", errorMsg);
-            }
-          } else if (status === "CLOSED") {
-            setIsConnected(false);
-          }
+    const fetchAlerts = async () => {
+      try {
+        const params = new URLSearchParams({
+          resolved: "false",
+          limit: String(maxAlerts),
+        });
+        const res = await fetch(`/api/admin/security/events?${params}`, {
+          cache: "no-store",
         });
 
-      channelRef.current = channel;
+        if (!mounted) return;
+
+        if (!res.ok) {
+          throw new Error(`Request failed with status ${res.status}`);
+        }
+
+        const data = await res.json();
+        const events: SecurityAlert[] = Array.isArray(data.events)
+          ? data.events
+          : [];
+
+        // Only surface alerts matching the configured severity filter
+        const relevant = events.filter((e) =>
+          severityLevels.includes(e.severity)
+        );
+
+        // Detect newly-seen alerts (for notifications) before updating state
+        const newlySeen = relevant.filter((e) => !seenIdsRef.current.has(e.id));
+        newlySeen.forEach((alert) => {
+          seenIdsRef.current.add(alert.id);
+          showNotification(alert);
+        });
+
+        setAlerts(relevant.slice(0, maxAlerts));
+        setIsConnected(true);
+        setConnectionError(undefined);
+        consecutiveFailuresRef.current = 0;
+      } catch (error) {
+        if (!mounted) return;
+        consecutiveFailuresRef.current += 1;
+        setIsConnected(false);
+        if (consecutiveFailuresRef.current >= 3) {
+          setConnectionError(
+            "Unable to reach security alerts endpoint. Retrying..."
+          );
+        }
+        console.warn("[SECURITY ALERTS] Poll failed:", error);
+      }
     };
 
-    setupSubscription();
+    // Initial fetch
+    void fetchAlerts();
+
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void fetchAlerts();
+    }, pollIntervalMs);
 
     return () => {
       mounted = false;
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current).catch((err) => {
-          console.warn("[SECURITY ALERTS] Cleanup warning:", err);
-        });
-        channelRef.current = null;
-      }
+      clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [pollIntervalMs, maxAlerts]);
 
   // Calculate unread count
   const unreadCount = React.useMemo(() => {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { requireSuperAdmin } from "@/lib/auth/admin";
 
 interface RouteContext {
@@ -22,22 +22,27 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: "value is required" }, { status: 400 });
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    const updateData: Record<string, unknown> = { value };
-    if (description !== undefined) {
-      updateData.description = description;
-    }
-
-    const { data, error } = await adminSupabase
-      .from("system_config")
-      .update(updateData)
-      .eq("key", key)
-      .select()
-      .single();
-
-    if (error) {
-      console.error("[UPDATE CONFIG API] Error:", error);
+    let data;
+    try {
+      const { rows } =
+        description !== undefined
+          ? await query(
+              `UPDATE public.system_config
+               SET config_value = $1, description = $2, updated_at = timezone('utc', now())
+               WHERE config_key = $3
+               RETURNING *`,
+              [JSON.stringify(value), description, key]
+            )
+          : await query(
+              `UPDATE public.system_config
+               SET config_value = $1, updated_at = timezone('utc', now())
+               WHERE config_key = $2
+               RETURNING *`,
+              [JSON.stringify(value), key]
+            );
+      data = rows[0];
+    } catch (updateError) {
+      console.error("[UPDATE CONFIG API] Error:", updateError);
       return NextResponse.json(
         { error: "Failed to update configuration" },
         { status: 500 }

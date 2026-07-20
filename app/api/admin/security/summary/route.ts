@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { requireSuperAdmin } from "@/lib/auth/admin";
 
 // GET /api/admin/security/summary - Get security metrics summary
@@ -11,19 +11,21 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const hours = parseInt(searchParams.get("hours") || "24");
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    const { data, error } = await adminSupabase.rpc("get_security_summary", {
-      p_hours: hours,
-    });
-
-    if (error) {
-      console.error("[SECURITY SUMMARY API] Error:", error);
+    let rpcRows;
+    try {
+      ({ rows: rpcRows } = await query(
+        `SELECT get_security_summary($1) AS result`,
+        [hours]
+      ));
+    } catch (rpcError) {
+      console.error("[SECURITY SUMMARY API] Error:", rpcError);
       return NextResponse.json(
         { error: "Failed to fetch security summary" },
         { status: 500 }
       );
     }
+
+    const data = rpcRows[0]?.result;
 
     // RPC returns JSONB, format it as an array for the dashboard
     return NextResponse.json({

@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSuperAdmin } from "@/lib/auth/admin";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 interface BulkDeleteRequestBody {
   userIds: string[];
+}
+
+interface DeleteUserResult {
+  success: boolean;
+  error?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -40,34 +45,32 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     const successes: string[] = [];
     const failures: Array<{ id: string; error: string }> = [];
 
-    // Delete auth users sequentially to keep error handling simple and predictable
+    // Delete users sequentially to keep error handling simple and predictable
     for (const id of targetIds) {
       try {
-        const { error } = await adminSupabase.auth.admin.deleteUser(id);
-        if (error) {
-          failures.push({ id, error: String(error.message || error) });
-        } else {
-          successes.push(id);
+        const { rows } = await query(
+          `SELECT delete_user_completely($1, $2) AS result`,
+          [id, currentUser.id],
+        );
+        const result = rows[0]?.result as DeleteUserResult | undefined;
+
+        if (!result?.success) {
+          failures.push({ id, error: result?.error || "Deletion failed" });
+          continue;
         }
+
+        // delete_user_completely only cleans up the public schema; the
+        // auth.users row is deleted separately (not FK-linked to profiles).
+        await query(`DELETE FROM auth.users WHERE id = $1`, [id]);
+        successes.push(id);
       } catch (e) {
         failures.push({
           id,
           error: e instanceof Error ? e.message : "Unknown error",
         });
-      }
-    }
-
-    // Best-effort cleanup of profiles for successfully deleted auth users
-    if (successes.length > 0) {
-      try {
-        await adminSupabase.from("profiles").delete().in("id", successes);
-      } catch {
-        // ignore cleanup failures; auth user deletion already succeeded
       }
     }
 

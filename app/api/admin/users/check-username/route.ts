@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 
 /**
  * GET /api/admin/users/check-username
@@ -8,24 +9,19 @@ import { createServerSupabase } from "@/lib/supabase/server";
  */
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-
     // Check authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const session = await getSession(request);
 
-    if (authError || !user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Verify admin role
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (
       !profile ||
@@ -64,16 +60,22 @@ export async function GET(request: NextRequest) {
     }
 
     // Check if username exists
-    let query = supabase.from("profiles").select("id").eq("username", username);
+    let sql = "SELECT id FROM profiles WHERE username = $1";
+    const params: unknown[] = [username];
 
     // Exclude current user if editing
     if (excludeUserId) {
-      query = query.neq("id", excludeUserId);
+      sql += " AND id != $2";
+      params.push(excludeUserId);
     }
 
-    const { data: existingUser, error: queryError } = await query.maybeSingle();
+    sql += " LIMIT 1";
 
-    if (queryError) {
+    let existingUser: { id: string } | undefined;
+    try {
+      const { rows } = await query(sql, params);
+      existingUser = rows[0] as { id: string } | undefined;
+    } catch (queryError) {
       console.error("Username check error:", queryError);
       return NextResponse.json(
         { error: "Failed to check username availability" },

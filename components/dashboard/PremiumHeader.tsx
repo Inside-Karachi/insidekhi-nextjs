@@ -3,7 +3,6 @@
 import * as React from "react";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { User } from "@supabase/supabase-js";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useSearch } from "@/hooks/useSearch";
@@ -29,8 +28,13 @@ interface Profile {
   updated_at?: string;
 }
 
+interface HeaderUser {
+  id: string;
+  email?: string;
+}
+
 interface PremiumHeaderProps {
-  user?: User | null;
+  user?: HeaderUser | null;
   profile?: Profile | null;
   context?: "public" | "dashboard";
   showDiscoveryPanel?: boolean;
@@ -375,10 +379,10 @@ export function PremiumHeader({
                             const activeRole =
                               profile?.active_role || profile?.role;
 
-                            if (
-                              activeRole === "admin" ||
-                              activeRole === "super_admin"
-                            ) {
+                            if (activeRole === "super_admin") {
+                              return "Super Admin";
+                            }
+                            if (activeRole === "admin") {
                               return "Admin";
                             }
                             if (activeRole === "lister") {
@@ -386,6 +390,12 @@ export function PremiumHeader({
                             }
                             if (activeRole === "organizer") {
                               return "Organizer";
+                            }
+                            if (activeRole === "business_owner") {
+                              return "Business Owner";
+                            }
+                            if (activeRole === "writer") {
+                              return "Writer";
                             }
                             return `${profile?.points || 0} XP`;
                           })()}

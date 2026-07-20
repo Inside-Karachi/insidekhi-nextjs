@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react";
 import { getFriendlyActivityName } from "@/lib/gamification";
 
 import { redirect } from "next/navigation";
@@ -7,7 +8,6 @@ import { PremiumInsightsPanel } from "@/components/dashboard/PremiumInsightsPane
 import { PremiumQuickActions } from "@/components/dashboard/PremiumQuickActions";
 import { PremiumBottomSection } from "@/components/dashboard/PremiumBottomSection";
 import { InviteShareDashboardSection } from "@/components/dashboard/InviteShareDashboardSection";
-import { cookies } from "next/headers";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { query } from "@/lib/db";
 
@@ -155,6 +155,42 @@ export default async function DashboardPage() {
   };
 
   const ranksData = rank ? { rank } : null;
+
+  // Use active_role to determine which dashboard to show - staff switched to
+  // public_user will see the public dashboard below, not the admin ones.
+  const activeRole = profile?.active_role || profile?.role;
+
+  if (activeRole === "super_admin") {
+    const { SuperAdminDashboardWrapper } = await import(
+      "@/components/dashboard/SuperAdminDashboardWrapper"
+    );
+    return (
+      <SuperAdminDashboardWrapper
+        user={user}
+        profile={
+          profile as unknown as ComponentProps<
+            typeof SuperAdminDashboardWrapper
+          >["profile"]
+        }
+      />
+    );
+  }
+
+  if (activeRole === "admin") {
+    const { AdminDashboard } = await import(
+      "@/components/dashboard/AdminDashboard"
+    );
+    return (
+      <AdminDashboard
+        user={user}
+        profile={
+          profile as unknown as ComponentProps<
+            typeof AdminDashboard
+          >["profile"]
+        }
+      />
+    );
+  }
 
   // Calculate dates for insights
   const sevenDaysAgo = new Date();

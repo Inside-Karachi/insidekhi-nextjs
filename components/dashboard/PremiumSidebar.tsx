@@ -3,11 +3,9 @@
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { User } from "@supabase/supabase-js";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
 import { useUserGamification } from "@/hooks/useUserGamification";
 import { useRole } from "@/lib/context/RoleContext";
 import {
@@ -206,10 +204,15 @@ interface SidebarStats {
   favorites?: number;
 }
 
+interface SidebarUser {
+  id: string;
+  email?: string;
+}
+
 interface PremiumSidebarProps {
   isOpen: boolean;
   onClose: () => void;
-  user: User;
+  user: SidebarUser;
   profile: ProfileShape | null;
   stats?: SidebarStats;
   loadingStats?: boolean;
@@ -224,7 +227,6 @@ export function PremiumSidebar({
   loadingStats = false,
 }: PremiumSidebarProps) {
   const pathname = usePathname();
-  const _supabase = createClient(); // Prefix with _ to indicate intentionally unused
   const { user: roleUser, switchRole } = useRole();
   const [isSwitching, setIsSwitching] = React.useState(false);
 

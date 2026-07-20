@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 // Role-based dashboard components
 import { SuperAdminDashboard } from "./SuperAdminDashboard";
@@ -30,219 +30,158 @@ interface AdminDashboardData {
   forms?: FormsOverviewData;
 }
 
+async function countRows(
+  table: string,
+  whereSql?: string,
+  params?: unknown[],
+): Promise<number> {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS count FROM ${table}${whereSql ? ` WHERE ${whereSql}` : ""}`,
+    params,
+  );
+  return (rows[0]?.count as number) || 0;
+}
+
 async function getAdminDashboardData(): Promise<AdminDashboardData | null> {
   try {
-    // Use service role client for admin operations to bypass RLS
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
+    const thirtyDaysAgoIso = new Date(
+      Date.now() - 30 * 24 * 60 * 60 * 1000,
+    ).toISOString();
 
-    // Get comprehensive dashboard statistics using service role
+    // Get comprehensive dashboard statistics
     const [
-      { count: totalUsers },
-      { count: activeUsers },
-      { count: totalEvents },
-      { count: publishedEvents },
-      { count: totalListings },
-      { count: activeListings },
-      { count: totalReviews },
-      { count: pendingReviews },
+      totalUsers,
+      activeUsers,
+      totalEvents,
+      publishedEvents,
+      totalListings,
+      activeListings,
+      totalReviews,
+      pendingReviews,
       // Comment statistics
-      { count: totalComments },
-      { count: pendingComments },
-      { count: approvedComments },
-      { count: rejectedComments },
-      { count: flaggedComments },
+      totalComments,
+      pendingComments,
+      approvedComments,
+      rejectedComments,
+      flaggedComments,
     ] = await Promise.all([
       // Total users
-      adminSupabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true }),
+      countRows("profiles"),
 
       // Active users (created in last 30 days)
-      adminSupabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true })
-        .gte(
-          "created_at",
-          new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-        ),
+      countRows("profiles", "created_at >= $1", [thirtyDaysAgoIso]),
 
       // Total events
-      adminSupabase.from("events").select("*", { count: "exact", head: true }),
+      countRows("events"),
 
       // Published events
-      adminSupabase
-        .from("events")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "published"),
+      countRows("events", "status = $1", ["published"]),
 
       // Total listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true }),
+      countRows("listings"),
 
       // Active listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "published"),
+      countRows("listings", "status = $1", ["published"]),
 
       // Total reviews
-      adminSupabase.from("reviews").select("*", { count: "exact", head: true }),
+      countRows("reviews"),
 
       // Pending reviews
-      adminSupabase
-        .from("reviews")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "pending"),
+      countRows("reviews", "status = $1", ["pending"]),
 
       // Comment statistics
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true }),
-
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "pending"),
-
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "approved"),
-
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "rejected"),
-
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "flagged"),
+      countRows("review_comments"),
+      countRows("review_comments", "status = $1", ["pending"]),
+      countRows("review_comments", "status = $1", ["approved"]),
+      countRows("review_comments", "status = $1", ["rejected"]),
+      countRows("review_comments", "status = $1", ["flagged"]),
     ]);
 
-    // Get recent activity using service role
-    const { data: recentUsers } = await adminSupabase
-      .from("profiles")
-      .select("id, full_name, created_at, role, avatar_url")
-      .order("created_at", { ascending: false })
-      .limit(5);
-
-    const { data: recentEvents } = await adminSupabase
-      .from("events")
-      .select("id, name, created_at, status")
-      .order("created_at", { ascending: false })
-      .limit(5);
-
-    const { data: recentListings } = await adminSupabase
-      .from("listings")
-      .select("id, name, created_at, status")
-      .order("created_at", { ascending: false })
-      .limit(5);
+    // Get recent activity
+    const [
+      { rows: recentUsers },
+      { rows: recentEvents },
+      { rows: recentListings },
+    ] = await Promise.all([
+      query(
+        `SELECT id, full_name, created_at, role, avatar_url
+         FROM profiles ORDER BY created_at DESC LIMIT 5`,
+      ),
+      query(
+        `SELECT id, name, created_at, status
+         FROM events ORDER BY created_at DESC LIMIT 5`,
+      ),
+      query(
+        `SELECT id, name, created_at, status
+         FROM listings ORDER BY created_at DESC LIMIT 5`,
+      ),
+    ]);
 
     // Calculate growth metrics
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
     const [
-      { count: usersThisMonth },
-      { count: eventsThisMonth },
-      { count: listingsThisMonth },
-      { count: usersThisWeek },
-      { count: eventsThisWeek },
-      { count: listingsThisWeek },
+      usersThisMonth,
+      eventsThisMonth,
+      listingsThisMonth,
+      usersThisWeek,
+      eventsThisWeek,
+      listingsThisWeek,
     ] = await Promise.all([
-      adminSupabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", thirtyDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("events")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", thirtyDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", thirtyDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", sevenDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("events")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", sevenDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", sevenDaysAgo.toISOString()),
+      countRows("profiles", "created_at >= $1", [thirtyDaysAgo.toISOString()]),
+      countRows("events", "created_at >= $1", [thirtyDaysAgo.toISOString()]),
+      countRows("listings", "created_at >= $1", [thirtyDaysAgo.toISOString()]),
+      countRows("profiles", "created_at >= $1", [sevenDaysAgo.toISOString()]),
+      countRows("events", "created_at >= $1", [sevenDaysAgo.toISOString()]),
+      countRows("listings", "created_at >= $1", [sevenDaysAgo.toISOString()]),
     ]);
 
     let formsOverview: FormsOverviewData | undefined;
 
     try {
-      const { data: formTypeRows } = await adminSupabase
-        .from("form_submissions")
-        .select("form_type");
+      const { rows: formTypeRows } = await query(
+        `SELECT DISTINCT form_type FROM form_submissions`,
+      );
 
       const formTypes = Array.from(
         new Set(
-          (formTypeRows || [])
-            .map((row) => row.form_type)
+          formTypeRows
+            .map((row) => row.form_type as string | null)
             .filter((type): type is string => Boolean(type))
         )
       );
 
-      const [
-        { count: formsTotal },
-        { count: formsPending },
-        { count: formsLast24Hours },
-      ] = await Promise.all([
-        adminSupabase
-          .from("form_submissions")
-          .select("id", { count: "exact", head: true }),
-        adminSupabase
-          .from("form_submissions")
-          .select("id", { count: "exact", head: true })
-          .or("status.is.null,status.eq.pending"),
-        adminSupabase
-          .from("form_submissions")
-          .select("id", { count: "exact", head: true })
-          .gte(
-            "submitted_at",
-            new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-          ),
+      const [formsTotal, formsPending, formsLast24Hours] = await Promise.all([
+        countRows("form_submissions"),
+        countRows(
+          "form_submissions",
+          "(status IS NULL OR status = $1)",
+          ["pending"],
+        ),
+        countRows("form_submissions", "submitted_at >= $1", [
+          new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        ]),
       ]);
 
       const formTypeSummaries = await Promise.all(
         formTypes.map(async (formType) => {
-          const [
-            { count: totalForType },
-            { count: pendingForType },
-            { data: lastSubmitted },
-          ] = await Promise.all([
-            adminSupabase
-              .from("form_submissions")
-              .select("id", { count: "exact", head: true })
-              .eq("form_type", formType),
-            adminSupabase
-              .from("form_submissions")
-              .select("id", { count: "exact", head: true })
-              .eq("form_type", formType)
-              .or("status.is.null,status.eq.pending"),
-            adminSupabase
-              .from("form_submissions")
-              .select("submitted_at")
-              .eq("form_type", formType)
-              .order("submitted_at", { ascending: false })
-              .limit(1)
-              .maybeSingle(),
-          ]);
+          const [totalForType, pendingForType, lastSubmittedResult] =
+            await Promise.all([
+              countRows("form_submissions", "form_type = $1", [formType]),
+              countRows(
+                "form_submissions",
+                "form_type = $1 AND (status IS NULL OR status = $2)",
+                [formType, "pending"],
+              ),
+              query(
+                `SELECT submitted_at FROM form_submissions
+                 WHERE form_type = $1
+                 ORDER BY submitted_at DESC LIMIT 1`,
+                [formType],
+              ),
+            ]);
+          const lastSubmitted = lastSubmittedResult.rows[0];
 
           return {
             formType,
@@ -253,11 +192,9 @@ async function getAdminDashboardData(): Promise<AdminDashboardData | null> {
         })
       );
 
-      const { data: latestFormSubmissions } = await adminSupabase
-        .from("form_submissions")
-        .select("*")
-        .order("submitted_at", { ascending: false })
-        .limit(8);
+      const { rows: latestFormSubmissions } = await query(
+        `SELECT * FROM form_submissions ORDER BY submitted_at DESC LIMIT 8`,
+      );
 
       const attachmentsMap = new Map<
         number,
@@ -270,10 +207,12 @@ async function getAdminDashboardData(): Promise<AdminDashboardData | null> {
         );
 
         if (submissionIds.length > 0) {
-          const { data: attachmentRows } = await adminSupabase
-            .from("form_submission_images")
-            .select("submission_id, public_url, variant")
-            .in("submission_id", submissionIds);
+          const { rows: attachmentRows } = await query(
+            `SELECT submission_id, public_url, variant
+             FROM form_submission_images
+             WHERE submission_id = ANY($1)`,
+            [submissionIds],
+          );
 
           if (attachmentRows) {
             for (const row of attachmentRows) {

@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import { cn } from "@/lib/utils";
-import { User } from "@supabase/supabase-js";
 import { PremiumSidebar } from "./PremiumSidebar";
 import { PremiumHeader } from "./PremiumHeader";
 
@@ -16,9 +15,14 @@ interface ProfileShape {
   updated_at?: string;
 }
 
+interface DashboardLayoutUser {
+  id: string;
+  email?: string;
+}
+
 interface PremiumDashboardLayoutProps {
   children: React.ReactNode;
-  user: User;
+  user: DashboardLayoutUser;
   profile: ProfileShape | null;
 }
 

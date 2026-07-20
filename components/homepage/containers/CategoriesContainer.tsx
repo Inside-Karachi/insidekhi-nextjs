@@ -1,36 +1,50 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { FeaturedCategoriesSection } from "@/components/homepage/FeaturedCategoriesSection";
 import type { GradientStyle } from "@/lib/utils/gradientStyles";
 
 export async function CategoriesContainer() {
-  const supabase = await createServerSupabase({ publicAnon: true });
+  const [viewResult, tableResult, eventCountResult] = await Promise.all([
+    query(
+      `SELECT id, name, slug, parent_id, icon_name, published_listing_count
+       FROM categories_with_published_listing_count
+       ORDER BY name ASC`,
+    ),
+    query(
+      `SELECT id, parent_id, show_in_featured, is_enabled, icon_name, category_type, display_order, slug, gradient_style
+       FROM categories
+       WHERE show_in_featured = true AND is_enabled = true AND category_type = ANY($1)
+       ORDER BY display_order ASC NULLS LAST, name ASC`,
+      [["listing", "event", "both"]],
+    ),
+    query(
+      `SELECT COUNT(*)::integer AS count FROM events_with_details
+       WHERE event_status = 'published' AND start_time >= $1`,
+      [new Date().toISOString()],
+    ),
+  ]);
 
-  const [
-    { data: categoriesView },
-    { data: categoriesTable },
-    { count: eventCount },
-  ] =
-    await Promise.all([
-      supabase
-        .from("categories_with_published_listing_count")
-        .select("*")
-        .order("name", { ascending: true }),
-      supabase
-        .from("categories")
-        .select(
-          "id, parent_id, show_in_featured, is_enabled, icon_name, category_type, display_order, slug, gradient_style"
-        )
-        .eq("show_in_featured", true)
-        .eq("is_enabled", true)
-        .in("category_type", ["listing", "event", "both"])
-        .order("display_order", { ascending: true, nullsFirst: false })
-        .order("name", { ascending: true }),
-      supabase
-        .from("events_with_details")
-        .select("*", { count: "exact", head: true })
-        .eq("event_status", "published")
-        .gte("start_time", new Date().toISOString()),
-    ]);
+  const categoriesView = viewResult.rows.map((row) => ({
+    ...row,
+    id: row.id !== null && row.id !== undefined ? Number(row.id) : row.id,
+    parent_id:
+      row.parent_id !== null && row.parent_id !== undefined
+        ? Number(row.parent_id)
+        : row.parent_id,
+    published_listing_count:
+      row.published_listing_count !== null &&
+      row.published_listing_count !== undefined
+        ? Number(row.published_listing_count)
+        : row.published_listing_count,
+  }));
+  const categoriesTable = tableResult.rows.map((row) => ({
+    ...row,
+    id: row.id !== null && row.id !== undefined ? Number(row.id) : row.id,
+    parent_id:
+      row.parent_id !== null && row.parent_id !== undefined
+        ? Number(row.parent_id)
+        : row.parent_id,
+  }));
+  const eventCount = Number(eventCountResult.rows[0]?.count || 0);
 
   // Build a map of category counts including subcategory aggregation
   const categoryCountMap = new Map<number, number>();

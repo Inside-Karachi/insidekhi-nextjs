@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { z } from "zod";
@@ -17,8 +17,8 @@ const verifyShareSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    // Check authentication
+  try {
+    // Check authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -29,17 +29,13 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if user has permission (admin or super_admin only)
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    if (
-      profileError ||
-      !profile ||
-      !canModerateShares(profile.role)
-    ) {
+    if (!profile || !canModerateShares(profile.role)) {
       return NextResponse.json(
         { success: false, error: "Forbidden - Insufficient permissions" },
         { status: 403 }
@@ -62,45 +58,43 @@ export async function POST(request: NextRequest) {
 
     const { share_id, status, notes } = validation.data;
 
-    // verify_social_share is SECURITY DEFINER / service_role-only because it
-    // updates the sharer's profile.points row (cross-user, can't go through RLS).
-    // We create the admin client here and reuse it for the notification below.
-    const supabaseAdmin = await createServerSupabase({ useServiceRole: true });
-
     // Fetch share owner info BEFORE verification (to ensure we have it for notification)
-    const { data: shareData, error: shareError } = await supabase
-      .from("social_shares")
-      .select("user_id")
-      .eq("id", share_id)
-      .single();
+    const { rows: shareRows } = await query(
+      "SELECT user_id FROM public.social_shares WHERE id = $1 LIMIT 1",
+      [share_id]
+    );
+    const shareData = shareRows[0] as { user_id: string } | undefined;
 
-    if (shareError || !shareData) {
-      console.error("Error fetching share owner:", shareError);
+    if (!shareData) {
+      console.error("Error fetching share owner: share not found", share_id);
       // We continue with verification but notification might fail
     }
 
-    // Call RPC via service_role. Pass the caller's UID explicitly - the function
-    // cannot rely on auth.uid() when invoked through the service_role key.
-    const { data, error } = await supabaseAdmin.rpc("verify_social_share", {
-      p_share_id: share_id,
-      p_verification_status: status,
-      p_verification_notes: notes || undefined,
-      p_verifier_id: session.userId,
-    });
-
-    if (error) {
-      console.error("Error verifying share:", error);
+    // Call verify_social_share, passing the caller's UID explicitly - the
+    // function's own authorization check depends on this parameter, not a
+    // session GUC / auth.uid() default.
+    let rpcRows;
+    try {
+      ({ rows: rpcRows } = await query(
+        `SELECT verify_social_share($1, $2, $3, $4) AS result`,
+        [share_id, status, notes || null, session.userId]
+      ));
+    } catch (rpcError) {
+      console.error("Error verifying share:", rpcError);
       return NextResponse.json(
         {
           success: false,
-          error: error.message || "Failed to verify share",
+          error:
+            rpcError instanceof Error
+              ? rpcError.message
+              : "Failed to verify share",
         },
         { status: 400 }
       );
     }
 
     // RPC returns JSONB
-    const result = data as {
+    const result = rpcRows[0]?.result as {
       success: boolean;
       xp_awarded?: number;
       error?: string;
@@ -119,18 +113,15 @@ export async function POST(request: NextRequest) {
     // Send Notification to User
     if (shareData?.user_id) {
       try {
-        const { data: recipientProfile } = await supabaseAdmin
-          .from("profiles")
-          .select("role")
-          .eq("id", shareData.user_id)
-          .single();
+        const { rows: recipientRows } = await query(
+          "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+          [shareData.user_id]
+        );
+        const recipientProfile = recipientRows[0] as { role: string } | undefined;
 
         const recipientRole =
           (recipientProfile?.role as NotificationUserRole) || "public_user";
-        const categorySlug = await resolveCategorySlugForRole(
-          supabaseAdmin,
-          recipientRole
-        );
+        const categorySlug = await resolveCategorySlugForRole(recipientRole);
 
         let title = "";
         let bodyContent = "";
@@ -146,19 +137,16 @@ export async function POST(request: NextRequest) {
             }`;
         }
 
-        await createNotification(
-          {
-            recipientId: shareData.user_id,
-            roleScope: recipientRole,
-            categorySlug,
-            title,
-            body: bodyContent,
-            ctaLabel: "View Details",
-            ctaUrl,
-            priority: "normal",
-          },
-          { supabase: supabaseAdmin }
-        );
+        await createNotification({
+          recipientId: shareData.user_id,
+          roleScope: recipientRole,
+          categorySlug,
+          title,
+          body: bodyContent,
+          ctaLabel: "View Details",
+          ctaUrl,
+          priority: "normal",
+        });
       } catch (notifyError) {
         // Don't fail the request if notification fails, just log it
         console.error("Failed to send share verification notification:", notifyError);

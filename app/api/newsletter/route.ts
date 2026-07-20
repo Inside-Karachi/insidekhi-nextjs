@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   normalizeEmail,
   validateEmail,
@@ -9,7 +9,6 @@ import { verifyRecaptcha } from "@/lib/utils/recaptcha";
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
     const formData = await request.json();
 
     // Honeypot: if present and non-empty, silently accept to confuse bots
@@ -49,30 +48,42 @@ export async function POST(request: NextRequest) {
       "unknown";
     // DB-backed rate check (count recent submissions from this IP)
     const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const { count, error: countErr } = await supabase
-      .from("form_submissions")
-      .select("id", { count: "exact" })
-      .eq("form_type", "newsletter")
-      .gt("submitted_at", cutoff)
-      .eq("additional_data->>ip", ip);
-    if (countErr) console.error("Rate count error (newsletter):", countErr);
-    const total = typeof count === "number" ? count : 0;
+    let total = 0;
+    try {
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*)::int AS count
+         FROM form_submissions
+         WHERE form_type = 'newsletter'
+           AND submitted_at > $1
+           AND additional_data->>'ip' = $2`,
+        [cutoff, ip]
+      );
+      total = countRows[0]?.count ?? 0;
+    } catch (countErr) {
+      console.error("Rate count error (newsletter):", countErr);
+    }
     if (total > 50) {
       // Compute earliest timestamp in window to estimate Retry-After
-      const { data: earliest, error: eErr } = await supabase
-        .from("form_submissions")
-        .select("submitted_at")
-        .eq("form_type", "newsletter")
-        .gt("submitted_at", cutoff)
-        .eq("additional_data->>ip", ip)
-        .order("submitted_at", { ascending: true })
-        .limit(1);
       let retryAfter = Math.ceil(60 * 60);
-      if (!eErr && earliest && earliest.length && earliest[0].submitted_at) {
-        const oldestTs = Date.parse(String(earliest[0].submitted_at));
-        const now = Date.now();
-        const retryAfterMs = Math.max(0, 60 * 60 * 1000 - (now - oldestTs));
-        retryAfter = Math.ceil(retryAfterMs / 1000);
+      try {
+        const { rows: earliest } = await query(
+          `SELECT submitted_at
+           FROM form_submissions
+           WHERE form_type = 'newsletter'
+             AND submitted_at > $1
+             AND additional_data->>'ip' = $2
+           ORDER BY submitted_at ASC
+           LIMIT 1`,
+          [cutoff, ip]
+        );
+        if (earliest.length && earliest[0].submitted_at) {
+          const oldestTs = Date.parse(String(earliest[0].submitted_at));
+          const now = Date.now();
+          const retryAfterMs = Math.max(0, 60 * 60 * 1000 - (now - oldestTs));
+          retryAfter = Math.ceil(retryAfterMs / 1000);
+        }
+      } catch (eErr) {
+        console.error("Rate earliest lookup error (newsletter):", eErr);
       }
       console.warn(
         `Rate limited newsletter - ip=${ip} retryAfter=${retryAfter}s`
@@ -91,40 +102,38 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if email already subscribed
-    const { data: existing } = await supabase
-      .from("form_submissions")
-      .select("id")
-      .eq("form_type", "newsletter")
-      .eq("email", email)
-      .single();
+    const { rows: existingRows } = await query(
+      `SELECT id FROM form_submissions
+       WHERE form_type = 'newsletter' AND email = $1
+       LIMIT 1`,
+      [email]
+    );
 
-    if (existing) {
+    if (existingRows.length > 0) {
       return NextResponse.json({
         success: true,
         message: "You are already subscribed to our newsletter!",
       });
     }
 
-    const submissionData = {
-      form_type: "newsletter",
-      email,
-      status: "n/a", // Newsletter subscriptions don't need admin action
-      additional_data: {
-        interests: formData.interests || [],
-        source: formData.source || "website",
-        ip,
-        formVersion: "1.0",
-        subscribedAt: new Date().toISOString(),
-      },
+    const additionalData = {
+      interests: formData.interests || [],
+      source: formData.source || "website",
+      ip,
+      formVersion: "1.0",
+      subscribedAt: new Date().toISOString(),
     };
 
-    const { data, error } = await supabase
-      .from("form_submissions")
-      .insert([submissionData])
-      .select("id")
-      .single();
-
-    if (error) {
+    let insertedId: number;
+    try {
+      const { rows } = await query(
+        `INSERT INTO form_submissions (form_type, email, status, additional_data)
+         VALUES ('newsletter', $1, 'n/a', $2)
+         RETURNING id`,
+        [email, additionalData]
+      );
+      insertedId = rows[0].id;
+    } catch (error) {
       console.error("Database error:", error);
       return NextResponse.json(
         { error: "Failed to subscribe to newsletter" },
@@ -134,7 +143,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      id: data.id,
+      id: insertedId,
       message: "Successfully subscribed to our newsletter!",
     });
   } catch (error) {
@@ -148,7 +157,6 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
     const email = searchParams.get("email");
 
@@ -160,13 +168,12 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Remove newsletter subscription
-    const { error } = await supabase
-      .from("form_submissions")
-      .delete()
-      .eq("form_type", "newsletter")
-      .eq("email", email);
-
-    if (error) {
+    try {
+      await query(
+        `DELETE FROM form_submissions WHERE form_type = 'newsletter' AND email = $1`,
+        [email]
+      );
+    } catch (error) {
       console.error("Database error:", error);
       return NextResponse.json(
         { error: "Failed to unsubscribe" },
@@ -189,7 +196,6 @@ export async function DELETE(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
     const email = searchParams.get("email");
 
@@ -201,15 +207,16 @@ export async function GET(request: NextRequest) {
     }
 
     // Check subscription status
-    const { data, error } = await supabase
-      .from("form_submissions")
-      .select("*")
-      .eq("form_type", "newsletter")
-      .eq("email", email)
-      .single();
-
-    if (error && error.code !== "PGRST116") {
-      // PGRST116 is "not found"
+    let subscription = null;
+    try {
+      const { rows } = await query(
+        `SELECT * FROM form_submissions
+         WHERE form_type = 'newsletter' AND email = $1
+         LIMIT 1`,
+        [email]
+      );
+      subscription = rows[0] ?? null;
+    } catch (error) {
       console.error("Database error:", error);
       return NextResponse.json(
         { error: "Failed to check subscription status" },
@@ -219,8 +226,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      subscribed: !!data,
-      subscription: data || null,
+      subscribed: !!subscription,
+      subscription,
     });
   } catch (error) {
     console.error("API error:", error);

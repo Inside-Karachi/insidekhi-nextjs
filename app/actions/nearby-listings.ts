@@ -1,6 +1,6 @@
 "use server";
 
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 import { z } from "zod";
 
@@ -46,26 +46,15 @@ export interface NearbyListing {
 export async function getNearbyListings(params: NearbyListingsParams) {
   try {
     const validated = NearbyListingsSchema.parse(params);
-    const supabase = await createServerSupabase();
 
-    const { data, error } = await supabase.rpc("get_nearby_listings", {
-      user_lat: validated.lat,
-      user_lng: validated.lng,
-      radius_meters: validated.radius,
-      max_results: validated.limit,
-    });
-
-    if (error) {
-      return {
-        success: false,
-        error: error.message,
-        data: [] as NearbyListing[],
-      };
-    }
+    const { rows } = await query(
+      `SELECT * FROM get_nearby_listings($1, $2, $3, $4)`,
+      [validated.lat, validated.lng, validated.radius, validated.limit],
+    );
 
     return {
       success: true,
-      data: (data || []) as NearbyListing[],
+      data: (rows || []) as NearbyListing[],
       error: null,
     };
   } catch (error) {
@@ -116,27 +105,21 @@ export interface NearbyBranch {
 export async function getNearbyBranches(params: NearbyBranchesParams) {
   try {
     const validated = NearbyBranchesSchema.parse(params);
-    const supabase = await createServerSupabase();
 
-    const { data, error } = await supabase.rpc("get_nearby_branches", {
-      user_lat: validated.lat,
-      user_lng: validated.lng,
-      radius_meters: validated.radius,
-      listing_id_filter: validated.listingId ?? undefined,
-      max_results: validated.limit,
-    });
-
-    if (error) {
-      return {
-        success: false,
-        error: error.message,
-        data: [] as NearbyBranch[],
-      };
-    }
+    const { rows } = await query(
+      `SELECT * FROM get_nearby_branches($1, $2, $3, $4, $5)`,
+      [
+        validated.lat,
+        validated.lng,
+        validated.radius,
+        validated.listingId ?? null,
+        validated.limit,
+      ],
+    );
 
     return {
       success: true,
-      data: (data || []) as NearbyBranch[],
+      data: (rows || []) as NearbyBranch[],
       error: null,
     };
   } catch (error) {

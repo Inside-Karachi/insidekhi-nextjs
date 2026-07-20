@@ -68,10 +68,11 @@ export function CategoriesManagementPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Fetch categories
-  const fetchCategories = React.useCallback(async () => {
+  // Fetch categories. `silent` skips the loading state so background
+  // polling refreshes don't flash the table every cycle.
+  const fetchCategories = React.useCallback(async (silent = false) => {
     try {
-      setIsLoading(true);
+      if (!silent) setIsLoading(true);
 
       const params = new URLSearchParams();
 
@@ -107,13 +108,15 @@ export function CategoriesManagementPage() {
       }
     } catch (error) {
       console.error("Error fetching categories:", error);
-      toast({
-        title: "Error",
-        description: "Failed to fetch categories",
-        variant: "destructive",
-      });
+      if (!silent) {
+        toast({
+          title: "Error",
+          description: "Failed to fetch categories",
+          variant: "destructive",
+        });
+      }
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, [debouncedSearch, filterType, toast]);
 
@@ -122,11 +125,14 @@ export function CategoriesManagementPage() {
     fetchCategories();
   }, [fetchCategories]);
 
-  // Real-time refresh
+  // Background refresh so changes made by other admins eventually show up,
+  // without flashing the table on every poll (30s, well below anything a
+  // human would notice as "reloading").
   useRealtimeRefresh(
     "categories-management",
     [{ table: "categories" }],
-    fetchCategories
+    () => fetchCategories(true),
+    30_000
   );
 
   // Create category
@@ -401,7 +407,7 @@ export function CategoriesManagementPage() {
           <Button
             variant="outline"
             size="icon"
-            onClick={fetchCategories}
+            onClick={() => fetchCategories()}
             disabled={isLoading}
             aria-label="Refresh categories"
           >

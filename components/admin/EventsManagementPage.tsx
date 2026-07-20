@@ -61,10 +61,11 @@ export function EventsManagementPage() {
     return filteredEvents.slice(startIndex, startIndex + itemsPerPage);
   }, [filteredEvents, currentPage]);
 
-  // Fetch events
-  const fetchEvents = React.useCallback(async () => {
+  // Fetch events. `silent` skips the loading state so background polling
+  // refreshes don't flash the table every cycle.
+  const fetchEvents = React.useCallback(async (silent = false) => {
     try {
-      setIsLoading(true);
+      if (!silent) setIsLoading(true);
       const response = await fetch("/api/admin/events");
       const result = await response.json();
 
@@ -75,13 +76,15 @@ export function EventsManagementPage() {
       }
     } catch (error) {
       console.error("Fetch events error:", error);
-      toast({
-        title: "Error",
-        description: "Failed to fetch events",
-        variant: "destructive",
-      });
+      if (!silent) {
+        toast({
+          title: "Error",
+          description: "Failed to fetch events",
+          variant: "destructive",
+        });
+      }
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, [toast]);
 
@@ -171,16 +174,17 @@ export function EventsManagementPage() {
         pendingRefreshRef.current = true;
         return;
       }
-      fetchEvents();
+      fetchEvents(true);
     },
     600,
+    10_000,
   );
 
   // When modal closes, run any pending refresh from realtime updates
   React.useEffect(() => {
     if (!isModalOpen && pendingRefreshRef.current) {
       pendingRefreshRef.current = false;
-      fetchEvents();
+      fetchEvents(true);
     }
   }, [isModalOpen, fetchEvents]);
 
@@ -555,7 +559,7 @@ export function EventsManagementPage() {
           <div className="flex gap-3">
             <Button
               variant="outline"
-              onClick={fetchEvents}
+              onClick={() => fetchEvents()}
               disabled={isLoading}
               className="h-11 px-6 bg-background/50 border-border/50 hover:bg-background/80"
             >

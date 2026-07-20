@@ -46,7 +46,10 @@ export function CommentSection({
         );
 
         if (!response.ok) {
-          throw new Error("Failed to fetch comments");
+          const error = await response.json().catch(() => null);
+          throw new Error(
+            error?.error || `Failed to fetch comments (${response.status})`
+          );
         }
 
         const data: CommentListResponse = await response.json();

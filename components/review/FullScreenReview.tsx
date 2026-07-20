@@ -18,18 +18,8 @@ import {
   X,
   MapPin,
 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { useSupabaseUser } from "@/hooks/useSupabaseUser";
 import { useToast } from "@/hooks/use-toast";
-
-
-interface User {
-  id: string;
-  email?: string;
-  user_metadata?: {
-    full_name?: string;
-    avatar_url?: string;
-  };
-}
 
 interface FullScreenReviewProps {
   listingId: number;
@@ -54,8 +44,7 @@ export function FullScreenReview({
   const [hoverRating, setHoverRating] = useState<number>(0);
   const [comment, setComment] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoadingUser, setIsLoadingUser] = useState<boolean>(true);
+  const { user, isLoading: isLoadingUser } = useSupabaseUser();
   const [uploadedImages, setUploadedImages] = useState<
     Array<{
       id: number;
@@ -67,61 +56,41 @@ export function FullScreenReview({
   const [isUploadingImage, setIsUploadingImage] = useState<boolean>(false);
 
   const { toast } = useToast();
-  const supabaseRef = useRef(createClient());
-  const supabase = supabaseRef.current;
 
   // Track temp images for cleanup
   const tempImagesRef = useRef<string[]>([]);
 
-  // Get current user
+  // Close and warn if the drawer opened without an authenticated user
   useEffect(() => {
-    const getUser = async () => {
-      try {
-        const {
-          data: { user },
-          error,
-        } = await supabase.auth.getUser();
-        if (error) throw error;
-        setUser(user);
-      } catch (error) {
-        console.error("Error getting user:", error);
-        toast({
-          title: "Authentication Required",
-          description: "Please log in to write a review.",
-          variant: "destructive",
-        });
-        onClose();
-      } finally {
-        setIsLoadingUser(false);
-      }
-    };
-
-    if (isOpen) {
-      getUser();
+    if (isOpen && !isLoadingUser && !user) {
+      toast({
+        title: "Authentication Required",
+        description: "Please log in to write a review.",
+        variant: "destructive",
+      });
+      onClose();
     }
-  }, [isOpen, toast, onClose, supabase.auth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, isLoadingUser, user]);
 
   // Cleanup temp images when drawer closes without submission
   useEffect(() => {
     return () => {
       if (!isOpen && tempImagesRef.current.length > 0) {
-        const cleanupImages = async () => {
-          try {
-            await supabase.storage
-              .from("review-images")
-              .remove(tempImagesRef.current);
-            console.log(
-              `Cleaned up ${tempImagesRef.current.length} temp images`,
-            );
-          } catch (error) {
-            console.error("Error cleaning up temp images:", error);
-          }
-        };
-        cleanupImages();
+        const filesToClean = [...tempImagesRef.current];
         tempImagesRef.current = [];
+        for (const tempFileName of filesToClean) {
+          fetch("/api/reviews/temp-images", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tempFileName }),
+          }).catch((error) => {
+            console.error("Error cleaning up temp image:", error);
+          });
+        }
       }
     };
-  }, [isOpen, supabase.storage]);
+  }, [isOpen]);
 
   // Reset state when drawer opens/closes (matching FullScreenDeals pattern)
   useEffect(() => {
@@ -292,37 +261,27 @@ export function FullScreenReview({
     setIsUploadingImage(true);
 
     try {
-      const fileExt = file.name.split(".").pop();
-      const fileName = `temp/${user!.id}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+      const formData = new FormData();
+      formData.append("file", file);
 
-      const { error: uploadError } = await supabase.storage
-        .from("review-images")
-        .upload(fileName, file, {
-          cacheControl: "3600",
-          upsert: false,
-          contentType: file.type,
-        });
+      const response = await fetch("/api/reviews/temp-images", {
+        method: "POST",
+        body: formData,
+      });
+      const result = await response.json();
 
-      if (uploadError) {
-        throw uploadError;
+      if (!response.ok) {
+        throw new Error(result.error || "Failed to upload image");
       }
 
-      const { data: publicUrlData } = supabase.storage
-        .from("review-images")
-        .getPublicUrl(fileName);
-
-      if (!publicUrlData?.publicUrl) {
-        throw new Error("Failed to get public URL");
-      }
-
-      tempImagesRef.current.push(fileName);
+      tempImagesRef.current.push(result.data.tempFileName);
 
       setUploadedImages((prev) => [
         ...prev,
         {
           id: Date.now(),
-          image_url: publicUrlData.publicUrl,
-          tempFileName: fileName,
+          image_url: result.data.image_url,
+          tempFileName: result.data.tempFileName,
           uploading: false,
         },
       ]);
@@ -349,9 +308,11 @@ export function FullScreenReview({
     const image = uploadedImages.find((img) => img.id === imageId);
     if (image?.tempFileName) {
       try {
-        await supabase.storage
-          .from("review-images")
-          .remove([image.tempFileName]);
+        await fetch("/api/reviews/temp-images", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tempFileName: image.tempFileName }),
+        });
 
         tempImagesRef.current = tempImagesRef.current.filter(
           (f) => f !== image.tempFileName,
@@ -430,14 +391,14 @@ export function FullScreenReview({
                 {user && (
                   <div className="flex items-center gap-3 p-4 bg-muted/50 rounded-xl border border-border/50">
                     <Avatar className="h-12 w-12 border-2 border-primary/20">
-                      <AvatarImage src={user.user_metadata?.avatar_url} />
+                      <AvatarImage src={user.avatar_url ?? undefined} />
                       <AvatarFallback className="bg-primary/10">
                         <User className="h-5 w-5 text-primary" />
                       </AvatarFallback>
                     </Avatar>
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-sm truncate">
-                        {user.user_metadata?.full_name || user.email}
+                        {user.full_name || user.email}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         Review will be published after moderation

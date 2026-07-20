@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { Database } from "@/types/supabase";
 import { useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
 
 // Extended Review type with listing details
 export type UserReview = Database["public"]["Tables"]["reviews"]["Row"] & {
@@ -102,7 +101,6 @@ export function useReviewsRealtime(userId: string | null) {
       return;
     }
 
-    const supabase = createClient();
     const currentUserId = useReviewsStore.getState().currentUserId;
     const initialized = useReviewsStore.getState().initialized;
     const loading = useReviewsStore.getState().loading;
@@ -121,27 +119,17 @@ export function useReviewsRealtime(userId: string | null) {
       // Snapshot userId before async operation to detect user context changes
       const currentUserId = userId;
       try {
-        const { data: reviews, error } = await supabase
-          .from("reviews")
-          .select(
-            `*, listing:listings_with_details(*, listing_images!fkey_listing_images_listing_id(*))`,
-          )
-          .eq("user_id", userId)
-          .in("status", ["approved", "pending"])
-          .order("created_at", { ascending: false });
+        const res = await fetch("/api/dashboard/reviews", {
+          cache: "no-store",
+        });
 
-        if (error) {
-          console.error("Failed to load reviews:", error);
-          setError(error.message);
-          return;
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error || `Failed to fetch reviews (${res.status})`);
         }
 
-        const userReviews: UserReview[] =
-          reviews?.map((review) => ({
-            ...review,
-            reviewed_at: review.created_at,
-            helpful_count: review.helpful_count || 0,
-          })) || [];
+        const data = await res.json();
+        const userReviews: UserReview[] = data.reviews ?? [];
 
         // Only commit if the user hasn't changed since the fetch started
         if (useReviewsStore.getState().currentUserId === currentUserId) {

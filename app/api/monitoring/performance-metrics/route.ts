@@ -1,13 +1,9 @@
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
-import { Database } from "@/types/supabase";
-
-type PerformanceMetricInsert =
-  Database["public"]["Tables"]["system_performance_metrics"]["Insert"];
+import { query } from "@/lib/db";
 
 export async function POST(request: NextRequest) {
-    const session = await getSessionFromCookies();
+  const session = await getSessionFromCookies();
   try {
     const body = await request.json();
     const {
@@ -40,41 +36,40 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get user info if available
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    // Log performance metric with proper types
-    const metric: PerformanceMetricInsert = {
-      page_url: pageUrl,
-      metric_type: metricType,
-      largest_contentful_paint_ms: largestContentfulPaintMs || null,
-      first_input_delay_ms: firstInputDelayMs || null,
-      cumulative_layout_shift: cumulativeLayoutShift || null,
-      first_contentful_paint_ms: firstContentfulPaintMs || null,
-      time_to_first_byte_ms: timeToFirstByteMs || null,
-      page_load_time_ms: pageLoadTimeMs || null,
-      dom_interactive_ms: domInteractiveMs || null,
-      dom_complete_ms: domCompleteMs || null,
-      resource_count: resourceCount || null,
-      total_resource_size_bytes: totalResourceSizeBytes || null,
-      device_type: deviceType || null,
-      network_type: networkType || null,
-      connection_rtt_ms: connectionRttMs || null,
-      country_code: countryCode || null,
-      region: region || null,
-      city: city || null,
-      user_id: session?.userId || null,
-      source,
-    };
-
-    const { error: insertError } = await supabase
-      .from("system_performance_metrics")
-      .insert(metric);
-
-    if (insertError) {
+    // Log performance metric
+    try {
+      await query(
+        `INSERT INTO public.system_performance_metrics
+          (page_url, metric_type, largest_contentful_paint_ms, first_input_delay_ms,
+           cumulative_layout_shift, first_contentful_paint_ms, time_to_first_byte_ms,
+           page_load_time_ms, dom_interactive_ms, dom_complete_ms, resource_count,
+           total_resource_size_bytes, device_type, network_type, connection_rtt_ms,
+           country_code, region, city, user_id, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+        [
+          pageUrl,
+          metricType,
+          largestContentfulPaintMs || null,
+          firstInputDelayMs || null,
+          cumulativeLayoutShift || null,
+          firstContentfulPaintMs || null,
+          timeToFirstByteMs || null,
+          pageLoadTimeMs || null,
+          domInteractiveMs || null,
+          domCompleteMs || null,
+          resourceCount || null,
+          totalResourceSizeBytes || null,
+          deviceType || null,
+          networkType || null,
+          connectionRttMs || null,
+          countryCode || null,
+          region || null,
+          city || null,
+          session?.userId || null,
+          source,
+        ]
+      );
+    } catch (insertError) {
       console.error("Failed to log performance metric:", insertError);
       return NextResponse.json({ success: false }, { status: 500 });
     }
@@ -92,7 +87,6 @@ export async function POST(request: NextRequest) {
 // Get performance metrics for super admins
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -100,11 +94,11 @@ export async function GET(request: NextRequest) {
     }
 
     // Check if user is super admin
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (profile?.role !== "super_admin") {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
@@ -113,16 +107,15 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const hours = parseInt(searchParams.get("hours") || "24");
 
-    // Use service role to bypass RLS
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Get performance summary using function with correct parameter name
-    const { data: summary, error: summaryError } = await adminSupabase.rpc(
-      "get_performance_summary",
-      { hours_back: hours }
-    );
-
-    if (summaryError) {
+    // Get performance summary using DB function
+    let summary;
+    try {
+      const { rows } = await query(
+        "SELECT * FROM get_performance_summary($1)",
+        [hours]
+      );
+      summary = rows;
+    } catch (summaryError) {
       console.error("Failed to fetch performance summary:", summaryError);
       return NextResponse.json(
         { error: "Failed to fetch summary" },
@@ -131,13 +124,12 @@ export async function GET(request: NextRequest) {
     }
 
     // Get total metrics count
-    const { count: totalMetrics } = await adminSupabase
-      .from("system_performance_metrics")
-      .select("*", { count: "exact", head: true })
-      .gt(
-        "created_at",
-        new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()
-      );
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*)::int AS count FROM public.system_performance_metrics
+       WHERE created_at > $1`,
+      [new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()]
+    );
+    const totalMetrics = (countRows[0] as { count: number })?.count ?? 0;
 
     return NextResponse.json({
       success: true,

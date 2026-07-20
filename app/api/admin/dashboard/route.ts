@@ -1,10 +1,15 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 
+const countQuery = async (sql: string, params: unknown[] = []): Promise<number> => {
+  const { rows } = await query(sql, params);
+  return parseInt(rows[0]?.count ?? "0", 10);
+};
+
 export async function GET() {
   try {
-    // Use regular supabase client for authentication    // Check admin authentication
+    // Check admin authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -14,17 +19,14 @@ export async function GET() {
       );
     }
 
-    // Use service role client for admin operations to bypass RLS
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
+    // Get user profile with role
+    const { rows: profileRows } = await query(
+      "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    // Get user profile with role using service role
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -39,153 +41,125 @@ export async function GET() {
       );
     }
 
-    // Get comprehensive dashboard statistics using service role
+    const thirtyDaysAgoIso = new Date(
+      Date.now() - 30 * 24 * 60 * 60 * 1000
+    ).toISOString();
+    const sevenDaysAgoIso = new Date(
+      Date.now() - 7 * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    // Get comprehensive dashboard statistics
     const [
-      { count: totalUsers },
-      { count: activeUsers },
-      { count: totalEvents },
-      { count: publishedEvents },
-      { count: totalListings },
-      { count: activeListings },
-      { count: totalReviews },
-      { count: pendingReviews },
-      // Comment statistics
-      { count: totalComments },
-      { count: pendingComments },
-      { count: approvedComments },
-      { count: rejectedComments },
-      { count: flaggedComments },
+      totalUsers,
+      activeUsers,
+      totalEvents,
+      publishedEvents,
+      totalListings,
+      activeListings,
+      totalReviews,
+      pendingReviews,
+      totalComments,
+      pendingComments,
+      approvedComments,
+      rejectedComments,
+      flaggedComments,
+      usersThisMonth,
+      eventsThisMonth,
+      listingsThisMonth,
+      usersThisWeek,
+      eventsThisWeek,
+      listingsThisWeek,
     ] = await Promise.all([
       // Total users
-      adminSupabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true }),
+      countQuery(`SELECT COUNT(*) FROM public.profiles`),
 
       // Active users (created in last 30 days)
-      adminSupabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true })
-        .gte(
-          "created_at",
-          new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-        ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.profiles WHERE created_at >= $1`,
+        [thirtyDaysAgoIso]
+      ),
 
       // Total events
-      adminSupabase.from("events").select("*", { count: "exact", head: true }),
+      countQuery(`SELECT COUNT(*) FROM public.events`),
 
       // Published events
-      adminSupabase
-        .from("events")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "published"),
+      countQuery(
+        `SELECT COUNT(*) FROM public.events WHERE status = 'published'`
+      ),
 
       // Total listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true }),
+      countQuery(`SELECT COUNT(*) FROM public.listings`),
 
       // Active listings
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "published"),
+      countQuery(
+        `SELECT COUNT(*) FROM public.listings WHERE status = 'published'`
+      ),
 
       // Total reviews
-      adminSupabase.from("reviews").select("*", { count: "exact", head: true }),
+      countQuery(`SELECT COUNT(*) FROM public.reviews`),
 
-      // Pending reviews (if there's a status field)
-      adminSupabase
-        .from("reviews")
-        .select("*", { count: "exact", head: true })
-        .eq("rating", 0), // Assuming 0 rating means pending
+      // Pending reviews (assuming 0 rating means pending)
+      countQuery(`SELECT COUNT(*) FROM public.reviews WHERE rating = 0`),
 
       // Comment statistics
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true }),
+      countQuery(`SELECT COUNT(*) FROM public.review_comments`),
+      countQuery(
+        `SELECT COUNT(*) FROM public.review_comments WHERE status = 'pending'`
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.review_comments WHERE status = 'approved'`
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.review_comments WHERE status = 'rejected'`
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.review_comments WHERE status = 'flagged'`
+      ),
 
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "pending"),
+      // Growth metrics - this month
+      countQuery(
+        `SELECT COUNT(*) FROM public.profiles WHERE created_at >= $1`,
+        [thirtyDaysAgoIso]
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.events WHERE created_at >= $1`,
+        [thirtyDaysAgoIso]
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.listings WHERE created_at >= $1`,
+        [thirtyDaysAgoIso]
+      ),
 
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "approved"),
-
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "rejected"),
-
-      adminSupabase
-        .from("review_comments")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "flagged"),
+      // Growth metrics - this week
+      countQuery(
+        `SELECT COUNT(*) FROM public.profiles WHERE created_at >= $1`,
+        [sevenDaysAgoIso]
+      ),
+      countQuery(`SELECT COUNT(*) FROM public.events WHERE created_at >= $1`, [
+        sevenDaysAgoIso,
+      ]),
+      countQuery(
+        `SELECT COUNT(*) FROM public.listings WHERE created_at >= $1`,
+        [sevenDaysAgoIso]
+      ),
     ]);
 
-    // Get recent activity using service role
-    const { data: recentUsers } = await adminSupabase
-      .from("profiles")
-      .select("id, full_name, created_at, role")
-      .order("created_at", { ascending: false })
-      .limit(5);
-
-    const { data: recentEvents } = await adminSupabase
-      .from("events")
-      .select("id, name, created_at, status")
-      .order("created_at", { ascending: false })
-      .limit(5);
-
-    const { data: recentListings } = await adminSupabase
-      .from("listings")
-      .select("id, name, created_at, status")
-      .order("created_at", { ascending: false })
-      .limit(5);
-
-    // Calculate growth metrics
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-    const [
-      { count: usersThisMonth },
-      { count: eventsThisMonth },
-      { count: listingsThisMonth },
-      { count: usersThisWeek },
-      { count: eventsThisWeek },
-      { count: listingsThisWeek },
-    ] = await Promise.all([
-      adminSupabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", thirtyDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("events")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", thirtyDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", thirtyDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", sevenDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("events")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", sevenDaysAgo.toISOString()),
-
-      adminSupabase
-        .from("listings")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", sevenDaysAgo.toISOString()),
-    ]);
+    // Get recent activity
+    const [recentUsersResult, recentEventsResult, recentListingsResult] =
+      await Promise.all([
+        query(
+          `SELECT id, full_name, created_at, role FROM public.profiles
+           ORDER BY created_at DESC LIMIT 5`
+        ),
+        query(
+          `SELECT id, name, created_at, status FROM public.events
+           ORDER BY created_at DESC LIMIT 5`
+        ),
+        query(
+          `SELECT id, name, created_at, status FROM public.listings
+           ORDER BY created_at DESC LIMIT 5`
+        ),
+      ]);
 
     const dashboardData = {
       success: true,
@@ -215,9 +189,9 @@ export async function GET() {
           listingsThisWeek: listingsThisWeek || 0,
         },
         recentActivity: {
-          users: recentUsers || [],
-          events: recentEvents || [],
-          listings: recentListings || [],
+          users: recentUsersResult.rows || [],
+          events: recentEventsResult.rows || [],
+          listings: recentListingsResult.rows || [],
         },
       },
       timestamp: new Date().toISOString(),

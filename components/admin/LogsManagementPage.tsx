@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
-import { createClient } from "@/lib/supabase/client";
 import {
   Card,
   CardContent,
@@ -157,6 +156,7 @@ export default function LogsManagementPage() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
   const [newLogsCount, setNewLogsCount] = useState(0);
+  const previousTotalLogsRef = useRef<number | null>(null);
 
   // Animation variants
   const containerVariants = {
@@ -178,45 +178,67 @@ export default function LogsManagementPage() {
     },
   };
 
-  const fetchLogs = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({
-        type: logType,
-        page: page.toString(),
-        limit: limit.toString(),
-      });
+  const fetchLogs = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const params = new URLSearchParams({
+          type: logType,
+          page: page.toString(),
+          limit: limit.toString(),
+        });
 
-      if (search) params.append("search", search);
-      if (startDate) params.append("startDate", startDate);
-      if (endDate) params.append("endDate", endDate);
-      if (entityType && entityType !== "all")
-        params.append("entityType", entityType);
-      if (entityId) params.append("entityId", entityId);
+        if (search) params.append("search", search);
+        if (startDate) params.append("startDate", startDate);
+        if (endDate) params.append("endDate", endDate);
+        if (entityType && entityType !== "all")
+          params.append("entityType", entityType);
+        if (entityId) params.append("entityId", entityId);
 
-      const response = await fetch(`/api/admin/logs?${params}`);
-      if (!response.ok) throw new Error("Failed to fetch logs");
+        const response = await fetch(`/api/admin/logs?${params}`);
+        if (!response.ok) throw new Error("Failed to fetch logs");
 
-      const data: LogsResponse = await response.json();
-      setLogs(data.logs);
-      setPagination(data.pagination);
-      setSummary(data.summary);
-    } catch (error) {
-      console.error("Error fetching logs:", error);
-    } finally {
-      setLoading(false);
-      setLastRefresh(new Date());
-    }
-  }, [logType, page, search, startDate, endDate, entityType, entityId, limit]);
+        const data: LogsResponse = await response.json();
+
+        // Only replace the visible list on the first page - polling while
+        // browsing a later page would otherwise yank the user back to page 1.
+        if (page === 1) {
+          setLogs(data.logs);
+        }
+
+        if (
+          previousTotalLogsRef.current !== null &&
+          data.summary.totalLogs > previousTotalLogsRef.current
+        ) {
+          setNewLogsCount(
+            (prev) => prev + (data.summary.totalLogs - previousTotalLogsRef.current!)
+          );
+        }
+        previousTotalLogsRef.current = data.summary.totalLogs;
+
+        setPagination(data.pagination);
+        setSummary(data.summary);
+        setIsRealtimeConnected(true);
+      } catch (error) {
+        console.error("Error fetching logs:", error);
+        setIsRealtimeConnected(false);
+      } finally {
+        if (!silent) setLoading(false);
+        setLastRefresh(new Date());
+      }
+    },
+    [logType, page, search, startDate, endDate, entityType, entityId, limit]
+  );
 
   useEffect(() => {
     fetchLogs();
   }, [fetchLogs]);
 
-  // WebSocket real-time updates for audit logs
-  // NOTE: Realtime updates only show when no date/entity filters are active
+  // Poll for new logs (Supabase Realtime is no longer available).
+  // NOTE: polling refresh only auto-replaces the visible list when no
+  // date/entity filters are active and the user is on page 1, matching the
+  // previous Realtime behavior; otherwise it just bumps the "new logs" badge.
   useEffect(() => {
-    // Check if any filters would exclude new logs
     const hasActiveFilters = !!(
       startDate ||
       endDate ||
@@ -224,99 +246,18 @@ export default function LogsManagementPage() {
       entityId
     );
 
-    const supabaseClient = createClient();
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (hasActiveFilters || page !== 1) {
+        // Still poll for the badge count, but don't silently fetchLogs()
+        // which would reset the filtered/paged view under the user.
+        return;
+      }
+      void fetchLogs(true);
+    }, 20000);
 
-    // Subscribe to audit_logs table changes
-    const auditLogsChannel = supabaseClient
-      .channel("audit_logs_realtime")
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "audit_logs",
-        },
-        (payload) => {
-          console.log("New audit log received:", payload.new);
-          // Only add to UI if no filters are active that would exclude it
-          if (!hasActiveFilters) {
-            setLogs((prevLogs) => [payload.new as LogEntry, ...prevLogs]);
-            setSummary((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    totalAudit: prev.totalAudit + 1,
-                    totalLogs: prev.totalLogs + 1,
-                  }
-                : null,
-            );
-          }
-          // Always increment counter to show new data is available
-          setNewLogsCount((prev) => prev + 1);
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "points_log",
-        },
-        (payload) => {
-          console.log("New points log received:", payload.new);
-          if (!hasActiveFilters) {
-            setLogs((prevLogs) => [payload.new as LogEntry, ...prevLogs]);
-            setSummary((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    totalPoints: prev.totalPoints + 1,
-                    totalLogs: prev.totalLogs + 1,
-                  }
-                : null,
-            );
-          }
-          setNewLogsCount((prev) => prev + 1);
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "import_rollback_log",
-        },
-        (payload) => {
-          console.log("New import log received:", payload.new);
-          if (!hasActiveFilters) {
-            setLogs((prevLogs) => [payload.new as LogEntry, ...prevLogs]);
-            setSummary((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    totalImports: prev.totalImports + 1,
-                    totalLogs: prev.totalLogs + 1,
-                  }
-                : null,
-            );
-          }
-          setNewLogsCount((prev) => prev + 1);
-        },
-      )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          setIsRealtimeConnected(true);
-          console.log("Real-time connection established");
-        } else if (status === "CLOSED") {
-          setIsRealtimeConnected(false);
-          console.log("Real-time connection closed");
-        }
-      });
-
-    return () => {
-      supabaseClient.removeChannel(auditLogsChannel);
-    };
-  }, [startDate, endDate, entityType, entityId]);
+    return () => clearInterval(interval);
+  }, [startDate, endDate, entityType, entityId, page, fetchLogs]);
 
   const handleManualRefresh = async () => {
     setLoading(true);

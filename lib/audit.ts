@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import type { Json } from "@/types/supabase";
 
 export type AuditAction =
@@ -60,8 +60,6 @@ export interface AuditLogData {
 
 export async function logAuditEvent(data: AuditLogData) {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
     // Get client IP if in server environment
     let ip_address: string | null = data.ip_address || null;
     if (!ip_address && typeof window === "undefined") {
@@ -70,25 +68,23 @@ export async function logAuditEvent(data: AuditLogData) {
       ip_address = null;
     }
 
-    const auditData = {
-      admin_id: data.admin_id,
-      user_id: data.user_id,
-      action: data.action,
-      entity_type: data.entity_type,
-      entity_id: data.entity_id,
-      old_values: (data.old_values || null) as Json | null,
-      new_values: (data.new_values || null) as Json | null,
-      metadata: (data.metadata || null) as Json | null,
-      ip_address: ip_address || null,
-      user_agent: data.user_agent || null,
-    };
-
-    const { error } = await supabase.from("audit_logs").insert(auditData);
-
-    if (error) {
-      console.error("Failed to log audit event:", error);
-      // Don't throw error to avoid breaking the main operation
-    }
+    await query(
+      `INSERT INTO public.audit_logs
+         (admin_id, user_id, action, entity_type, entity_id, old_values, new_values, metadata, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        data.admin_id || null,
+        data.user_id || null,
+        data.action,
+        data.entity_type || null,
+        data.entity_id || null,
+        (data.old_values || null) as Json | null,
+        (data.new_values || null) as Json | null,
+        (data.metadata || null) as Json | null,
+        ip_address || null,
+        data.user_agent || null,
+      ],
+    );
   } catch (error) {
     console.error("Audit logging error:", error);
     // Don't throw error to avoid breaking the main operation

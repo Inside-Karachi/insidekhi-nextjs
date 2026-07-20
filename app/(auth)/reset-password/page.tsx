@@ -19,13 +19,11 @@ import {
 import { AuthBackground } from "@/components/auth/AuthBackground";
 import { AuthFormPanel, WelcomePanel } from "@/components/auth/GlassPanel";
 import { useToast } from "@/hooks/use-toast";
-import { createClient } from "@/lib/supabase/client";
 
 function ResetPasswordForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { toast } = useToast();
-  const supabase = createClient();
 
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -35,20 +33,12 @@ function ResetPasswordForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isValidToken, setIsValidToken] = useState<boolean | null>(null);
+  const [resetCode, setResetCode] = useState<string | null>(null);
 
   useEffect(() => {
-    // Supabase may deliver tokens as query params OR hash fragment
-    let accessToken = searchParams.get("access_token");
-    let refreshToken = searchParams.get("refresh_token");
+    const code = searchParams.get("code");
 
-    if ((!accessToken || !refreshToken) && typeof window !== "undefined") {
-      const hash = window.location.hash.substring(1);
-      const hashParams = new URLSearchParams(hash);
-      accessToken = accessToken || hashParams.get("access_token");
-      refreshToken = refreshToken || hashParams.get("refresh_token");
-    }
-
-    if (!accessToken || !refreshToken) {
+    if (!code) {
       setError(
         "Invalid or expired reset link. Please request a new password reset.",
       );
@@ -56,34 +46,12 @@ function ResetPasswordForm() {
       return;
     }
 
-    const setSession = async () => {
-      try {
-        const { error } = await supabase.auth.setSession({
-          access_token: accessToken!,
-          refresh_token: refreshToken!,
-        });
-
-        if (error) {
-          setError(
-            "Invalid or expired reset link. Please request a new password reset.",
-          );
-          setIsValidToken(false);
-        } else {
-          setIsValidToken(true);
-          if (typeof window !== "undefined") {
-            window.history.replaceState(null, "", window.location.pathname);
-          }
-        }
-      } catch {
-        setError(
-          "Invalid or expired reset link. Please request a new password reset.",
-        );
-        setIsValidToken(false);
-      }
-    };
-
-    setSession();
-  }, [searchParams, supabase.auth]);
+    // Actual validation (does the code match a live, unexpired recovery
+    // token) happens server-side on submit - this just confirms a code was
+    // present in the link before showing the password form.
+    setResetCode(code);
+    setIsValidToken(true);
+  }, [searchParams]);
 
   const validatePassword = (password: string): string | null => {
     if (password.length < 8) {
@@ -122,19 +90,20 @@ function ResetPasswordForm() {
     }
 
     try {
-      const { error } = await supabase.auth.updateUser({
-        password: password,
+      const response = await fetch("/api/auth/reset-password/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: resetCode, password }),
       });
 
-      if (error) {
-        console.error("Password update error:", error);
-        setError(
-          error.message || "Failed to update password. Please try again.",
-        );
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.error || "Failed to update password. Please try again.");
         toast({
           variant: "destructive",
           title: "Error",
-          description: error.message || "Failed to update password.",
+          description: data.error || "Failed to update password.",
         });
       } else {
         setIsSuccess(true);
@@ -143,9 +112,10 @@ function ResetPasswordForm() {
           description: "Your password has been successfully updated.",
         });
 
-        // Redirect to login after a short delay
+        // Already logged in via the session cookie set by the confirm
+        // endpoint - send them straight to the dashboard.
         setTimeout(() => {
-          router.push("/login");
+          router.push("/dashboard");
         }, 2000);
       }
     } catch (err) {
@@ -298,14 +268,14 @@ function ResetPasswordForm() {
                   className="text-center space-y-4"
                 >
                   <p className="text-white/80 text-sm">
-                    You will be redirected to the login page shortly...
+                    You will be redirected to your dashboard shortly...
                   </p>
 
                   <Link
-                    href="/login"
+                    href="/dashboard"
                     className="inline-flex items-center space-x-2 px-6 py-3 bg-white/20 hover:bg-white/30 border border-white/30 text-white font-medium rounded-lg transition-all duration-300 hover:border-white/50"
                   >
-                    Go to Login
+                    Go to Dashboard
                     <ArrowRight className="h-4 w-4" />
                   </Link>
                 </motion.div>

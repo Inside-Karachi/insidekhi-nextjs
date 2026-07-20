@@ -50,9 +50,8 @@ export async function POST(request: NextRequest) {
         [recoveryToken, tokenSentAt, user.id]
       );
 
-      // In real prod this would send an email with the link:
-      // `${process.env.NEXT_PUBLIC_SITE_URL}/auth/reset-password?code=${recoveryToken}`
-      console.log(`[PASSWORD RESET LINK]: ${process.env.NEXT_PUBLIC_SITE_URL}/auth/reset-password?code=${recoveryToken}`);
+      // TODO: send this link via email once email delivery is wired up.
+      console.log(`[PASSWORD RESET LINK]: ${process.env.NEXT_PUBLIC_SITE_URL}/reset-password?code=${recoveryToken}`);
     }
 
     // Log successful password reset request

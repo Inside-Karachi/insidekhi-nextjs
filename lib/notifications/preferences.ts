@@ -1,6 +1,4 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-
-import type { Database } from "@/types/supabase";
+import { query } from "@/lib/db";
 import type {
   ChannelOverrides,
   EffectiveChannelConfig,
@@ -18,8 +16,6 @@ const DEFAULT_CHANNEL_CONFIG: NotificationChannelConfig = {
 };
 
 type RawChannelConfig = Record<string, unknown> | null | undefined;
-
-type SupabaseClientType = SupabaseClient<Database>;
 
 function toBoolean(value: unknown, fallback: boolean): boolean {
   if (typeof value === "boolean") {
@@ -99,24 +95,19 @@ function enforceMandatoryChannels(
 }
 
 export async function getEffectiveChannelConfig(
-  supabase: SupabaseClientType,
   profileId: string,
   categorySlug: string,
   overrides?: ChannelOverrides
 ): Promise<EffectiveChannelConfig> {
-  const { data: category, error: categoryError } = await supabase
-    .from("notification_categories")
-    .select("*")
-    .eq("slug", categorySlug)
-    .maybeSingle();
+  const { rows: categoryRows } = await query(
+    `SELECT * FROM public.notification_categories WHERE slug = $1 LIMIT 1`,
+    [categorySlug]
+  );
+  const category = categoryRows[0];
 
-  if (categoryError || !category) {
+  if (!category) {
     throw new Error(
-      `Failed to load notification category ${categorySlug}: ${
-        categoryError
-          ? `${categoryError.message} (code: ${categoryError.code ?? "unknown"})`
-          : "not found"
-      }`
+      `Failed to load notification category ${categorySlug}: not found`
     );
   }
 
@@ -124,19 +115,16 @@ export async function getEffectiveChannelConfig(
     category.default_channel_config as RawChannelConfig
   );
 
-  const { data: preferences, error: preferencesError } = await supabase
-    .from("notification_preferences")
-    .select("*")
-    .eq("profile_id", profileId)
-    .eq("category_slug", categorySlug);
+  const { rows: preferences } = await query(
+    `SELECT * FROM public.notification_preferences
+     WHERE profile_id = $1 AND category_slug = $2`,
+    [profileId, categorySlug]
+  );
 
-  if (preferencesError) {
-    throw new Error(
-      `Failed to load notification preferences: ${preferencesError.message}`
-    );
-  }
-
-  const withUserPrefs = applyPreferenceOverrides(defaults, preferences ?? []);
+  const withUserPrefs = applyPreferenceOverrides(
+    defaults,
+    preferences as NotificationPreferenceRecord[]
+  );
   const withOverrides = applyManualOverrides(withUserPrefs, overrides);
   const finalConfig = enforceMandatoryChannels(
     withOverrides,
@@ -146,7 +134,7 @@ export async function getEffectiveChannelConfig(
   return {
     category,
     config: finalConfig,
-    preferences: preferences ?? [],
+    preferences: preferences as NotificationPreferenceRecord[],
   };
 }
 

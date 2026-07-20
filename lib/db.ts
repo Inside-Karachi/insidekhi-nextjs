@@ -59,11 +59,35 @@ const RETRYABLE_ERROR_PATTERNS = [
   "timeout exceeded when trying to connect",
   "Connection terminated due to connection timeout",
   "Connection terminated unexpectedly",
+  "Connection terminated",
   "ECONNRESET",
   "EAI_AGAIN",
+  "socket hang up",
+  "connection to server was lost",
+  "Client has encountered a connection error and is not queryable",
 ];
 
+// Standard Postgres connection-exception SQLSTATE codes (class 08) plus the
+// admin/crash-shutdown and cannot-connect-now codes (57P01/57P02/57P03) -
+// matching on these is more reliable than message text, which varies by
+// driver version and can drift out of sync with RETRYABLE_ERROR_PATTERNS.
+const RETRYABLE_ERROR_CODES = new Set([
+  "08000", // connection_exception
+  "08001", // sqlclient_unable_to_establish_sqlconnection
+  "08003", // connection_does_not_exist
+  "08004", // sqlserver_rejected_establishment_of_sqlconnection
+  "08006", // connection_failure
+  "08007", // transaction_resolution_unknown
+  "57P01", // admin_shutdown
+  "57P02", // crash_shutdown
+  "57P03", // cannot_connect_now
+]);
+
 function isRetryableConnectionError(error: unknown): boolean {
+  const code = (error as { code?: string } | undefined)?.code;
+  if (code && RETRYABLE_ERROR_CODES.has(code)) {
+    return true;
+  }
   const message = error instanceof Error ? error.message : String(error);
   return RETRYABLE_ERROR_PATTERNS.some((pattern) => message.includes(pattern));
 }

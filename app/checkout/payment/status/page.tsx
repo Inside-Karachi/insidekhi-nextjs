@@ -1,4 +1,5 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { redirect } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -17,18 +18,22 @@ export default async function PaymentStatusPage({
   searchParams,
 }: PaymentStatusPageProps) {
   const { bookingId, status: _status, message } = await searchParams;
-  const supabase = await createServerSupabase();
 
   if (!bookingId) {
     redirect("/checkout");
   }
 
-  // Fetch booking
-  const { data: booking } = await supabase
-    .from("bookings")
-    .select("*")
-    .eq("id", parseInt(bookingId))
-    .single();
+  // Fetch booking - scoped to the logged-in user's own booking, matching
+  // the RLS-enforced "owner only" access the old Supabase auth client had.
+  // No session means no owned booking, same as the RLS-blocked case before.
+  const session = await getSessionFromCookies();
+  const { rows } = session
+    ? await query(`SELECT * FROM bookings WHERE id = $1 AND user_id = $2 LIMIT 1`, [
+        parseInt(bookingId),
+        session.userId,
+      ])
+    : { rows: [] };
+  const booking = rows[0];
 
   if (!booking) {
     return <div>Booking not found</div>;

@@ -13,15 +13,12 @@ import { BuyerDetailsForm } from "./BuyerDetailsForm";
 import { GuestDetailsForm } from "./GuestDetailsForm";
 import { useToast } from "@/hooks/use-toast";
 import { CheckoutSteps } from "./CheckoutSteps";
-import { createClient } from "@/lib/supabase/client";
 
 export function CheckoutClient() {
   const router = useRouter();
   const { items, updateGuestInfo, clearCart } = useCartStore();
   const { user, isLoading: isUserLoading } = useSupabaseUser();
   const { toast } = useToast();
-  const supabaseRef = useRef(createClient());
-  const supabase = supabaseRef.current;
 
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [isLoadingConfig, setIsLoadingConfig] = useState(true);
@@ -68,26 +65,31 @@ export function CheckoutClient() {
       const eventIds = Array.from(new Set(items.map((i) => i.eventId)));
       if (eventIds.length === 0) return;
 
-      const { data } = await supabase
-        .from("events")
-        .select("id, require_guest_details")
-        .in("id", eventIds);
-
-      if (data) {
-        const map = (
-          data as unknown as { id: number; require_guest_details: boolean }[]
-        ).reduce(
-          (acc: Record<number, { require_guest_details: boolean }>, e) => ({
-            ...acc,
-            [e.id]: e,
-          }),
-          {}
+      try {
+        const res = await fetch(
+          `/api/checkout/events?ids=${eventIds.join(",")}`,
         );
-        setEventDetails(map);
+        const result = await res.json();
+        const data = result.events as
+          | { id: number; require_guest_details: boolean }[]
+          | undefined;
+
+        if (data) {
+          const map = data.reduce(
+            (acc: Record<number, { require_guest_details: boolean }>, e) => ({
+              ...acc,
+              [e.id]: e,
+            }),
+            {},
+          );
+          setEventDetails(map);
+        }
+      } catch (error) {
+        console.error("Failed to fetch event details", error);
       }
     };
     fetchEvents();
-  }, [items, supabase]);
+  }, [items]);
 
   // Check for existing pending bookings for the same event (only once on mount)
   const hasCheckedExistingBookings = useRef(false);
@@ -99,33 +101,39 @@ export function CheckoutClient() {
 
       const eventIds = Array.from(new Set(items.map((i) => i.eventId)));
 
-      const { data: pendingBookings } = await supabase
-        .from("bookings")
-        .select("id, booking_reference, total_amount, event_id, expires_at")
-        .eq("user_id", user.id)
-        .in("event_id", eventIds)
-        .in("payment_status", ["awaiting_payment", "pending"])
-        .order("created_at", { ascending: false })
-        .limit(1);
+      try {
+        const res = await fetch(
+          `/api/checkout/pending-booking?eventIds=${eventIds.join(",")}`,
+        );
+        const result = await res.json();
+        const booking = result.booking as {
+          id: number;
+          booking_reference: string;
+          total_amount: number;
+          event_id: number | null;
+          expires_at: string | null;
+        } | null;
 
-      if (pendingBookings && pendingBookings.length > 0) {
-        const booking = pendingBookings[0];
-        // Check if booking is not expired and has valid reference
-        if (
-          booking.booking_reference &&
-          (!booking.expires_at || new Date(booking.expires_at) > new Date())
-        ) {
-          setExistingBooking({
-            id: booking.id,
-            booking_reference: booking.booking_reference,
-            total_amount: booking.total_amount,
-          });
+        if (booking) {
+          // Check if booking is not expired and has valid reference
+          if (
+            booking.booking_reference &&
+            (!booking.expires_at || new Date(booking.expires_at) > new Date())
+          ) {
+            setExistingBooking({
+              id: booking.id,
+              booking_reference: booking.booking_reference,
+              total_amount: booking.total_amount,
+            });
+          }
         }
+      } catch (error) {
+        console.error("Failed to check existing bookings", error);
       }
     };
 
     checkExistingBookings();
-  }, [user, items, supabase]);
+  }, [user, items]);
 
   // Prefill User Details
   useEffect(() => {

@@ -233,7 +233,7 @@ export async function POST(req: NextRequest) {
         `SELECT id, payment_status, basket_id
          FROM bookings
          WHERE user_id = $1 AND event_id = $2 AND basket_id = $3
-           AND payment_status = ANY($4::text[])
+           AND payment_status::text = ANY($4::text[])
          ORDER BY id DESC
          LIMIT 1`,
         [user.id, eventIds[0], basketHash, ["awaiting_payment", "pending"]],

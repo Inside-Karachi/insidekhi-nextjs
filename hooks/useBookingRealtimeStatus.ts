@@ -1,6 +1,5 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
 import { PublicPass } from "@/types/ticketing.types";
 
 interface State {
@@ -13,6 +12,15 @@ interface State {
   updatedAt: number;
 }
 
+// Payment statuses that will never change again - stop polling once reached.
+// See lib/payments/status-map.ts deriveStateCode for the full status list.
+const TERMINAL_STATUSES = new Set(["paid", "failed", "expired", "refunded"]);
+
+// This screen is typically a payment/checkout confirmation page where the
+// user is actively waiting, so poll fairly aggressively (Supabase Realtime
+// is no longer available).
+const POLL_MS = 5000;
+
 export function useBookingRealtimeStatus(bookingId: number | null) {
   const [state, setState] = useState<State>({
     loading: !!bookingId,
@@ -23,8 +31,7 @@ export function useBookingRealtimeStatus(bookingId: number | null) {
     totalAmount: null,
     updatedAt: Date.now(),
   });
-  const fallbackTimer = useRef<number | null>(null);
-  const supabase = useRef(createClient());
+  const passIdsRef = useRef<Set<number>>(new Set());
 
   // Initial snapshot
   useEffect(() => {
@@ -51,9 +58,11 @@ export function useBookingRealtimeStatus(bookingId: number | null) {
       );
       if (!cancelled && passesRes.ok) {
         const json = await passesRes.json();
+        const passes: PublicPass[] = json.passes || [];
+        passIdsRef.current = new Set(passes.map((p) => p.id));
         setState((s) => ({
           ...s,
-          passes: json.passes || [],
+          passes,
           totalAmount: json.total_amount ?? s.totalAmount,
         }));
       }
@@ -63,71 +72,68 @@ export function useBookingRealtimeStatus(bookingId: number | null) {
     };
   }, [bookingId]);
 
-  // Realtime channel
+  // Poll for status + pass updates until a terminal payment status is reached.
   useEffect(() => {
     if (!bookingId) return;
-    const client = supabase.current;
-    const channel = client
-      .channel(`booking:${bookingId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "bookings",
-          filter: `id=eq.${bookingId}`,
-        },
-        (payload) => {
-          const newRow = payload.new as {
-            payment_status?: string | null;
-            booking_reference?: string | null;
-          };
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
+      try {
+        const statusRes = await fetch(
+          `/api/payments/status?booking_id=${bookingId}`
+        );
+        let latestStatus: string | null = null;
+        if (!cancelled && statusRes.ok) {
+          const json = await statusRes.json();
+          latestStatus = json.payment_status ?? null;
           setState((s) => ({
             ...s,
-            paymentStatus: newRow.payment_status ?? s.paymentStatus,
-            bookingReference: newRow.booking_reference ?? s.bookingReference,
+            paymentStatus: latestStatus ?? s.paymentStatus,
+            bookingReference: json.booking_reference ?? s.bookingReference,
             updatedAt: Date.now(),
           }));
         }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "ticket_passes",
-          filter: `booking_id=eq.${bookingId}`,
-        },
-        (payload) => {
-          const newPass = payload.new as PublicPass;
-          setState((s) => {
-            if (s.passes.find((p) => p.id === newPass.id)) return s;
-            return { ...s, passes: [...s.passes, newPass] };
-          });
+
+        const passesRes = await fetch(
+          `/api/tickets/passes?booking_id=${bookingId}`
+        );
+        if (!cancelled && passesRes.ok) {
+          const json = await passesRes.json();
+          const passes: PublicPass[] = json.passes || [];
+          const newPasses = passes.filter(
+            (p) => !passIdsRef.current.has(p.id)
+          );
+          if (newPasses.length > 0 || passes.length !== passIdsRef.current.size) {
+            passIdsRef.current = new Set(passes.map((p) => p.id));
+            setState((s) => ({
+              ...s,
+              passes,
+              totalAmount: json.total_amount ?? s.totalAmount,
+            }));
+          }
         }
-      )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          // Fallback poll if no terminal state after 25s
-          fallbackTimer.current = window.setTimeout(async () => {
-            const statusRes = await fetch(
-              `/api/payments/status?booking_id=${bookingId}`
-            );
-            if (statusRes.ok) {
-              const json = await statusRes.json();
-              setState((s) => ({
-                ...s,
-                paymentStatus: json.payment_status ?? s.paymentStatus,
-                bookingReference: json.booking_reference ?? s.bookingReference,
-                updatedAt: Date.now(),
-              }));
-            }
-          }, 25000);
+
+        if (cancelled) return;
+
+        // Stop polling once we've reached a terminal payment status.
+        if (latestStatus && TERMINAL_STATUSES.has(latestStatus)) {
+          return;
         }
-      });
+      } catch (error) {
+        console.warn("[useBookingRealtimeStatus] Poll failed:", error);
+      }
+
+      if (!cancelled) {
+        timer = setTimeout(poll, POLL_MS);
+      }
+    };
+
+    timer = setTimeout(poll, POLL_MS);
+
     return () => {
-      if (fallbackTimer.current) window.clearTimeout(fallbackTimer.current);
-      client.removeChannel(channel);
+      cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [bookingId]);
 

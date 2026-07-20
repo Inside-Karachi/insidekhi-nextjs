@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { createNotification } from "@/lib/notifications/service";
@@ -49,9 +48,6 @@ export async function POST(request: NextRequest) {
       .slice(0, 3)
       .toUpperCase();
     const bookingReference = `IK-${timestampPart}-${randomPart}`;
-
-    // Use service role for the notification call at the end (shared lib still requires it).
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
 
     // Re-fetch ticket prices server-side; never trust client-supplied prices.
     const ticketTypeIds = items.map(
@@ -306,31 +302,28 @@ export async function POST(request: NextRequest) {
 
       const eventName = event?.name || "your event";
 
-      await createNotification(
-        {
-          recipientId: session.userId,
-          roleScope: "public_user",
-          categorySlug: "public_booking_status",
-          title: "⏳ Booking Created - Complete Payment",
-          body: `Your booking for ${eventName} is reserved. Complete payment within 30 minutes to secure your tickets.`,
-          priority: "normal",
-          ctaLabel: "Complete Payment",
-          ctaUrl: `/checkout/payment?bookingId=${bookingId}`,
-          metadata: {
-            booking_id: bookingId,
-            booking_reference: bookingReference,
-            event_name: eventName,
-            total_amount: totalAmount,
-            expires_at: expiresAt,
-          },
-          channelOverrides: {
-            bell: true,
-            email: false,
-            push: false,
-          },
+      await createNotification({
+        recipientId: session.userId,
+        roleScope: "public_user",
+        categorySlug: "public_booking_status",
+        title: "⏳ Booking Created - Complete Payment",
+        body: `Your booking for ${eventName} is reserved. Complete payment within 30 minutes to secure your tickets.`,
+        priority: "normal",
+        ctaLabel: "Complete Payment",
+        ctaUrl: `/checkout/payment?bookingId=${bookingId}`,
+        metadata: {
+          booking_id: bookingId,
+          booking_reference: bookingReference,
+          event_name: eventName,
+          total_amount: totalAmount,
+          expires_at: expiresAt,
         },
-        { supabase: adminSupabase },
-      );
+        channelOverrides: {
+          bell: true,
+          email: false,
+          push: false,
+        },
+      });
 
       console.log(`Booking pending notification sent for booking ${bookingId}`);
     } catch (notifError) {

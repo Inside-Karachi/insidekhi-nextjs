@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { syncStateManager } from "@/lib/scraper/redis-state-manager";
 
 const DEFAULT_ALERT_COOLDOWN_SECONDS = 60 * 60;
@@ -75,18 +75,14 @@ export async function checkListingSyncFreshness(): Promise<void> {
   }
 
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-    const { data, error } = await supabase
-      .from("listing_sync_history")
-      .select("id, completed_at")
-      .eq("status", "completed")
-      .order("completed_at", { ascending: false, nullsFirst: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (error) {
-      throw new Error(error.message);
-    }
+    const { rows } = await query(
+      `SELECT id, completed_at FROM listing_sync_history
+       WHERE status = $1
+       ORDER BY completed_at DESC NULLS LAST
+       LIMIT 1`,
+      ["completed"],
+    );
+    const data = rows[0];
 
     const completedAt =
       typeof data?.completed_at === "string"

@@ -3,7 +3,7 @@
  * Maps Peekaboo tags to Inside Karachi category IDs
  */
 
-import { createClient } from "@supabase/supabase-js";
+import { query } from "@/lib/db";
 import type { CategoryMapperResult } from "@/types/peekaboo-scraper.types";
 
 interface Category {
@@ -15,48 +15,21 @@ interface Category {
 export class CategoryMapper {
   private categories: Category[] = [];
   private tagToCategoryMap = new Map<string, number>();
-  private supabase: ReturnType<typeof createClient> | null = null;
-
-  constructor() {
-    // Supabase client will be initialized lazily
-  }
-
-  /**
-   * Initialize Supabase client (lazy initialization)
-   */
-  private getSupabase() {
-    if (!this.supabase) {
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-      if (!supabaseUrl || !supabaseKey) {
-        throw new Error(
-          "Missing Supabase credentials. Check NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local"
-        );
-      }
-
-      this.supabase = createClient(supabaseUrl, supabaseKey);
-    }
-    return this.supabase;
-  }
 
   /**
    * Load all categories from database
    */
   async loadCategories(): Promise<void> {
-    const supabase = this.getSupabase();
-    const { data, error } = await supabase
-      .from("categories")
-      .select("id, name, slug")
-      .eq("is_enabled", true);
-
-    if (error) {
+    try {
+      const { rows } = await query(
+        `SELECT id, name, slug FROM categories WHERE is_enabled = true`,
+      );
+      this.categories = (rows || []) as Category[];
+      console.log(`[CATEGORY] Loaded ${this.categories.length} categories`);
+    } catch (error) {
       console.error("[CATEGORY] Failed to load categories:", error);
       return;
     }
-
-    this.categories = (data || []) as Category[];
-    console.log(`[CATEGORY] Loaded ${this.categories.length} categories`);
   }
 
   /**
@@ -157,15 +130,12 @@ export class CategoryMapper {
    * Get fallback/default category ID (e.g., "Uncategorized")
    */
   async getDefaultCategory(): Promise<number | null> {
-    const supabase = this.getSupabase();
-    const { data } = await supabase
-      .from("categories")
-      .select("id")
-      .eq("slug", "uncategorized")
-      .eq("is_enabled", true)
-      .single();
+    const { rows } = await query(
+      `SELECT id FROM categories WHERE slug = $1 AND is_enabled = true LIMIT 1`,
+      ["uncategorized"],
+    );
 
-    return (data?.id as number) || null;
+    return (rows[0]?.id as number) || null;
   }
 
   /**

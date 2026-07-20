@@ -83,37 +83,26 @@ async function resetDatabaseSequences(): Promise<void> {
     "This will reset listing, branch, and image IDs to start from 1.",
   );
 
-  const { createClient } = await import("@supabase/supabase-js");
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    {
-      auth: {
-        persistSession: false,
-      },
-    },
-  );
+  const { query } = await import("@/lib/db");
 
   try {
     // Check if tables are empty
     const [
-      { count: listingsCount },
-      { count: branchesCount },
-      { count: imagesCount },
-      { count: hoursCount },
+      { rows: listingsRows },
+      { rows: branchesRows },
+      { rows: imagesRows },
+      { rows: hoursRows },
     ] = await Promise.all([
-      supabase.from("listings").select("*", { count: "exact", head: true }),
-      supabase
-        .from("listing_branches")
-        .select("*", { count: "exact", head: true }),
-      supabase
-        .from("listing_images")
-        .select("*", { count: "exact", head: true }),
-      supabase
-        .from("opening_hours")
-        .select("*", { count: "exact", head: true }),
+      query("SELECT COUNT(*)::int AS count FROM listings"),
+      query("SELECT COUNT(*)::int AS count FROM listing_branches"),
+      query("SELECT COUNT(*)::int AS count FROM listing_images"),
+      query("SELECT COUNT(*)::int AS count FROM opening_hours"),
     ]);
+
+    const listingsCount = listingsRows[0]?.count ?? 0;
+    const branchesCount = branchesRows[0]?.count ?? 0;
+    const imagesCount = imagesRows[0]?.count ?? 0;
+    const hoursCount = hoursRows[0]?.count ?? 0;
 
     if (listingsCount || branchesCount || imagesCount || hoursCount) {
       console.warn(`\nWARNING: Tables are NOT empty!`);
@@ -131,7 +120,7 @@ async function resetDatabaseSequences(): Promise<void> {
 
     console.log("\nAll tables are empty. Safe to reset sequences.");
     console.log(
-      "\nTo reset sequences, run the following SQL in Supabase SQL Editor:",
+      "\nTo reset sequences, run the following SQL against the Postgres database:",
     );
     console.log("-".repeat(60));
     console.log("ALTER SEQUENCE listings_id_seq RESTART WITH 1;");
@@ -140,7 +129,7 @@ async function resetDatabaseSequences(): Promise<void> {
     console.log("ALTER SEQUENCE opening_hours_id_seq RESTART WITH 1;");
     console.log("-".repeat(60));
     console.log(
-      "\nCopy and paste the above SQL into Supabase SQL Editor manually.",
+      "\nCopy and paste the above SQL and run it against the database manually.",
     );
     console.log("This ensures sequences start from 1 for the next import.\n");
   } catch (error) {

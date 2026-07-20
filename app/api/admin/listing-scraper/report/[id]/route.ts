@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   getAdminAuthErrorStatus,
   requireSuperAdmin,
@@ -21,17 +21,31 @@ export async function GET(
   try {
     await requireSuperAdmin(request);
 
-    const authSupabase = await createServerSupabase();
     const { id } = await params;
 
     // Fetch full report from database
-    const { data: record, error } = await authSupabase
-      .from("listing_sync_history")
-      .select("id, report, started_at, completed_at, status, errors_count, config")
-      .eq("id", id)
-      .single();
+    let record:
+      | {
+          id: string;
+          report: unknown;
+          started_at: string;
+          completed_at: string | null;
+          status: string;
+          errors_count: number | null;
+          config: unknown;
+        }
+      | undefined;
 
-    if (error) {
+    try {
+      const { rows } = await query(
+        `SELECT id, report, started_at, completed_at, status, errors_count, config
+         FROM listing_sync_history
+         WHERE id = $1
+         LIMIT 1`,
+        [id],
+      );
+      record = rows[0];
+    } catch (error) {
       console.error("[LISTING SCRAPER] Report query error:", error);
       return NextResponse.json({ error: "Report not found" }, { status: 404 });
     }

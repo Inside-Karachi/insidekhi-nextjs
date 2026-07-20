@@ -1,6 +1,7 @@
 // Syncs scraped listings (and their branches/images) to the database by peekaboo_id.
 
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { deleteFile, getKeyFromPublicUrl } from "@/lib/storage/spaces";
 import type { Database } from "@/types/supabase";
 import type {
   MappedListing,
@@ -50,22 +51,51 @@ export interface SyncDecisionResult {
 }
 
 // ============================================================================
+// SQL HELPERS
+// ============================================================================
+
+const LISTING_COLUMNS = [
+  "name",
+  "slug",
+  "description",
+  "address",
+  "latitude",
+  "longitude",
+  "phone_number",
+  "website",
+  "peekaboo_id",
+  "email",
+  "category_id",
+  "facebook_url",
+  "instagram_url",
+  "whatsapp_number",
+  "youtube_url",
+  "google_maps_url",
+  "status",
+  "is_featured",
+  "show_member_badge",
+  "display_order",
+  "parking_information",
+  "parking_amenities",
+  "custom_attributes",
+] as const;
+
+function listingValues(listingData: ListingInsert): unknown[] {
+  return LISTING_COLUMNS.map(
+    (col) => (listingData as Record<string, unknown>)[col],
+  );
+}
+
+// ============================================================================
 // DATABASE SYNC CLASS
 // ============================================================================
 
 export class DatabaseSync {
-  private static sharedClient: Awaited<
-    ReturnType<typeof createServerSupabase>
-  > | null = null; // Singleton connection pool
   private static bankCache: Map<string, number> = new Map(); // Cache bank name -> ID lookups
-  private supabase: Awaited<ReturnType<typeof createServerSupabase>> | null =
-    null;
   private options: Required<SyncOptions>;
   private uploadedImageUrls: string[] = []; // Track uploaded images for rollback
 
   constructor(options: SyncOptions = {}) {
-    // Will be initialized in init()
-
     this.options = {
       autoPublish: options.autoPublish ?? false,
       preserveManualEdits: options.preserveManualEdits ?? true,
@@ -74,20 +104,11 @@ export class DatabaseSync {
   }
 
   /**
-   * Initialize the sync module (must be called before use)
-   * Creates service role client for database operations
-   * Uses shared client for connection pooling
+   * Initialize the sync module (no-op — query() uses the shared Postgres pool).
+   * Kept for backward compatibility with callers that call init() before use.
    */
   async init(): Promise<void> {
-    // Reuse shared client if available
-    if (DatabaseSync.sharedClient) {
-      this.supabase = DatabaseSync.sharedClient;
-      return;
-    }
-
-    // Create new client and cache it
-    this.supabase = await createServerSupabase({ useServiceRole: true });
-    DatabaseSync.sharedClient = this.supabase;
+    // Nothing to initialize — lib/db's `query()` manages its own pooled connections.
   }
 
   /**
@@ -100,10 +121,6 @@ export class DatabaseSync {
     pendingImages: import("@/types/peekaboo-scraper.types").PendingImage[],
     deals?: MappedListing["deals"],
   ): Promise<SyncResult> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized. Call init() first.");
-    }
-
     const peekabooId = listing.peekaboo_id;
     this.uploadedImageUrls = []; // Reset for this listing
 
@@ -184,7 +201,7 @@ export class DatabaseSync {
 
   /**
    * Rollback uploaded images on sync failure
-   * FIXED: Actually deletes from storage, not just logging
+   * Actually deletes from storage, not just logging
    */
   private async rollbackImages(): Promise<void> {
     if (this.uploadedImageUrls.length === 0) return;
@@ -193,29 +210,13 @@ export class DatabaseSync {
       `[SYNC] Rolling back ${this.uploadedImageUrls.length} uploaded images...`,
     );
 
-    if (!this.supabase) {
-      console.error("[SYNC] Cannot rollback: Supabase client not initialized");
-      return;
-    }
-
     // Actually delete from storage
     for (const url of this.uploadedImageUrls) {
       try {
-        // Extract storage path from URL
-        // Format: https://xxx.supabase.co/storage/v1/object/public/listing-images/123/file.jpg
-        // Need: 123/file.jpg
-        const match = url.match(/\/listing-images\/(.+)$/);
-        if (match) {
-          const path = match[1];
-          const { error } = await this.supabase.storage
-            .from("listing-images")
-            .remove([path]);
-
-          if (error) {
-            console.error(`[SYNC]   Failed to delete ${path}:`, error.message);
-          } else {
-            console.log(`[SYNC]   Deleted from storage: ${path}`);
-          }
+        const key = getKeyFromPublicUrl(url);
+        if (key) {
+          await deleteFile(key);
+          console.log(`[SYNC]   Deleted from storage: ${key}`);
         } else {
           console.warn(`[SYNC]   Cannot extract path from URL: ${url}`);
         }
@@ -236,10 +237,6 @@ export class DatabaseSync {
     pendingImages: import("@/types/peekaboo-scraper.types").PendingImage[],
     peekabooId: number,
   ): Promise<number> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized");
-    }
-
     if (pendingImages.length === 0) {
       console.log("[SYNC] No images to upload");
       return 0;
@@ -325,22 +322,32 @@ export class DatabaseSync {
   private async decideSyncAction(
     listing: MappedListing,
   ): Promise<SyncDecisionResult> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized");
-    }
-
     const peekabooId = listing.peekaboo_id;
 
     // Query existing listing by peekaboo_id column
-    const { data: existing, error } = await this.supabase
-      .from("listings")
-      .select("id, updated_at, custom_attributes, status, peekaboo_id")
-      .eq("peekaboo_id", peekabooId)
-      .maybeSingle();
+    let existing:
+      | {
+          id: number;
+          updated_at: string;
+          custom_attributes: Record<string, unknown>;
+          status: string;
+          peekaboo_id: number;
+        }
+      | undefined;
 
-    if (error) {
-      console.error("[SYNC] Error checking existing listing:", error);
-      throw new Error(`Failed to check existing listing: ${error.message}`);
+    try {
+      const { rows } = await query(
+        `SELECT id, updated_at, custom_attributes, status, peekaboo_id
+         FROM listings
+         WHERE peekaboo_id = $1
+         LIMIT 1`,
+        [peekabooId],
+      );
+      existing = rows[0];
+    } catch (error) {
+      const dbError = error as Error;
+      console.error("[SYNC] Error checking existing listing:", dbError);
+      throw new Error(`Failed to check existing listing: ${dbError.message}`);
     }
 
     // No existing listing - CREATE
@@ -389,10 +396,6 @@ export class DatabaseSync {
     listing: MappedListing,
     decision: SyncDecisionResult,
   ): Promise<number> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized");
-    }
-
     const now = new Date().toISOString();
 
     // Add sync timestamp to custom_attributes
@@ -401,7 +404,7 @@ export class DatabaseSync {
       peekaboo_last_sync: now,
     };
 
-    // Prepare listing data - properly typed for Supabase
+    // Prepare listing data - properly typed to match the listings table
     const shouldArchiveForMissingCategory =
       this.options.autoPublish && !listing.category_id;
 
@@ -438,29 +441,34 @@ export class DatabaseSync {
     };
 
     if (decision.action === "create") {
-      const { data, error } = await this.supabase
-        .from("listings")
-        .insert(listingData)
-        .select("id")
-        .single();
+      try {
+        const { rows } = await query(
+          `INSERT INTO listings (${LISTING_COLUMNS.join(", ")})
+           VALUES (${LISTING_COLUMNS.map((_, i) => `$${i + 1}`).join(", ")})
+           RETURNING id`,
+          listingValues(listingData),
+        );
+        return rows[0].id;
+      } catch (error) {
+        const insertError = error as Error & { code?: string };
 
-      if (error) {
-        if (error.code === "23505") {
-          const { data: existing, error: fetchErr } = await this.supabase
-            .from("listings")
-            .select("id")
-            .eq("peekaboo_id", listing.peekaboo_id)
-            .maybeSingle();
+        if (insertError.code === "23505") {
+          const { rows: existingRows } = await query(
+            `SELECT id FROM listings WHERE peekaboo_id = $1 LIMIT 1`,
+            [listing.peekaboo_id],
+          );
+          const existing = existingRows[0];
 
-          if (!fetchErr && existing?.id) {
-            const { error: updateErr } = await this.supabase
-              .from("listings")
-              .update(listingData)
-              .eq("id", existing.id);
-
-            if (updateErr) {
+          if (existing?.id) {
+            try {
+              await query(
+                `UPDATE listings SET ${LISTING_COLUMNS.map((col, i) => `${col} = $${i + 1}`).join(", ")}
+                 WHERE id = $${LISTING_COLUMNS.length + 1}`,
+                [...listingValues(listingData), existing.id],
+              );
+            } catch (updateError) {
               throw new Error(
-                `Failed to update listing after concurrent insert: ${updateErr.message}`,
+                `Failed to update listing after concurrent insert: ${(updateError as Error).message}`,
               );
             }
 
@@ -468,19 +476,18 @@ export class DatabaseSync {
           }
         }
 
-        throw new Error(`Failed to insert listing: ${error.message}`);
+        throw new Error(`Failed to insert listing: ${insertError.message}`);
       }
-
-      return data.id;
     } else {
       // UPDATE existing listing
-      const { error } = await this.supabase
-        .from("listings")
-        .update(listingData)
-        .eq("id", decision.listingId!);
-
-      if (error) {
-        throw new Error(`Failed to update listing: ${error.message}`);
+      try {
+        await query(
+          `UPDATE listings SET ${LISTING_COLUMNS.map((col, i) => `${col} = $${i + 1}`).join(", ")}
+           WHERE id = $${LISTING_COLUMNS.length + 1}`,
+          [...listingValues(listingData), decision.listingId!],
+        );
+      } catch (error) {
+        throw new Error(`Failed to update listing: ${(error as Error).message}`);
       }
 
       return decision.listingId!;
@@ -496,10 +503,6 @@ export class DatabaseSync {
     listingId: number,
     branches: MappedBranch[],
   ): Promise<Map<string | number, number>> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized");
-    }
-
     const branchIdMap = new Map<string | number, number>();
 
     if (branches.length === 0) {
@@ -507,15 +510,14 @@ export class DatabaseSync {
     }
 
     // Step 1: Delete existing branches for this listing
-    const { error: deleteError } = await this.supabase
-      .from("listing_branches")
-      .delete()
-      .eq("listing_id", listingId);
-
-    if (deleteError) {
+    try {
+      await query(`DELETE FROM listing_branches WHERE listing_id = $1`, [
+        listingId,
+      ]);
+    } catch (error) {
       // CRITICAL: If we cannot delete old branches, we MUST NOT insert new ones to avoid duplicates
       throw new Error(
-        `Failed to delete existing branches: ${deleteError.message}`,
+        `Failed to delete existing branches: ${(error as Error).message}`,
       );
     }
 
@@ -550,13 +552,54 @@ export class DatabaseSync {
     }
 
     // Step 3: Insert new branches and get their IDs
-    const { data: insertedBranches, error: insertError } = await this.supabase
-      .from("listing_branches")
-      .insert(processedBranches)
-      .select("id, name, peekaboo_branch_id");
+    const branchColumns = [
+      "listing_id",
+      "name",
+      "address",
+      "city",
+      "country",
+      "latitude",
+      "longitude",
+      "phone_number",
+      "timings",
+      "is_open_now",
+      "is_primary",
+      "is_verified",
+      "distance_from_center",
+      "peekaboo_branch_id",
+      "custom_attributes",
+    ] as const;
 
-    if (insertError) {
-      throw new Error(`Failed to insert branches: ${insertError.message}`);
+    const values: unknown[] = [];
+    const valuePlaceholders = processedBranches
+      .map((branch) => {
+        const row = branchColumns.map(
+          (col) => (branch as Record<string, unknown>)[col],
+        );
+        const placeholders = row.map(
+          (_, j) => `$${values.length + j + 1}`,
+        );
+        values.push(...row);
+        return `(${placeholders.join(", ")})`;
+      })
+      .join(", ");
+
+    let insertedBranches: Array<{
+      id: number;
+      name: string;
+      peekaboo_branch_id: number | null;
+    }>;
+
+    try {
+      const { rows } = await query(
+        `INSERT INTO listing_branches (${branchColumns.join(", ")})
+         VALUES ${valuePlaceholders}
+         RETURNING id, name, peekaboo_branch_id`,
+        values,
+      );
+      insertedBranches = rows;
+    } catch (error) {
+      throw new Error(`Failed to insert branches: ${(error as Error).message}`);
     }
 
     // Step 4: Build map of peekaboo_branch_id -> database branch ID
@@ -591,20 +634,28 @@ export class DatabaseSync {
     listingId: number,
     images: MappedImage[],
   ): Promise<number> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized");
-    }
-
     // Step 1: Get existing images from database
-    const { data: existingImages, error: fetchError } = await this.supabase
-      .from("listing_images")
-      .select("id, url, display_order, is_primary")
-      .eq("listing_id", listingId);
+    let existingImages:
+      | Array<{
+          id: number;
+          url: string;
+          display_order: number;
+          is_primary: boolean;
+        }>
+      | undefined;
 
-    if (fetchError) {
+    try {
+      const { rows } = await query(
+        `SELECT id, url, display_order, is_primary
+         FROM listing_images
+         WHERE listing_id = $1`,
+        [listingId],
+      );
+      existingImages = rows;
+    } catch (error) {
       console.warn(
         `[SYNC] Warning: Failed to fetch existing images:`,
-        fetchError,
+        error,
       );
     }
 
@@ -628,27 +679,25 @@ export class DatabaseSync {
     // Step 4: Delete removed images
     if (imagesToDelete && imagesToDelete.length > 0) {
       const idsToDelete = imagesToDelete.map((img) => img.id);
-      const { error: deleteError } = await this.supabase
-        .from("listing_images")
-        .delete()
-        .in("id", idsToDelete);
-
-      if (deleteError) {
-        console.warn(
-          `[SYNC] Warning: Failed to delete removed images:`,
-          deleteError,
-        );
-      } else {
+      try {
+        await query(`DELETE FROM listing_images WHERE id = ANY($1::bigint[])`, [
+          idsToDelete,
+        ]);
         changesCount += imagesToDelete.length;
         console.log(`[SYNC] Deleted ${imagesToDelete.length} removed images`);
+      } catch (error) {
+        console.warn(
+          `[SYNC] Warning: Failed to delete removed images:`,
+          error,
+        );
       }
     }
 
     // Step 5: Insert new images only
     if (newImages.length > 0) {
       // Track new image URLs for rollback
-      const newImageUrls = newImages.map((img) => img.image_url);
-      this.uploadedImageUrls.push(...newImageUrls);
+      const newImageUrlsToTrack = newImages.map((img) => img.image_url);
+      this.uploadedImageUrls.push(...newImageUrlsToTrack);
 
       // Ensure only ONE primary image across ALL images
       let hasPrimary = existingImages?.some((img) => img.is_primary) || false;
@@ -662,20 +711,44 @@ export class DatabaseSync {
           url: image.image_url,
           display_order: image.display_order,
           is_primary: isPrimary,
-          alt_text: null,
+          alt_text: null as string | null,
         };
       });
 
-      const { error: insertError } = await this.supabase
-        .from("listing_images")
-        .insert(imagesToInsert);
+      const imageColumns = [
+        "listing_id",
+        "url",
+        "display_order",
+        "is_primary",
+        "alt_text",
+      ] as const;
 
-      if (insertError) {
-        throw new Error(`Failed to insert new images: ${insertError.message}`);
+      const values: unknown[] = [];
+      const valuePlaceholders = imagesToInsert
+        .map((image) => {
+          const row = imageColumns.map(
+            (col) => (image as Record<string, unknown>)[col],
+          );
+          const placeholders = row.map(
+            (_, j) => `$${values.length + j + 1}`,
+          );
+          values.push(...row);
+          return `(${placeholders.join(", ")})`;
+        })
+        .join(", ");
+
+      try {
+        await query(
+          `INSERT INTO listing_images (${imageColumns.join(", ")}) VALUES ${valuePlaceholders}`,
+          values,
+        );
+        changesCount += imagesToInsert.length;
+        console.log(`[SYNC] Added ${imagesToInsert.length} new images`);
+      } catch (error) {
+        throw new Error(
+          `Failed to insert new images: ${(error as Error).message}`,
+        );
       }
-
-      changesCount += imagesToInsert.length;
-      console.log(`[SYNC] Added ${imagesToInsert.length} new images`);
     }
 
     // Step 6: Update display order and primary flag if images exist but changed
@@ -694,18 +767,15 @@ export class DatabaseSync {
           (existing.display_order !== update.display_order ||
             existing.is_primary !== update.is_primary)
         ) {
-          const { error: updateError } = await this.supabase
-            .from("listing_images")
-            .update({
-              display_order: update.display_order,
-              is_primary: update.is_primary,
-            })
-            .eq("id", existing.id);
-
-          if (updateError) {
+          try {
+            await query(
+              `UPDATE listing_images SET display_order = $1, is_primary = $2 WHERE id = $3`,
+              [update.display_order, update.is_primary, existing.id],
+            );
+          } catch (error) {
             console.warn(
               `[SYNC] Warning: Failed to update image metadata:`,
-              updateError,
+              error,
             );
           }
         }
@@ -734,20 +804,15 @@ export class DatabaseSync {
     branches: MappedBranch[],
     branchIdMap?: Map<string | number, number>,
   ): Promise<void> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized");
-    }
-
     // Delete ALL existing opening hours for this listing (including branch-specific)
-    const { error: deleteError } = await this.supabase
-      .from("opening_hours")
-      .delete()
-      .eq("listing_id", listingId);
-
-    if (deleteError) {
+    try {
+      await query(`DELETE FROM opening_hours WHERE listing_id = $1`, [
+        listingId,
+      ]);
+    } catch (error) {
       // CRITICAL: If we cannot delete old hours, we MUST NOT insert new ones to avoid duplicates
       throw new Error(
-        `Failed to clear existing opening hours: ${deleteError.message}`,
+        `Failed to clear existing opening hours: ${(error as Error).message}`,
       );
     }
 
@@ -904,19 +969,16 @@ export class DatabaseSync {
           is_closed: hour.is_closed,
         }));
 
-        const { error: insertError } = await this.supabase
-          .from("opening_hours")
-          .insert(hoursToInsert);
-
-        if (insertError) {
-          console.warn(
-            `[SYNC] Warning: Failed to insert branch hours for ${branch.name}:`,
-            insertError,
-          );
-        } else {
+        try {
+          await this.insertOpeningHours(hoursToInsert);
           totalHoursInserted += parsedHours.length;
           console.log(
             `[SYNC] Synced ${parsedHours.length} hours for branch: ${branch.name} (branch_id: ${branchId})`,
+          );
+        } catch (error) {
+          console.warn(
+            `[SYNC] Warning: Failed to insert branch hours for ${branch.name}:`,
+            error,
           );
         }
       }
@@ -954,26 +1016,23 @@ export class DatabaseSync {
       // Insert listing-level opening hours (branch_id = NULL)
       const hoursToInsert = parsedHours.map((hour) => ({
         listing_id: listingId,
-        branch_id: null,
+        branch_id: null as number | null,
         day_of_week: hour.day_of_week,
         open_time: hour.open_time,
         close_time: hour.close_time,
         is_closed: hour.is_closed,
       }));
 
-      const { error: insertError } = await this.supabase
-        .from("opening_hours")
-        .insert(hoursToInsert);
-
-      if (insertError) {
-        console.warn(
-          `[SYNC] Warning: Failed to insert listing hours:`,
-          insertError,
-        );
-      } else {
+      try {
+        await this.insertOpeningHours(hoursToInsert);
         totalHoursInserted = parsedHours.length;
         console.log(
           `[SYNC] Synced ${parsedHours.length} listing-level opening hours`,
+        );
+      } catch (error) {
+        console.warn(
+          `[SYNC] Warning: Failed to insert listing hours:`,
+          error,
         );
       }
     }
@@ -981,6 +1040,46 @@ export class DatabaseSync {
     if (totalHoursInserted === 0) {
       console.log(`[SYNC] No opening hours synced for listing ${listingId}`);
     }
+  }
+
+  /**
+   * Bulk-insert rows into opening_hours
+   */
+  private async insertOpeningHours(
+    hours: Array<{
+      listing_id: number;
+      branch_id: number | null;
+      day_of_week: number;
+      open_time: string;
+      close_time: string;
+      is_closed: boolean;
+    }>,
+  ): Promise<void> {
+    if (hours.length === 0) return;
+
+    const columns = [
+      "listing_id",
+      "branch_id",
+      "day_of_week",
+      "open_time",
+      "close_time",
+      "is_closed",
+    ] as const;
+
+    const values: unknown[] = [];
+    const valuePlaceholders = hours
+      .map((hour) => {
+        const row = columns.map((col) => (hour as Record<string, unknown>)[col]);
+        const placeholders = row.map((_, j) => `$${values.length + j + 1}`);
+        values.push(...row);
+        return `(${placeholders.join(", ")})`;
+      })
+      .join(", ");
+
+    await query(
+      `INSERT INTO opening_hours (${columns.join(", ")}) VALUES ${valuePlaceholders}`,
+      values,
+    );
   }
 
   /**
@@ -993,63 +1092,58 @@ export class DatabaseSync {
     updated_at: string;
     custom_attributes: Record<string, unknown>;
   } | null> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized. Call init() first.");
-    }
+    try {
+      const { rows } = await query(
+        `SELECT id, name, status, updated_at, custom_attributes, peekaboo_id
+         FROM listings
+         WHERE peekaboo_id = $1
+         LIMIT 1`,
+        [peekabooId],
+      );
 
-    const { data, error } = await this.supabase
-      .from("listings")
-      .select("id, name, status, updated_at, custom_attributes, peekaboo_id")
-      .eq("peekaboo_id", peekabooId)
-      .maybeSingle();
+      const data = rows[0];
+      if (!data) {
+        return null;
+      }
 
-    if (error) {
+      // Type cast to satisfy return type
+      return {
+        ...data,
+        custom_attributes: data.custom_attributes as Record<string, unknown>,
+      };
+    } catch (error) {
       console.error("[SYNC] Error fetching existing listing:", error);
       return null;
     }
-
-    if (!data) {
-      return null;
-    }
-
-    // Type cast to satisfy return type
-    return {
-      ...data,
-      custom_attributes: data.custom_attributes as Record<string, unknown>,
-    };
   }
 
   /**
    * Get branches for a listing
    */
   async getBranches(listingId: number): Promise<ListingBranch[]> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized. Call init() first.");
-    }
+    try {
+      const { rows: data } = await query(
+        `SELECT * FROM listing_branches
+         WHERE listing_id = $1
+         ORDER BY is_primary DESC, created_at ASC`,
+        [listingId],
+      );
 
-    const { data, error } = await this.supabase
-      .from("listing_branches")
-      .select("*")
-      .eq("listing_id", listingId)
-      .order("is_primary", { ascending: false })
-      .order("created_at", { ascending: true });
-
-    if (error) {
+      // Type cast to satisfy return type (handle nullable fields)
+      return (
+        data?.map((branch: Record<string, unknown>) => ({
+          ...branch,
+          is_open_now: (branch.is_open_now as boolean) ?? false,
+          is_primary: (branch.is_primary as boolean) ?? false,
+          is_verified: (branch.is_verified as boolean) ?? false,
+          custom_attributes: (branch.custom_attributes ||
+            {}) as ListingBranch["custom_attributes"],
+        })) || []
+      );
+    } catch (error) {
       console.error("[SYNC] Error fetching branches:", error);
       return [];
     }
-
-    // Type cast to satisfy return type (handle nullable fields)
-    return (
-      data?.map((branch) => ({
-        ...branch,
-        is_open_now: branch.is_open_now ?? false,
-        is_primary: branch.is_primary ?? false,
-        is_verified: branch.is_verified ?? false,
-        custom_attributes: (branch.custom_attributes ||
-          {}) as ListingBranch["custom_attributes"],
-      })) || []
-    );
   }
 
   /**
@@ -1070,24 +1164,21 @@ export class DatabaseSync {
    * @returns Bank ID or null if not found
    */
   private async getBankId(bankName: string): Promise<number | null> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized. Call init() first.");
-    }
-
     // Check cache first (exact match)
     if (DatabaseSync.bankCache.has(bankName)) {
       return DatabaseSync.bankCache.get(bankName)!;
     }
 
     // Step 1: Try exact case-insensitive match
-    const { data: exactMatch, error: exactError } = await this.supabase
-      .from("banks")
-      .select("id, name")
-      .ilike("name", bankName)
-      .maybeSingle();
-
-    if (exactError) {
-      console.error(`[SYNC] Error fetching bank "${bankName}":`, exactError);
+    let exactMatch: { id: number; name: string } | undefined;
+    try {
+      const { rows } = await query(
+        `SELECT id, name FROM banks WHERE name ILIKE $1 LIMIT 1`,
+        [bankName],
+      );
+      exactMatch = rows[0];
+    } catch (error) {
+      console.error(`[SYNC] Error fetching bank "${bankName}":`, error);
       return null;
     }
 
@@ -1099,13 +1190,14 @@ export class DatabaseSync {
 
     // Step 2: Try fuzzy matching with normalization
     // Get all banks and find the best match
-    const { data: allBanks, error: allError } = await this.supabase
-      .from("banks")
-      .select("id, name")
-      .eq("is_active", true);
-
-    if (allError) {
-      console.error(`[SYNC] Error fetching banks list:`, allError);
+    let allBanks: Array<{ id: number; name: string }> | undefined;
+    try {
+      const { rows } = await query(
+        `SELECT id, name FROM banks WHERE is_active = true`,
+      );
+      allBanks = rows;
+    } catch (error) {
+      console.error(`[SYNC] Error fetching banks list:`, error);
       return null;
     }
 
@@ -1158,10 +1250,6 @@ export class DatabaseSync {
     listingId: number,
     deals: MappedListing["deals"],
   ): Promise<number> {
-    if (!this.supabase) {
-      throw new Error("DatabaseSync not initialized. Call init() first.");
-    }
-
     if (!deals || deals.length === 0) {
       return 0;
     }
@@ -1185,45 +1273,57 @@ export class DatabaseSync {
         }
 
         // Prepare deal data
-        const dealData = {
-          listing_id: listingId,
-          title: deal.title,
-          description: deal.description || null,
-          deal_type: "bank_discount" as const, // Matches deal_type enum
-          bank_id: bankId,
-          discount_value: deal.discountValue, // e.g., "10%", "15%"
-          start_date: deal.startDate,
-          end_date: deal.endDate,
-          is_active: this.isDealActive(deal.startDate, deal.endDate),
-          valid_card_variants: deal.validCards, // text[] array
-          metadata: {
-            peekaboo_deal_id: deal.peekabooId,
-            source_entity_id: deal.sourceEntityId,
-            percentage_value: deal.percentageValue,
-            order_type: deal.orderType,
-            online_available: deal.onlineAvailable,
-            card_associations: deal.cardAssociations, // Full card details with images
-          },
+        const isActive = this.isDealActive(deal.startDate, deal.endDate);
+        const metadata = {
+          peekaboo_deal_id: deal.peekabooId,
+          source_entity_id: deal.sourceEntityId,
+          percentage_value: deal.percentageValue,
+          order_type: deal.orderType,
+          online_available: deal.onlineAvailable,
+          card_associations: deal.cardAssociations, // Full card details with images
         };
 
         // Upsert deal (update if exists, insert if new)
-        // Use peekaboo_deal_id in metadata as unique identifier
-        const { data: existingDeal } = await this.supabase
-          .from("deals")
-          .select("id")
-          .eq("listing_id", listingId)
-          .eq("title", deal.title)
-          .eq("bank_id", bankId)
-          .maybeSingle();
+        // Use listing_id + title + bank_id as the unique identifier
+        const { rows: existingRows } = await query(
+          `SELECT id FROM deals
+           WHERE listing_id = $1 AND title = $2 AND bank_id = $3
+           LIMIT 1`,
+          [listingId, deal.title, bankId],
+        );
+        const existingDeal = existingRows[0];
 
         if (existingDeal) {
           // Update existing deal
-          const { error } = await this.supabase
-            .from("deals")
-            .update(dealData)
-            .eq("id", existingDeal.id);
-
-          if (error) {
+          try {
+            await query(
+              `UPDATE deals SET
+                 title = $1,
+                 description = $2,
+                 deal_type = $3,
+                 bank_id = $4,
+                 discount_value = $5,
+                 start_date = $6,
+                 end_date = $7,
+                 is_active = $8,
+                 valid_card_variants = $9,
+                 metadata = $10
+               WHERE id = $11`,
+              [
+                deal.title,
+                deal.description || null,
+                "bank_discount",
+                bankId,
+                deal.discountValue,
+                deal.startDate,
+                deal.endDate,
+                isActive,
+                deal.validCards,
+                metadata,
+                existingDeal.id,
+              ],
+            );
+          } catch (error) {
             console.error(`[SYNC] Error updating deal "${deal.title}":`, error);
             continue;
           }
@@ -1233,9 +1333,28 @@ export class DatabaseSync {
           );
         } else {
           // Insert new deal
-          const { error } = await this.supabase.from("deals").insert(dealData);
-
-          if (error) {
+          try {
+            await query(
+              `INSERT INTO deals (
+                 listing_id, title, description, deal_type, bank_id,
+                 discount_value, start_date, end_date, is_active,
+                 valid_card_variants, metadata
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              [
+                listingId,
+                deal.title,
+                deal.description || null,
+                "bank_discount",
+                bankId,
+                deal.discountValue,
+                deal.startDate,
+                deal.endDate,
+                isActive,
+                deal.validCards,
+                metadata,
+              ],
+            );
+          } catch (error) {
             console.error(
               `[SYNC] Error inserting deal "${deal.title}":`,
               error,

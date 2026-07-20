@@ -1,10 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { syncStateManager } from "@/lib/scraper/redis-state-manager";
 import {
   getAdminAuthErrorStatus,
   requireSuperAdmin,
 } from "@/lib/auth/admin";
+
+interface HistoryRow {
+  id: string;
+  started_at: string;
+  completed_at: string | null;
+  duration_ms: number | null;
+  entities_processed: number;
+  entities_created: number;
+  entities_updated: number;
+  entities_skipped: number;
+  errors_count: number;
+  status: string;
+  config: unknown;
+  error_message: string | null;
+}
 
 /**
  * GET SYNC HISTORY
@@ -15,19 +30,21 @@ export async function GET(request: NextRequest) {
   try {
     await requireSuperAdmin(request);
 
-    const authSupabase = await createServerSupabase();
     const activeSyncId = await syncStateManager.getActiveSyncId();
 
     // Fetch sync history from database
-    const { data: history, error } = await authSupabase
-      .from("listing_sync_history")
-      .select(
-        "id, started_at, completed_at, duration_ms, entities_processed, entities_created, entities_updated, entities_skipped, errors_count, status, config, error_message",
-      )
-      .order("started_at", { ascending: false })
-      .limit(50);
-
-    if (error) {
+    let history: HistoryRow[];
+    try {
+      const { rows } = await query(
+        `SELECT id, started_at, completed_at, duration_ms, entities_processed,
+                entities_created, entities_updated, entities_skipped, errors_count,
+                status, config, error_message
+         FROM listing_sync_history
+         ORDER BY started_at DESC
+         LIMIT 50`,
+      );
+      history = rows;
+    } catch (error) {
       console.error("[LISTING SCRAPER] History query error:", error);
       return NextResponse.json(
         { error: "Failed to fetch history" },

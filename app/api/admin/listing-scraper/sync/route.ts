@@ -1,6 +1,6 @@
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { z } from "zod";
 import { getWorkerConfig, requestWorker } from "@/lib/scraper/worker-client";
 import * as Sentry from "@sentry/nextjs";
@@ -35,23 +35,18 @@ export async function POST(request: NextRequest) {
     if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     // Auth check
-    const authSupabase = await createServerSupabase();
-    const {
-      data: { user },
-    } = await authSupabase.auth.getUser();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (!user) {
+    if (!profile) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check super_admin role
-    const { data: profile } = await authSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profile?.role !== "super_admin") {
+    if (profile.role !== "super_admin") {
       return NextResponse.json(
         { error: "Forbidden", message: "Only super admins can run sync" },
         { status: 403 },

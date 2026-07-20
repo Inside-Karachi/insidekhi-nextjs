@@ -10,7 +10,7 @@
  */
 
 import { chromium, type Browser } from "playwright";
-import { createClient } from "@supabase/supabase-js";
+import { query } from "@/lib/db";
 
 const TOKEN_KEY = "peekaboo_auth_token";
 const TOKEN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache
@@ -23,48 +23,24 @@ interface TokenCache {
 let tokenCache: TokenCache | null = null;
 
 /**
- * Get Supabase client with service role (bypasses RLS)
- */
-function getServiceClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!supabaseUrl || !serviceKey) {
-    throw new Error(
-      "Missing Supabase credentials. Ensure NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set.",
-    );
-  }
-
-  return createClient(supabaseUrl, serviceKey, {
-    auth: { persistSession: false },
-  });
-}
-
-/**
  * Fetch token from database
  */
 async function getTokenFromDatabase(): Promise<string | null> {
   console.log("[TOKEN] Checking database...");
 
   try {
-    const supabase = getServiceClient();
+    const { rows } = await query(
+      `SELECT config_value FROM system_config WHERE config_key = $1 LIMIT 1`,
+      [TOKEN_KEY],
+    );
+    const data = rows[0];
 
-    const { data, error } = await supabase
-      .from("system_config")
-      .select("config_value")
-      .eq("config_key", TOKEN_KEY)
-      .single();
-
-    if (error) {
-      if (error.code === "PGRST116") {
-        console.log("[TOKEN] No token found in database (first run)");
-      } else {
-        console.warn("[TOKEN] Database fetch failed:", error.message);
-      }
+    if (!data) {
+      console.log("[TOKEN] No token found in database (first run)");
       return null;
     }
 
-    if (!data?.config_value) {
+    if (!data.config_value) {
       console.log("[TOKEN] No token found in database");
       return null;
     }
@@ -95,26 +71,24 @@ async function saveTokenToDatabase(token: string): Promise<boolean> {
   console.log("[TOKEN] Saving to database...");
 
   try {
-    const supabase = getServiceClient();
-
-    const { error } = await supabase.from("system_config").upsert(
-      {
-        config_key: TOKEN_KEY,
-        config_value: { token },
-        config_type: "setting",
-        is_public: false,
-        description: "Peekaboo.guru API authentication token (auto-managed)",
-        updated_at: new Date().toISOString(),
-      },
-      {
-        onConflict: "config_key",
-      },
+    await query(
+      `INSERT INTO system_config (config_key, config_value, config_type, is_public, description, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (config_key) DO UPDATE SET
+         config_value = EXCLUDED.config_value,
+         config_type = EXCLUDED.config_type,
+         is_public = EXCLUDED.is_public,
+         description = EXCLUDED.description,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        TOKEN_KEY,
+        { token },
+        "setting",
+        false,
+        "Peekaboo.guru API authentication token (auto-managed)",
+        new Date().toISOString(),
+      ],
     );
-
-    if (error) {
-      console.error("[TOKEN] Database save failed:", error.message);
-      return false;
-    }
 
     console.log("[TOKEN] Saved to database successfully");
     return true;
@@ -305,12 +279,11 @@ export async function getTokenMetadata(): Promise<{
 
   // Check database
   try {
-    const supabase = getServiceClient();
-    const { data } = await supabase
-      .from("system_config")
-      .select("updated_at")
-      .eq("config_key", TOKEN_KEY)
-      .single();
+    const { rows } = await query(
+      `SELECT updated_at FROM system_config WHERE config_key = $1 LIMIT 1`,
+      [TOKEN_KEY],
+    );
+    const data = rows[0];
 
     if (data) {
       return {

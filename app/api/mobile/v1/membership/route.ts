@@ -5,15 +5,11 @@ import { ok } from "@/lib/mobile/response";
 import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { createMobileServiceClient } from "@/lib/mobile/supabase";
 import {
   getClientIp,
   isHoneypotTripped,
-  enforceFormRateLimit,
-  hasExistingSubmission,
   toFormSubmission,
   FORM_SUBMISSION_COLUMNS,
-  type FormSubmissionRow,
 } from "@/lib/mobile/forms";
 import {
   normalizeEmail,
@@ -22,6 +18,7 @@ import {
   sanitizeString,
   normalizePakPhone,
 } from "@/lib/utils/form-utils";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -40,31 +37,37 @@ const ALLOWED_BUSINESS_TYPES = [
 /**
  * GET /api/mobile/v1/membership
  *
- * The caller's own membership applications (empty when unauthenticated). RLS
- * scopes `form_submissions` SELECT to `uploaded_by = auth.uid()`.
+ * The caller's own membership applications (empty when unauthenticated).
+ * Explicitly scoped to `uploaded_by = <caller>`.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
   if (!user) return ok([]);
 
-  const { data, error } = await supabase
-    .from("form_submissions")
-    .select(FORM_SUBMISSION_COLUMNS)
-    .eq("form_type", "membership")
-    .eq("uploaded_by", user.id)
-    .order("submitted_at", { ascending: false })
-    .limit(50)
-    .returns<FormSubmissionRow[]>();
-  if (error) {
-    console.error("[mobile-api] membership list failed:", error.message);
+  let rows;
+  try {
+    const result = await query(
+      `SELECT ${FORM_SUBMISSION_COLUMNS}
+       FROM form_submissions
+       WHERE form_type = $1 AND uploaded_by = $2
+       ORDER BY submitted_at DESC
+       LIMIT 50`,
+      ["membership", user.id],
+    );
+    rows = result.rows;
+  } catch (error) {
+    console.error(
+      "[mobile-api] membership list failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError(
       "internal_error",
       "Failed to load applications.",
       500,
     );
   }
-  return ok((data ?? []).map(toFormSubmission));
+  return ok(rows.map(toFormSubmission));
 });
 
 const bodySchema = z.object({
@@ -166,8 +169,24 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
 
   const ip = getClientIp(request);
-  const service = createMobileServiceClient();
-  await enforceFormRateLimit(service, "membership", ip, 10);
+
+  const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const { rows: countRows } = await query(
+    `SELECT COUNT(*)::int AS count
+     FROM form_submissions
+     WHERE form_type = $1 AND submitted_at >= $2 AND additional_data->>'ip' = $3`,
+    ["membership", since, ip],
+  );
+  if ((countRows[0]?.count ?? 0) >= 10) {
+    throw new MobileApiError(
+      "rate_limited",
+      "Too many submissions. Please try again later.",
+      429,
+      undefined,
+      { retryAfter: 3600 },
+    );
+  }
+
   if (isDisposableEmail(email)) {
     throw new MobileApiError(
       "validation_error",
@@ -176,30 +195,46 @@ export const POST = mobileRoute(async (request: NextRequest) => {
       "email",
     );
   }
-  if (await hasExistingSubmission(service, "membership", email)) {
+
+  const { rows: existingRows } = await query(
+    `SELECT id FROM form_submissions WHERE form_type = $1 AND email = $2 LIMIT 1`,
+    ["membership", email],
+  );
+  if (existingRows.length > 0) {
     return ok({ submitted: true }); // already applied
   }
 
   const { user } = await getOptionalMobileUser(request);
-  const { error } = await service.from("form_submissions").insert({
-    form_type: "membership",
-    name: contactName,
-    email,
-    phone,
-    company_name: companyName,
-    business_type: businessType,
-    address: sanitizeString(parsed.data.address, 1000),
-    city: sanitizeString(parsed.data.city, 100),
-    state: sanitizeString(parsed.data.state, 100),
-    zip_code: sanitizeString(parsed.data.zipCode, 20),
-    website: website || null,
-    years_in_business: sanitizeString(parsed.data.yearsInBusiness, 50),
-    message: sanitizeString(parsed.data.interests, 2000),
-    uploaded_by: user?.id ?? null,
-    additional_data: { formVersion: "1.0", submittedFrom: "mobile", ip },
-  });
-  if (error) {
-    console.error("[mobile-api] membership insert failed:", error.message);
+  try {
+    await query(
+      `INSERT INTO form_submissions
+         (form_type, name, email, phone, company_name, business_type, address,
+          city, state, zip_code, website, years_in_business, message,
+          uploaded_by, additional_data)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [
+        "membership",
+        contactName,
+        email,
+        phone,
+        companyName,
+        businessType,
+        sanitizeString(parsed.data.address, 1000),
+        sanitizeString(parsed.data.city, 100),
+        sanitizeString(parsed.data.state, 100),
+        sanitizeString(parsed.data.zipCode, 20),
+        website || null,
+        sanitizeString(parsed.data.yearsInBusiness, 50),
+        sanitizeString(parsed.data.interests, 2000),
+        user?.id ?? null,
+        JSON.stringify({ formVersion: "1.0", submittedFrom: "mobile", ip }),
+      ],
+    );
+  } catch (error) {
+    console.error(
+      "[mobile-api] membership insert failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError(
       "internal_error",
       "Failed to submit application.",

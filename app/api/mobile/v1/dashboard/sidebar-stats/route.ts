@@ -3,121 +3,89 @@ import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
-import { createMobileServiceClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-// Role-aware sidebar counters. admin/super_admin -> platform totals (service-role);
+// Role-aware sidebar counters. admin/super_admin -> platform totals;
 // lister -> global content counts; organizer -> own events/bookings/tickets;
 // everyone else -> own reviews/bookings/favorites.
 export const GET = mobileRoute(async (request: NextRequest) => {
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .maybeSingle();
-  const role = profile?.role ?? null;
-
-  const headCount = "*";
+  const { rows: profileRows } = await query(
+    `SELECT role FROM profiles WHERE id = $1`,
+    [user.id],
+  );
+  const role = profileRows[0]?.role ?? null;
 
   if (role === "admin" || role === "super_admin") {
-    const admin = createMobileServiceClient();
-    const [{ count: users }, { count: events }, { count: listings }] =
-      await Promise.all([
-        admin
-          .from("profiles")
-          .select(headCount, { count: "exact", head: true }),
-        admin.from("events").select(headCount, { count: "exact", head: true }),
-        admin
-          .from("listings")
-          .select(headCount, { count: "exact", head: true }),
-      ]);
+    const [usersResult, eventsResult, listingsResult] = await Promise.all([
+      query(`SELECT COUNT(*) FROM profiles`),
+      query(`SELECT COUNT(*) FROM events`),
+      query(`SELECT COUNT(*) FROM listings`),
+    ]);
     return ok({
       role,
       stats: {
-        users: users ?? 0,
-        events: events ?? 0,
-        listings: listings ?? 0,
+        users: parseInt(usersResult.rows[0].count, 10) || 0,
+        events: parseInt(eventsResult.rows[0].count, 10) || 0,
+        listings: parseInt(listingsResult.rows[0].count, 10) || 0,
       },
     });
   }
 
   if (role === "lister") {
-    const [{ count: listings }, { count: events }, { count: reviews }] =
-      await Promise.all([
-        supabase
-          .from("listings")
-          .select(headCount, { count: "exact", head: true }),
-        supabase
-          .from("events")
-          .select(headCount, { count: "exact", head: true }),
-        supabase
-          .from("reviews")
-          .select(headCount, { count: "exact", head: true }),
-      ]);
+    const [listingsResult, eventsResult, reviewsResult] = await Promise.all([
+      query(`SELECT COUNT(*) FROM listings`),
+      query(`SELECT COUNT(*) FROM events`),
+      query(`SELECT COUNT(*) FROM reviews`),
+    ]);
     return ok({
       role,
       stats: {
-        listings: listings ?? 0,
-        events: events ?? 0,
-        reviews: reviews ?? 0,
+        listings: parseInt(listingsResult.rows[0].count, 10) || 0,
+        events: parseInt(eventsResult.rows[0].count, 10) || 0,
+        reviews: parseInt(reviewsResult.rows[0].count, 10) || 0,
       },
     });
   }
 
   if (role === "organizer") {
-    const [{ count: events }, { count: bookings }, { count: tickets }] =
-      await Promise.all([
-        supabase
-          .from("events")
-          .select(headCount, { count: "exact", head: true })
-          .eq("organizer_id", user.id),
-        supabase
-          .from("bookings")
-          .select(headCount, { count: "exact", head: true })
-          .eq("user_id", user.id),
-        supabase
-          .from("ticket_passes")
-          .select("*, booking:bookings!inner(user_id)", {
-            count: "exact",
-            head: true,
-          })
-          .eq("bookings.user_id", user.id),
-      ]);
+    const [eventsResult, bookingsResult, ticketsResult] = await Promise.all([
+      query(`SELECT COUNT(*) FROM events WHERE organizer_id = $1`, [user.id]),
+      query(`SELECT COUNT(*) FROM bookings WHERE user_id = $1`, [user.id]),
+      query(
+        `SELECT COUNT(*) FROM ticket_passes tp
+         JOIN bookings b ON b.id = tp.booking_id
+         WHERE b.user_id = $1`,
+        [user.id],
+      ),
+    ]);
     return ok({
       role,
       stats: {
-        events: events ?? 0,
-        bookings: bookings ?? 0,
-        tickets: tickets ?? 0,
+        events: parseInt(eventsResult.rows[0].count, 10) || 0,
+        bookings: parseInt(bookingsResult.rows[0].count, 10) || 0,
+        tickets: parseInt(ticketsResult.rows[0].count, 10) || 0,
       },
     });
   }
 
-  const [{ count: reviews }, { count: bookings }, { count: favorites }] =
-    await Promise.all([
-      supabase
-        .from("reviews")
-        .select(headCount, { count: "exact", head: true })
-        .eq("user_id", user.id),
-      supabase
-        .from("bookings")
-        .select(headCount, { count: "exact", head: true })
-        .eq("user_id", user.id),
-      supabase
-        .from("favorite_listings")
-        .select(headCount, { count: "exact", head: true })
-        .eq("user_id", user.id),
-    ]);
+  const [reviewsResult, bookingsResult, favoritesResult] = await Promise.all([
+    query(`SELECT COUNT(*) FROM reviews WHERE user_id = $1`, [user.id]),
+    query(`SELECT COUNT(*) FROM bookings WHERE user_id = $1`, [user.id]),
+    query(`SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1`, [
+      user.id,
+    ]),
+  ]);
   return ok({
     role: role ?? "user",
     stats: {
-      reviews: reviews ?? 0,
-      bookings: bookings ?? 0,
-      favorites: favorites ?? 0,
+      reviews: parseInt(reviewsResult.rows[0].count, 10) || 0,
+      bookings: parseInt(bookingsResult.rows[0].count, 10) || 0,
+      favorites: parseInt(favoritesResult.rows[0].count, 10) || 0,
     },
   });
 });

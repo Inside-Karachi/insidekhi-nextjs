@@ -4,6 +4,7 @@ import { ok } from "@/lib/mobile/response";
 import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -25,19 +26,6 @@ function parseIntInRange(
   return Math.min(Math.max(n, min), max);
 }
 
-type ProfileJoin =
-  | { username: string | null; avatar_url: string | null }
-  | { username: string | null; avatar_url: string | null }[]
-  | null;
-
-type LeaderboardRowLike = {
-  rank_position: number | null;
-  user_id: string | null;
-  xp_total: number | null;
-  rank_name: string | null;
-  profiles: ProfileJoin;
-};
-
 /**
  * GET /api/mobile/v1/gamification/leaderboard?period=&limit=&offset=
  *
@@ -53,20 +41,27 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   const limit = parseIntInRange(searchParams.get("limit"), 100, 1, 1000);
   const offset = parseIntInRange(searchParams.get("offset"), 0, 0, 1_000_000);
 
-  const { user, supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
   const currentUserId = user?.id ?? null;
 
-  const { data, error } = await supabase
-    .from("leaderboard_cache")
-    .select(
-      "rank_position, user_id, xp_total, rank_name, profiles:user_id(username, avatar_url)",
-    )
-    .eq("period_type", period)
-    .order("rank_position", { ascending: true })
-    .range(offset, offset + limit - 1)
-    .returns<LeaderboardRowLike[]>();
-  if (error) {
-    console.error("[mobile-api] leaderboard query failed:", error.message);
+  let rows;
+  try {
+    const result = await query(
+      `SELECT lc.rank_position, lc.user_id, lc.xp_total, lc.rank_name,
+              p.username, p.avatar_url
+       FROM leaderboard_cache lc
+       LEFT JOIN profiles p ON p.id = lc.user_id
+       WHERE lc.period_type = $1
+       ORDER BY lc.rank_position ASC
+       LIMIT $2 OFFSET $3`,
+      [period, limit, offset],
+    );
+    rows = result.rows;
+  } catch (error) {
+    console.error(
+      "[mobile-api] leaderboard query failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError(
       "internal_error",
       "Failed to load leaderboard.",
@@ -74,38 +69,42 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const { count, error: countError } = await supabase
-    .from("leaderboard_cache")
-    .select("rank_position", { count: "exact", head: true })
-    .eq("period_type", period);
-  if (countError) {
-    console.error("[mobile-api] leaderboard count failed:", countError.message);
+  let count: number | null = null;
+  try {
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) AS count FROM leaderboard_cache WHERE period_type = $1`,
+      [period],
+    );
+    count = countRows[0] ? Number(countRows[0].count) : null;
+  } catch (countError) {
+    console.error(
+      "[mobile-api] leaderboard count failed:",
+      countError instanceof Error ? countError.message : countError,
+    );
   }
 
-  const leaderboard = (data ?? []).map((r) => {
-    const p = Array.isArray(r.profiles) ? r.profiles[0] : r.profiles;
-    return {
-      rank_position: r.rank_position,
-      is_own: currentUserId != null && r.user_id === currentUserId,
-      xp_total: r.xp_total,
-      rank_name: r.rank_name,
-      username: p?.username ?? null,
-      avatar_url: p?.avatar_url ?? null,
-    };
-  });
+  const leaderboard = rows.map((r) => ({
+    rank_position: r.rank_position,
+    is_own: currentUserId != null && r.user_id === currentUserId,
+    xp_total: r.xp_total,
+    rank_name: r.rank_name,
+    username: r.username ?? null,
+    avatar_url: r.avatar_url ?? null,
+  }));
 
   let userRank: {
     rank_position: number | null;
     xp_total: number | null;
   } | null = null;
   if (currentUserId) {
-    const { data: ur } = await supabase
-      .from("leaderboard_cache")
-      .select("rank_position, xp_total")
-      .eq("period_type", period)
-      .eq("user_id", currentUserId)
-      .maybeSingle();
-    userRank = ur ?? null;
+    const { rows: urRows } = await query(
+      `SELECT rank_position, xp_total
+       FROM leaderboard_cache
+       WHERE period_type = $1 AND user_id = $2
+       LIMIT 1`,
+      [period, currentUserId],
+    );
+    userRank = urRows[0] ?? null;
   }
 
   return ok(

@@ -4,6 +4,7 @@ import { ok } from "@/lib/mobile/response";
 import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -16,20 +17,24 @@ export const dynamic = "force-dynamic";
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await getOptionalMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
 
-  const { data: ranks, error } = await supabase
-    .from("ranks")
-    .select(
-      "id, name, slug, color, icon_url, min_xp_required, max_slots, benefits, display_order",
-    )
-    .eq("is_active", true)
-    .order("min_xp_required", { ascending: true });
-  if (error) {
-    console.error("[mobile-api] ranks query failed:", error.message);
+  let rankList;
+  try {
+    const { rows } = await query(
+      `SELECT id, name, slug, color, icon_url, min_xp_required, max_slots, benefits, display_order
+       FROM ranks
+       WHERE is_active = true
+       ORDER BY min_xp_required ASC`,
+    );
+    rankList = rows;
+  } catch (error) {
+    console.error(
+      "[mobile-api] ranks query failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError("internal_error", "Failed to load ranks.", 500);
   }
-  const rankList = ranks ?? [];
 
   let userRankInfo: {
     current_rank: (typeof rankList)[number] | null;
@@ -40,19 +45,20 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   } | null = null;
 
   if (user) {
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("points")
-      .eq("id", user.id)
-      .maybeSingle();
-    const userXP = profile?.points ?? 0;
+    const { rows: profileRows } = await query(
+      `SELECT points FROM profiles WHERE id = $1`,
+      [user.id],
+    );
+    const userXP = profileRows[0]?.points ?? 0;
 
-    const { data: userRankData } = await supabase
-      .from("user_ranks")
-      .select("rank_id, achieved_at")
-      .eq("user_id", user.id)
-      .eq("current_rank", true)
-      .maybeSingle();
+    const { rows: userRankRows } = await query(
+      `SELECT rank_id, achieved_at
+       FROM user_ranks
+       WHERE user_id = $1 AND current_rank = true
+       LIMIT 1`,
+      [user.id],
+    );
+    const userRankData = userRankRows[0];
 
     if (userRankData) {
       const currentRank =

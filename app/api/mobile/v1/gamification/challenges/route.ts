@@ -4,6 +4,7 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -16,39 +17,43 @@ export const dynamic = "force-dynamic";
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
   const now = new Date().toISOString();
-  const { data: challenges, error } = await supabase
-    .from("weekly_challenges")
-    .select(
-      "id, title, description, challenge_type, xp_reward, target_count, start_date, end_date",
-    )
-    .eq("is_active", true)
-    .lte("start_date", now)
-    .gte("end_date", now)
-    .order("start_date", { ascending: false });
-  if (error) {
-    console.error("[mobile-api] challenges query failed:", error.message);
+  let list;
+  try {
+    const { rows } = await query(
+      `SELECT id, title, description, challenge_type, xp_reward, target_count, start_date, end_date
+       FROM weekly_challenges
+       WHERE is_active = true AND start_date <= $1 AND end_date >= $1
+       ORDER BY start_date DESC`,
+      [now],
+    );
+    list = rows;
+  } catch (error) {
+    console.error(
+      "[mobile-api] challenges query failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError(
       "internal_error",
       "Failed to load challenges.",
       500,
     );
   }
-  const list = challenges ?? [];
   if (list.length === 0) return ok({ challenges: [] });
 
   const ids = list.map((c) => c.id);
-  const { data: progressRows } = await supabase
-    .from("user_challenge_progress")
-    .select("challenge_id, current_progress, completed")
-    .eq("user_id", user.id)
-    .in("challenge_id", ids);
+  const { rows: progressRows } = await query(
+    `SELECT challenge_id, current_progress, completed
+     FROM user_challenge_progress
+     WHERE user_id = $1 AND challenge_id = ANY($2::bigint[])`,
+    [user.id, ids],
+  );
 
   const nowMs = Date.now();
   const challengesOut = list.map((c) => {
-    const progress = progressRows?.find((p) => p.challenge_id === c.id);
+    const progress = progressRows.find((p) => p.challenge_id === c.id);
     const daysRemaining = Math.max(
       0,
       Math.ceil(

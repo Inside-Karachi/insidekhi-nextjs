@@ -6,10 +6,13 @@ import { ok } from "@/lib/mobile/response";
 import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 import {
-  createMobileServiceClient,
-  type MobileSupabase,
-} from "@/lib/mobile/supabase";
+  GET_LISTED_IMAGES_PREFIX,
+  toPrefixedObjectKey,
+  uploadFile,
+  deleteFile,
+} from "@/lib/storage/spaces";
 import {
   getClientIp,
   isHoneypotTripped,
@@ -22,18 +25,15 @@ import {
   sanitizeString,
   normalizePakPhone,
 } from "@/lib/utils/form-utils";
-import type { Database } from "@/types/supabase";
 
 export const runtime = "nodejs"; // sharp needs the Node runtime
 export const dynamic = "force-dynamic";
 
-const BUCKET = "get-listed-images";
 const MAX_FILES = 8;
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB per source image
 const MAX_TOTAL_BYTES = 24 * 1024 * 1024; // 24MB across all images per request
 const MAX_INPUT_PIXELS = 24_000_000; // ~24MP - guards against decompression bombs
 const ALLOWED_DECODED = new Set(["jpeg", "png", "webp", "avif"]);
-const SEVEN_DAYS_S = 60 * 60 * 24 * 7;
 const ALLOWED_IMAGE = /^image\/(jpeg|jpg|png|webp|avif)$/;
 
 // Memory hygiene under load: no process-wide buffer cache, and cap libvips
@@ -41,8 +41,19 @@ const ALLOWED_IMAGE = /^image\/(jpeg|jpg|png|webp|avif)$/;
 sharp.cache(false);
 sharp.concurrency(1);
 
-type ImageInsert =
-  Database["public"]["Tables"]["form_submission_images"]["Insert"];
+interface ImageInsert {
+  submission_id: number;
+  storage_bucket: string;
+  storage_path: string;
+  public_url: string | null;
+  is_public: boolean;
+  content_type: string;
+  file_size_bytes: number;
+  width: number | null;
+  height: number | null;
+  variant: string;
+  uploaded_by: string | null;
+}
 
 /** Cheap, pre-insert validation: file count, per-file byte size, declared MIME. */
 function validateFilesShallow(files: File[]): void {
@@ -127,37 +138,36 @@ async function buildVariants(file: File) {
 
 /**
  * Processes up to {@link MAX_FILES} uploaded images for a submission: writes the
- * three webp variants per image to the private `get-listed-images` bucket and
- * returns the `form_submission_images` rows to insert. Throws on any failure
- * (the caller rolls back). Tracks uploaded paths in `uploadedPaths` for cleanup.
+ * three webp variants per image to the `get-listed-images/` prefix in
+ * DigitalOcean Spaces and returns the `form_submission_images` rows to insert.
+ * Throws on any failure (the caller rolls back). Tracks uploaded keys in
+ * `uploadedKeys` for cleanup.
  */
 async function processFiles(
-  service: MobileSupabase,
   submissionId: number,
   uploadedBy: string | null,
   files: File[],
-  uploadedPaths: string[],
+  uploadedKeys: string[],
 ): Promise<ImageInsert[]> {
   const inserts: ImageInsert[] = [];
   for (const file of files) {
     const variants = await buildVariants(file);
     const base = `${submissionId}/${randomUUID()}`;
     for (const v of variants) {
-      const path = `${base}/${v.variant}.webp`;
-      const { error: upErr } = await service.storage
-        .from(BUCKET)
-        .upload(path, v.data, { contentType: "image/webp", upsert: false });
-      if (upErr) throw new Error(`upload failed: ${upErr.message}`);
-      uploadedPaths.push(path);
-      const { data: signed } = await service.storage
-        .from(BUCKET)
-        .createSignedUrl(path, SEVEN_DAYS_S);
+      const key = toPrefixedObjectKey(
+        GET_LISTED_IMAGES_PREFIX,
+        `${base}/${v.variant}.webp`,
+      );
+      const uploaded = await uploadFile(key, v.data, {
+        contentType: "image/webp",
+      });
+      uploadedKeys.push(key);
       inserts.push({
         submission_id: submissionId,
-        storage_bucket: BUCKET,
-        storage_path: path,
-        public_url: signed?.signedUrl ?? null,
-        is_public: false,
+        storage_bucket: process.env.DO_SPACES_BUCKET || "insidekhi",
+        storage_path: key,
+        public_url: uploaded.publicUrl,
+        is_public: true,
         content_type: "image/webp",
         file_size_bytes: v.data.length,
         width: v.width,
@@ -175,11 +185,10 @@ async function processFiles(
  *
  * "Get listed" business application via `multipart/form-data`. Optional auth
  * (stamps `uploaded_by`). Accepts up to 8 images (field `files`), each stored as
- * original/medium/thumb webp variants in the private `get-listed-images` bucket
- * (7-day signed URLs). Honeypot + per-IP rate limit; no reCAPTCHA (per the
- * mobile decision) and no web receipt cookie (retrieval is via `uploaded_by`).
- * Mirrors `app/api/get-listed/submit`. Atomic: rolls back uploads + the row on
- * any image failure.
+ * original/medium/thumb webp variants under the `get-listed-images/` prefix in
+ * DigitalOcean Spaces (public CDN URLs). Honeypot + per-IP rate limit; no
+ * reCAPTCHA (per the mobile decision). Mirrors `app/api/get-listed/submit`.
+ * Atomic: rolls back uploads + the row on any image failure.
  */
 export const POST = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
@@ -251,8 +260,7 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
 
   const ip = getClientIp(request);
-  const service = createMobileServiceClient();
-  await enforceFormRateLimit(service, "get-listed", ip, 10);
+  await enforceFormRateLimit("get-listed", ip, 10);
   if (isDisposableEmail(email)) {
     throw new MobileApiError(
       "validation_error",
@@ -272,31 +280,38 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     .filter((f): f is File => f instanceof File);
   validateFilesShallow(files);
 
-  const { data: created, error: createErr } = await service
-    .from("form_submissions")
-    .insert({
-      form_type: "get-listed",
-      name: contactName,
-      email,
-      phone,
-      company_name: companyName,
-      business_type: businessType,
-      address: sanitizeString(str("address"), 255),
-      city: sanitizeString(str("city"), 100),
-      state: sanitizeString(str("state"), 100),
-      zip_code: sanitizeString(str("zipCode"), 20),
-      website: sanitizeString(str("website"), 255),
-      years_in_business: sanitizeString(str("yearsInBusiness"), 50),
-      operating_hours: sanitizeString(str("operatingHours"), 1000),
-      message: sanitizeString(str("description"), 2000),
-      social_media: sanitizeString(str("socialMedia"), 1000),
-      uploaded_by: uploadedBy,
-      additional_data: { formVersion: "1.0", submittedFrom: "mobile", ip },
-    })
-    .select("id, status")
-    .single();
-  if (createErr || !created) {
-    console.error("[mobile-api] get-listed insert failed:", createErr?.message);
+  let created: { id: number; status: string | null } | undefined;
+  try {
+    const { rows } = await query(
+      `INSERT INTO form_submissions
+         (form_type, name, email, phone, company_name, business_type, address, city, state,
+          zip_code, website, years_in_business, operating_hours, message, social_media, uploaded_by, additional_data)
+       VALUES ('get-listed', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       RETURNING id, status`,
+      [
+        contactName,
+        email,
+        phone,
+        companyName,
+        businessType,
+        sanitizeString(str("address"), 255),
+        sanitizeString(str("city"), 100),
+        sanitizeString(str("state"), 100),
+        sanitizeString(str("zipCode"), 20),
+        sanitizeString(str("website"), 255),
+        sanitizeString(str("yearsInBusiness"), 50),
+        sanitizeString(str("operatingHours"), 1000),
+        sanitizeString(str("description"), 2000),
+        sanitizeString(str("socialMedia"), 1000),
+        uploadedBy,
+        { formVersion: "1.0", submittedFrom: "mobile", ip },
+      ],
+    );
+    created = rows[0];
+  } catch (createErr) {
+    console.error("[mobile-api] get-listed insert failed:", createErr);
+  }
+  if (!created) {
     throw new MobileApiError(
       "internal_error",
       "Failed to submit application.",
@@ -304,21 +319,40 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const uploadedPaths: string[] = [];
+  const uploadedKeys: string[] = [];
   try {
     const inserts = await processFiles(
-      service,
       created.id,
       uploadedBy,
       files,
-      uploadedPaths,
+      uploadedKeys,
     );
     if (inserts.length > 0) {
-      const { error: imgErr } = await service
-        .from("form_submission_images")
-        .insert(inserts);
-      if (imgErr)
-        throw new Error(`image rows insert failed: ${imgErr.message}`);
+      const values: unknown[] = [];
+      const placeholders = inserts
+        .map((row, i) => {
+          const base = i * 10;
+          values.push(
+            row.submission_id,
+            row.storage_bucket,
+            row.storage_path,
+            row.public_url,
+            row.is_public,
+            row.content_type,
+            row.file_size_bytes,
+            row.width,
+            row.height,
+            row.variant,
+          );
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10})`;
+        })
+        .join(", ");
+      await query(
+        `INSERT INTO form_submission_images
+           (submission_id, storage_bucket, storage_path, public_url, is_public, content_type, file_size_bytes, width, height, variant)
+         VALUES ${placeholders}`,
+        values,
+      );
     }
     return ok(
       { id: created.id, status: created.status, image_count: files.length },
@@ -328,26 +362,25 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   } catch (err) {
     // Roll back: remove any uploaded objects and the submission row. Log cleanup
     // failures so any orphaned objects/rows are at least observable.
-    if (uploadedPaths.length > 0) {
-      const { error: rmErr } = await service.storage
-        .from(BUCKET)
-        .remove(uploadedPaths);
-      if (rmErr) {
-        console.error(
-          "[mobile-api] get-listed cleanup (storage) failed:",
-          rmErr.message,
-          uploadedPaths,
-        );
-      }
+    if (uploadedKeys.length > 0) {
+      await Promise.allSettled(
+        uploadedKeys.map((key) =>
+          deleteFile(key).catch((rmErr) =>
+            console.error(
+              "[mobile-api] get-listed cleanup (storage) failed:",
+              rmErr,
+              key,
+            ),
+          ),
+        ),
+      );
     }
-    const { error: delErr } = await service
-      .from("form_submissions")
-      .delete()
-      .eq("id", created.id);
-    if (delErr) {
+    try {
+      await query(`DELETE FROM form_submissions WHERE id = $1`, [created.id]);
+    } catch (delErr) {
       console.error(
         "[mobile-api] get-listed cleanup (row) failed:",
-        delErr.message,
+        delErr,
         created.id,
       );
     }

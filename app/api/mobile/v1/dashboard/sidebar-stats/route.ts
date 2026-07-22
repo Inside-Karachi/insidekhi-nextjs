@@ -73,12 +73,32 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     });
   }
 
-  const [reviewsResult, bookingsResult, favoritesResult] = await Promise.all([
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const [
+    reviewsResult,
+    bookingsResult,
+    favoritesResult,
+    weeklyXpResult,
+    weeklyBookingsResult,
+    weeklyReviewsResult,
+  ] = await Promise.all([
     query(`SELECT COUNT(*) FROM reviews WHERE user_id = $1`, [user.id]),
     query(`SELECT COUNT(*) FROM bookings WHERE user_id = $1`, [user.id]),
     query(`SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1`, [
       user.id,
     ]),
+    query(
+      `SELECT COALESCE(SUM(points), 0) AS total FROM points_log WHERE user_id = $1 AND created_at >= $2`,
+      [user.id, sevenDaysAgo],
+    ),
+    query(
+      `SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND payment_status = 'paid' AND created_at >= $2`,
+      [user.id, sevenDaysAgo],
+    ),
+    query(
+      `SELECT COUNT(*) FROM reviews WHERE user_id = $1 AND created_at >= $2`,
+      [user.id, sevenDaysAgo],
+    ),
   ]);
   return ok({
     role: role ?? "user",
@@ -86,6 +106,11 @@ export const GET = mobileRoute(async (request: NextRequest) => {
       reviews: parseInt(reviewsResult.rows[0].count, 10) || 0,
       bookings: parseInt(bookingsResult.rows[0].count, 10) || 0,
       favorites: parseInt(favoritesResult.rows[0].count, 10) || 0,
+    },
+    weekly: {
+      xp_earned: parseInt(weeklyXpResult.rows[0].total, 10) || 0,
+      events_attended: parseInt(weeklyBookingsResult.rows[0].count, 10) || 0,
+      reviews_written: parseInt(weeklyReviewsResult.rows[0].count, 10) || 0,
     },
   });
 });

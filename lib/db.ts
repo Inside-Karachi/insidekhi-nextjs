@@ -62,6 +62,7 @@ const RETRYABLE_ERROR_PATTERNS = [
   "Connection terminated",
   "ECONNRESET",
   "EAI_AGAIN",
+  "ENOTFOUND",
   "socket hang up",
   "connection to server was lost",
   "Client has encountered a connection error and is not queryable",
@@ -93,13 +94,8 @@ function isRetryableConnectionError(error: unknown): boolean {
 }
 
 export async function query(text: string, params?: unknown[]) {
-  const start = Date.now();
   try {
     const res = await pool.query(text, params);
-    const duration = Date.now() - start;
-    if (process.env.NODE_ENV === "development") {
-      console.log("executed query", { text, duration, rows: res.rowCount });
-    }
     return res;
   } catch (error) {
     if (isRetryableConnectionError(error)) {
@@ -107,10 +103,6 @@ export async function query(text: string, params?: unknown[]) {
       await new Promise((resolve) => setTimeout(resolve, 300));
       try {
         const res = await pool.query(text, params);
-        const duration = Date.now() - start;
-        if (process.env.NODE_ENV === "development") {
-          console.log("executed query (retry)", { text, duration, rows: res.rowCount });
-        }
         return res;
       } catch (retryError) {
         console.error("query error (after retry)", { text, error: retryError });

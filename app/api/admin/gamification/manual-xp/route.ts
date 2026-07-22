@@ -3,6 +3,7 @@ import { getSessionFromCookies } from "@/lib/auth/session";
 import { query } from "@/lib/db";
 import { awardXP } from "@/lib/gamification";
 import { logAuditEvent } from "@/lib/audit";
+import type { UserRole } from "@/types/auth.types";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
 
 export async function POST(request: NextRequest) {
@@ -19,7 +20,7 @@ export async function POST(request: NextRequest) {
       `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
       [session.userId],
     );
-    const adminProfile = adminProfileRows[0] as { role: string } | undefined;
+    const adminProfile = adminProfileRows[0] as { role: UserRole } | undefined;
 
     if (!adminProfile || !isGamificationOperatorRole(adminProfile.role)) {
       return NextResponse.json(

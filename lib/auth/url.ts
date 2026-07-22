@@ -59,3 +59,10 @@ export function getGoogleCallbackUrl(requestUrl?: string): string {
     resolveSiteOrigin(requestUrl)
   ).toString();
 }
+
+export function getAppleCallbackUrl(requestUrl?: string): string {
+  return new URL(
+    "/api/auth/apple/callback",
+    resolveSiteOrigin(requestUrl)
+  ).toString();
+}

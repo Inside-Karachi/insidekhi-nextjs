@@ -21,6 +21,7 @@ import { PasswordInput } from "@/components/auth/PasswordInput";
 import { AuthBackground } from "@/components/auth/AuthBackground";
 import { AuthFormPanel, WelcomePanel } from "@/components/auth/GlassPanel";
 import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
+import { AppleSignInButton } from "@/components/auth/AppleSignInButton";
 import { useToast } from "@/hooks/use-toast";
 
 function LoginForm() {
@@ -358,6 +359,22 @@ function LoginForm() {
                 transition={{ duration: 0.6, delay: 0.55 }}
               >
                 <GoogleSignInButton
+                  next={
+                    searchParams.get("next") ||
+                    searchParams.get("returnUrl") ||
+                    undefined
+                  }
+                />
+              </motion.div>
+
+              {/* Apple Sign In */}
+              <motion.div
+                className="mt-3"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.6 }}
+              >
+                <AppleSignInButton
                   next={
                     searchParams.get("next") ||
                     searchParams.get("returnUrl") ||

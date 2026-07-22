@@ -22,6 +22,7 @@ import { PasswordInput } from "@/components/auth/PasswordInput";
 import { AuthBackground } from "@/components/auth/AuthBackground";
 import { AuthFormPanel, WelcomePanel } from "@/components/auth/GlassPanel";
 import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
+import { AppleSignInButton } from "@/components/auth/AppleSignInButton";
 import { useToast } from "@/hooks/use-toast";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useRecaptcha } from "@/hooks/useRecaptcha";
@@ -589,6 +590,19 @@ function SignupContent() {
                 <GoogleSignInButton
                   invite={inviteCode || undefined}
                   label="Sign up with Google"
+                />
+              </motion.div>
+
+              {/* Apple Sign In */}
+              <motion.div
+                className="mt-3"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.6 }}
+              >
+                <AppleSignInButton
+                  invite={inviteCode || undefined}
+                  label="Sign up with Apple"
                 />
               </motion.div>
 

@@ -20,6 +20,7 @@ import {
 import { PasswordInput } from "@/components/auth/PasswordInput";
 import { AuthBackground } from "@/components/auth/AuthBackground";
 import { AuthFormPanel, WelcomePanel } from "@/components/auth/GlassPanel";
+import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
 import { useToast } from "@/hooks/use-toast";
 
 function LoginForm() {
@@ -337,6 +338,33 @@ function LoginForm() {
                   )}
                 </Button>
               </motion.form>
+
+              {/* Divider */}
+              <motion.div
+                className="my-6 flex items-center gap-3"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.6, delay: 0.5 }}
+              >
+                <div className="h-px flex-1 bg-white/20" />
+                <span className="text-xs text-white/60">OR</span>
+                <div className="h-px flex-1 bg-white/20" />
+              </motion.div>
+
+              {/* Google Sign In */}
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.55 }}
+              >
+                <GoogleSignInButton
+                  next={
+                    searchParams.get("next") ||
+                    searchParams.get("returnUrl") ||
+                    undefined
+                  }
+                />
+              </motion.div>
 
               {/* Sign Up Link */}
               <motion.div

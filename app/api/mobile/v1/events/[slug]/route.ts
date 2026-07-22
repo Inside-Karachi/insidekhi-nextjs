@@ -21,7 +21,7 @@ const EVENT_CARD_SQL_COLUMNS =
   "event_id, event_name, event_slug, event_description, event_status, " +
   "to_json(start_time) #>> '{}' AS start_time, " +
   "to_json(end_time) #>> '{}' AS end_time, " +
-  "is_featured, organizer_name, organizer_avatar, location_name, address, latitude, longitude";
+  "is_featured, organizer_id, organizer_name, organizer_avatar, location_name, address, latitude, longitude";
 
 const EVENT_IMAGE_SQL_COLUMNS = "id, url, alt_text, display_order";
 
@@ -57,7 +57,7 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
 
   const eventId = Number(eventRow.event_id);
 
-  const [imagesRes, ticketsRes] = await Promise.all([
+  const [imagesRes, ticketsRes, organizerRes] = await Promise.all([
     query(
       `SELECT ${EVENT_IMAGE_SQL_COLUMNS} FROM event_images
        WHERE event_id = $1 ORDER BY display_order ASC LIMIT $2`,
@@ -68,6 +68,12 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
        WHERE event_id = $1 ORDER BY price ASC, id ASC`,
       [eventId],
     ),
+    eventRow.organizer_id
+      ? query(
+          `SELECT username, is_verified_organizer FROM profiles WHERE id = $1`,
+          [eventRow.organizer_id],
+        )
+      : Promise.resolve({ rows: [] as { username: string | null; is_verified_organizer: boolean | null }[] }),
   ]);
 
   const images = imagesRes.rows.map(
@@ -82,11 +88,17 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
       }) as unknown as TicketTypeRow,
   );
 
+  const organizerProfile = organizerRes.rows[0];
+
   return ok({
-    event: toEventCard({
-      ...eventRow,
-      event_id: eventId,
-    } as unknown as EventCardRow),
+    event: {
+      ...toEventCard({
+        ...eventRow,
+        event_id: eventId,
+      } as unknown as EventCardRow),
+      organizer_username: organizerProfile?.username ?? null,
+      organizer_is_verified: organizerProfile?.is_verified_organizer ?? false,
+    },
     images: images.map(toEventImage),
     ticket_types: tickets.map(toTicketType),
   });

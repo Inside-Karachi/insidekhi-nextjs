@@ -35,16 +35,16 @@ export async function POST(request: NextRequest) {
   try {
     // 1. Fetch user credentials and profile
     const { rows } = await query(
-      `SELECT p.id, p.role, u.email_confirmed_at, u.encrypted_password 
-       FROM public.profiles p 
-       LEFT JOIN auth.users u ON p.id = u.id 
+      `SELECT p.id, p.role, u.email_confirmed_at, u.encrypted_password, u.raw_app_meta_data
+       FROM public.profiles p
+       LEFT JOIN auth.users u ON p.id = u.id
        WHERE LOWER(u.email) = LOWER($1) LIMIT 1`,
       [email]
     );
 
     const dbUser = rows[0];
 
-    if (!dbUser || !dbUser.encrypted_password) {
+    if (!dbUser) {
       // Log failed login attempt
       try {
         const { logFailedLogin } = await import("@/lib/audit");
@@ -59,6 +59,23 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json(
         { error: "Invalid credentials. Please try again." },
+        { status: 401 },
+      );
+    }
+
+    if (!dbUser.encrypted_password) {
+      // Account exists but was created via an OAuth provider (Google/Apple) and has no password set.
+      const providers: string[] = dbUser.raw_app_meta_data?.providers ?? [];
+      const providerLabel = providers.includes("apple")
+        ? "Apple"
+        : providers.includes("google")
+          ? "Google"
+          : "a third-party";
+      return NextResponse.json(
+        {
+          error: `This account uses ${providerLabel} Sign-In. Please continue with ${providerLabel} to log in.`,
+          code: "oauth_only_account",
+        },
         { status: 401 },
       );
     }

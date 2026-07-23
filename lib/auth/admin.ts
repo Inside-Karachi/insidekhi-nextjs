@@ -35,6 +35,24 @@ export function isStaffRole(role: UserRole): boolean {
 }
 
 /**
+ * Checks if a user role is the limited listing data-entry role
+ */
+export function isDataEntryRole(role: UserRole): boolean {
+  return role === "data_entry";
+}
+
+/**
+ * Roles allowed to view/edit listing capacity fields
+ */
+export function canAccessListingCapacity(role: UserRole): boolean {
+  return (
+    isDataEntryRole(role) ||
+    isStaffRole(role) ||
+    isAdminRole(role)
+  );
+}
+
+/**
  * Checks if a user role has super admin privileges
  */
 export function isSuperAdminRole(role: UserRole): boolean {
@@ -50,7 +68,9 @@ export function getAdminAuthErrorStatus(error: unknown): 401 | 403 | null {
 
   if (
     message === "Admin access required" ||
-    message === "Super admin access required"
+    message === "Super admin access required" ||
+    message === "Listing capacity access required" ||
+    message === "Staff access required"
   ) {
     return 403;
   }
@@ -180,6 +200,57 @@ export async function requireStaff(
     };
   } catch (error) {
     console.error("Staff authentication failed:", error);
+    throw error;
+  }
+}
+
+/**
+ * Requires access to listing capacity data-entry endpoints
+ * Allows data_entry, lister, admin, and super_admin
+ */
+export async function requireListingCapacityAccess(
+  request: NextRequest,
+  knownUser?: MiddlewareAuthUser,
+): Promise<AdminAuthResult> {
+  try {
+    let userId: string;
+    let userEmail: string | undefined;
+
+    if (knownUser) {
+      userId = knownUser.id;
+      userEmail = knownUser.email;
+    } else {
+      const session = await getSession(request);
+      if (!session) {
+        throw new Error("Authentication required");
+      }
+      userId = session.userId;
+      userEmail = session.email;
+    }
+
+    const { rows } = await query(
+      "SELECT * FROM profiles WHERE id = $1 LIMIT 1",
+      [userId]
+    );
+    const profile = rows[0] as Profile | undefined;
+
+    if (!profile) {
+      throw new Error("Profile not found");
+    }
+
+    if (!canAccessListingCapacity(profile.role)) {
+      throw new Error("Listing capacity access required");
+    }
+
+    return {
+      user: {
+        id: userId,
+        email: userEmail,
+      },
+      profile,
+    };
+  } catch (error) {
+    console.error("Listing capacity authentication failed:", error);
     throw error;
   }
 }

@@ -2123,7 +2123,11 @@ export type Database = {
           latitude: number | null
           location: unknown
           longitude: number | null
+          max_guest_capacity: number | null
+          max_price_per_person: number | null
           menu_pdf_url: string | null
+          min_guest_capacity: number | null
+          min_price_per_person: number | null
           name: string
           owner_id: string | null
           parking_amenities: Json | null
@@ -2160,7 +2164,11 @@ export type Database = {
           latitude?: number | null
           location?: unknown
           longitude?: number | null
+          max_guest_capacity?: number | null
+          max_price_per_person?: number | null
           menu_pdf_url?: string | null
+          min_guest_capacity?: number | null
+          min_price_per_person?: number | null
           name: string
           owner_id?: string | null
           parking_amenities?: Json | null
@@ -2197,7 +2205,11 @@ export type Database = {
           latitude?: number | null
           location?: unknown
           longitude?: number | null
+          max_guest_capacity?: number | null
+          max_price_per_person?: number | null
           menu_pdf_url?: string | null
+          min_guest_capacity?: number | null
+          min_price_per_person?: number | null
           name?: string
           owner_id?: string | null
           parking_amenities?: Json | null
@@ -5468,6 +5480,7 @@ export type Database = {
         | "organizer"
         | "admin"
         | "super_admin"
+        | "data_entry"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -5724,6 +5737,7 @@ export const Constants = {
         "organizer",
         "admin",
         "super_admin",
+        "data_entry",
       ],
     },
   },

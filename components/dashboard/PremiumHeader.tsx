@@ -388,6 +388,9 @@ export function PremiumHeader({
                             if (activeRole === "lister") {
                               return "Lister";
                             }
+                            if (activeRole === "data_entry") {
+                              return "Data Entry";
+                            }
                             if (activeRole === "organizer") {
                               return "Organizer";
                             }

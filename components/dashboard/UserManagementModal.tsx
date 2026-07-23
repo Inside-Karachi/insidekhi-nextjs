@@ -75,7 +75,7 @@ export function UserManagementModal({
   isLoading = false,
   currentUserRole = "admin",
   mode = "edit",
-  adminVisibleRoles = ["writer", "lister", "organizer"],
+  adminVisibleRoles = ["writer", "lister", "organizer", "data_entry"],
 }: UserManagementModalProps) {
   const { toast } = useToast();
   const [formData, setFormData] = React.useState<Partial<User>>({
@@ -345,6 +345,8 @@ export function UserManagementModal({
         return <PenTool className="h-4 w-4" />;
       case "lister":
         return <MapPin className="h-4 w-4" />;
+      case "data_entry":
+        return <MapPin className="h-4 w-4" />;
       default:
         return <User className="h-4 w-4" />;
     }
@@ -362,6 +364,8 @@ export function UserManagementModal({
         return "bg-orange-500/10 text-orange-700 border-orange-500/20";
       case "lister":
         return "bg-pink-500/10 text-pink-700 border-pink-500/20";
+      case "data_entry":
+        return "bg-amber-500/10 text-amber-700 border-amber-500/20";
       default:
         return "bg-gray-500/10 text-gray-700 border-gray-500/20";
     }
@@ -781,6 +785,7 @@ export function UserManagementModal({
                             },
                             { value: "writer", label: "Writer" },
                             { value: "lister", label: "Lister" },
+                            { value: "data_entry", label: "Data Entry" },
                             { value: "organizer", label: "Event Organizer" },
                             { value: "admin", label: "Admin" },
                             { value: "super_admin", label: "Super Admin" },
@@ -846,6 +851,9 @@ export function UserManagementModal({
                             </SelectItem>
                             <SelectItem value="writer">Writer</SelectItem>
                             <SelectItem value="lister">Lister</SelectItem>
+                            <SelectItem value="data_entry">
+                              Data Entry
+                            </SelectItem>
                             <SelectItem value="organizer">
                               Event Organizer
                             </SelectItem>

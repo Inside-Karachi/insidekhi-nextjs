@@ -75,6 +75,7 @@ const listerNavigation = [
     href: "/admin/listings/approvals",
     icon: ClipboardCheck,
   },
+  { name: "Listing Capacity", href: "/admin/listing-capacity", icon: Store },
   { name: "Event Management", href: "/admin/events", icon: Calendar },
   {
     name: "Event Approvals",
@@ -83,6 +84,16 @@ const listerNavigation = [
   },
   { name: "Review Moderation", href: "/admin/reviews", icon: Star },
   { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList },
+];
+
+// Limited data-entry navigation — capacity fields only
+const dataEntryNavigation = [
+  { name: "Home", href: "/", icon: Home },
+  {
+    name: "Listing Capacity",
+    href: "/admin/listing-capacity",
+    icon: Store,
+  },
 ];
 
 // Organizer-focused navigation
@@ -128,6 +139,11 @@ const adminNavigation: SidebarNavItem[] = [
     name: "Listing Management",
     href: "/admin/listings",
     icon: MapPin,
+  },
+  {
+    name: "Listing Capacity",
+    href: "/admin/listing-capacity",
+    icon: Store,
   },
   {
     name: "Listing Approvals",
@@ -186,6 +202,11 @@ const listerSecondaryNavigation = [
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
 
+const dataEntrySecondaryNavigation = [
+  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
+  { name: "Settings", href: "/dashboard/settings", icon: Settings },
+];
+
 interface ProfileShape {
   id: string;
   full_name?: string | null;
@@ -238,12 +259,13 @@ export function PremiumSidebar({
   // Determine user type based on active role
   const isAdmin = activeRole === "admin" || activeRole === "super_admin";
   const isLister = activeRole === "lister";
+  const isDataEntry = activeRole === "data_entry";
   const isOrganizer = activeRole === "organizer";
   const isBusinessOwner = activeRole === "business_owner";
 
   // Only fetch gamification data for regular users
   const shouldShowGamification =
-    !isAdmin && !isLister && !isOrganizer && !isBusinessOwner;
+    !isAdmin && !isLister && !isDataEntry && !isOrganizer && !isBusinessOwner;
   const { xpTotal, rank } = useUserGamification(
     shouldShowGamification ? user.id : "",
   );
@@ -317,10 +339,11 @@ export function PremiumSidebar({
   const dynamicNavigation = React.useMemo(() => {
     if (isAdmin) return adminMainNavigation;
     if (isLister) return listerNavigation;
+    if (isDataEntry) return dataEntryNavigation;
     if (isOrganizer) return organizerMainNavigation;
     if (isBusinessOwner) return businessOwnerNavigation;
     return navigation;
-  }, [isAdmin, isLister, isOrganizer, isBusinessOwner]);
+  }, [isAdmin, isLister, isDataEntry, isOrganizer, isBusinessOwner]);
 
   // Create admin section for admin users
   const adminSection = React.useMemo(() => {
@@ -346,10 +369,11 @@ export function PremiumSidebar({
   const dynamicSecondaryNavigation = React.useMemo(() => {
     if (isAdmin) return adminSecondaryNavigation;
     if (isLister) return listerSecondaryNavigation;
+    if (isDataEntry) return dataEntrySecondaryNavigation;
     if (isOrganizer) return organizerSecondaryNavigation;
     if (isBusinessOwner) return businessOwnerSecondaryNavigation;
     return secondaryNavigation; // Public users get achievements
-  }, [isAdmin, isLister, isOrganizer, isBusinessOwner]);
+  }, [isAdmin, isLister, isDataEntry, isOrganizer, isBusinessOwner]);
 
   const handleSignOut = async () => {
     try {
@@ -399,17 +423,21 @@ export function PremiumSidebar({
                           ? "bg-gradient-to-br from-red-500 to-red-600"
                           : isLister
                             ? "bg-gradient-to-br from-primary to-primary/80"
-                            : isOrganizer
-                              ? "bg-gradient-to-br from-purple-500 to-purple-600"
-                              : isBusinessOwner
-                                ? "bg-gradient-to-br from-blue-500 to-blue-600"
-                                : "bg-gradient-to-br from-primary to-primary/80",
+                            : isDataEntry
+                              ? "bg-gradient-to-br from-amber-500 to-amber-600"
+                              : isOrganizer
+                                ? "bg-gradient-to-br from-purple-500 to-purple-600"
+                                : isBusinessOwner
+                                  ? "bg-gradient-to-br from-blue-500 to-blue-600"
+                                  : "bg-gradient-to-br from-primary to-primary/80",
                       )}
                     >
                       {isAdmin ? (
                         <Shield className="h-6 w-6 text-white" />
                       ) : isLister ? (
                         <MapPin className="h-6 w-6 text-white" />
+                      ) : isDataEntry ? (
+                        <Store className="h-6 w-6 text-white" />
                       ) : isOrganizer ? (
                         <Calendar className="h-6 w-6 text-white" />
                       ) : isBusinessOwner ? (
@@ -426,11 +454,13 @@ export function PremiumSidebar({
                             ? "Administrator"
                             : isLister
                               ? "Content Manager"
-                              : isOrganizer
-                                ? "Event Organizer"
-                                : isBusinessOwner
-                                  ? "Business Owner"
-                                  : currentRankDisplay || "Unranked"}
+                              : isDataEntry
+                                ? "Data Entry"
+                                : isOrganizer
+                                  ? "Event Organizer"
+                                  : isBusinessOwner
+                                    ? "Business Owner"
+                                    : currentRankDisplay || "Unranked"}
                       </h3>
                       <p className="text-sm text-muted-foreground">
                         {activeRole === "public_user"
@@ -439,11 +469,13 @@ export function PremiumSidebar({
                             ? "Staff Account"
                             : isLister
                               ? "Lister Account"
-                              : isOrganizer
-                                ? "Organizer Account"
-                                : isBusinessOwner
-                                  ? "Business Account"
-                                  : `${xpTotal || profile?.points || 0} XP`}
+                              : isDataEntry
+                                ? "Listing Capacity"
+                                : isOrganizer
+                                  ? "Organizer Account"
+                                  : isBusinessOwner
+                                    ? "Business Account"
+                                    : `${xpTotal || profile?.points || 0} XP`}
                       </p>
                     </div>
                   </div>

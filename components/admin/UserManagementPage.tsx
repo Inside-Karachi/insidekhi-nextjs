@@ -60,6 +60,7 @@ const ALL_ROLE_OPTIONS = [
   { value: "business_owner", label: "Business Owner" },
   { value: "writer", label: "Writer" },
   { value: "lister", label: "Lister" },
+  { value: "data_entry", label: "Data Entry" },
   { value: "organizer", label: "Organizer" },
   { value: "admin", label: "Admin" },
   { value: "super_admin", label: "Super Admin" },
@@ -67,7 +68,7 @@ const ALL_ROLE_OPTIONS = [
 
 export function UserManagementPage({
   currentUserRole,
-  adminVisibleRoles = ["writer", "lister", "organizer"],
+  adminVisibleRoles = ["writer", "lister", "organizer", "data_entry"],
 }: UserManagementPageProps) {
   const [users, setUsers] = React.useState<User[]>([]);
   const [filteredUsers, setFilteredUsers] = React.useState<User[]>([]);

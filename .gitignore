@@ -29,6 +29,9 @@ yarn-error.log*
 .env*.local
 .env
 
+# local CSV exports (listing categorization, etc.)
+/exports/
+
 # vercel
 .vercel
 

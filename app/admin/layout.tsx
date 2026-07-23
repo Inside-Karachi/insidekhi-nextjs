@@ -16,11 +16,12 @@ export default async function AdminLayout({
     redirect("/login");
   }
 
-  // Check if user has admin access
+  // Check if user has admin / staff / data-entry access
   const isAdmin =
     profile.role === "admin" ||
     profile.role === "super_admin" ||
-    profile.role === "lister";
+    profile.role === "lister" ||
+    profile.role === "data_entry";
 
   if (!isAdmin) {
     redirect("/dashboard");

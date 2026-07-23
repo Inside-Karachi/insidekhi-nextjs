@@ -105,6 +105,7 @@ export async function PUT(
       "business_owner",
       "writer",
       "lister",
+      "data_entry",
       "organizer",
       "admin",
       "super_admin",

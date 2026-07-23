@@ -1174,8 +1174,12 @@ async function transformRecordToListing(
       latitude && !isNaN(latitude) ? parseFloat(latitude.toFixed(8)) : null,
     longitude:
       longitude && !isNaN(longitude) ? parseFloat(longitude.toFixed(8)) : null,
+    max_guest_capacity: null,
+    max_price_per_person: null,
     menu_pdf_url:
       typeof processedMenuPdf === "string" ? processedMenuPdf : null,
+    min_guest_capacity: null,
+    min_price_per_person: null,
     name:
       typeof name === "string"
         ? String(sanitizeListingField(name, "text") ?? name)

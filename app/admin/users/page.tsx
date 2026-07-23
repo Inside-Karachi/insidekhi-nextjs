@@ -26,7 +26,7 @@ export default async function AdminUsersPage() {
     visibleRolesConfig?.config_value,
   )
     ? (visibleRolesConfig.config_value as string[])
-    : ["writer", "lister", "organizer"];
+    : ["writer", "lister", "organizer", "data_entry"];
 
   return (
     <div className="space-y-8">

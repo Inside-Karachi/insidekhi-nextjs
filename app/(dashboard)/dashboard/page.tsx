@@ -163,6 +163,11 @@ export default async function DashboardPage() {
     redirect("/login");
   }
 
+  // Limited data-entry accounts only use the listing capacity tool
+  if (rawProfile.role === "data_entry") {
+    redirect("/admin/listing-capacity");
+  }
+
   // Map database object back to Supabase client shape expected by components
   const profile = {
     ...rawProfile,

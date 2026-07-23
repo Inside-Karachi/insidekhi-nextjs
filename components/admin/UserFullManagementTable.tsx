@@ -138,6 +138,8 @@ export function UserFullManagementTable({
         return <PenTool className="h-4 w-4" />;
       case "lister":
         return <MapPin className="h-4 w-4" />;
+      case "data_entry":
+        return <MapPin className="h-4 w-4" />;
       default:
         return <User className="h-4 w-4" />;
     }
@@ -155,6 +157,8 @@ export function UserFullManagementTable({
         return "from-orange-500/20 via-orange-500/15 to-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/30 dark:border-orange-500/40 bg-gradient-to-r";
       case "lister":
         return "from-teal-500/20 via-teal-500/15 to-teal-500/10 text-teal-700 dark:text-teal-300 border-teal-500/30 dark:border-teal-500/40 bg-gradient-to-r";
+      case "data_entry":
+        return "from-amber-500/20 via-amber-500/15 to-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30 dark:border-amber-500/40 bg-gradient-to-r";
       default:
         return "from-gray-500/20 via-gray-500/15 to-gray-500/10 text-gray-700 dark:text-gray-300 border-gray-500/30 dark:border-gray-500/40 bg-gradient-to-r";
     }

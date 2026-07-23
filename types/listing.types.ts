@@ -255,3 +255,31 @@ export interface BranchFormData {
 export interface BranchWithHours extends ListingBranch {
   opening_hours?: OpeningHour[];
 }
+
+/**
+ * Listing capacity / per-person pricing fields used by data-entry UI
+ */
+export interface ListingCapacityFields {
+  min_price_per_person: number | null;
+  max_price_per_person: number | null;
+  min_guest_capacity: number | null;
+  max_guest_capacity: number | null;
+}
+
+export interface ListingCapacityRow extends ListingCapacityFields {
+  id: number;
+  name: string;
+  slug: string;
+  status: Database["public"]["Enums"]["listing_status"];
+  category_id: number | null;
+  category_name?: string | null;
+  address?: string | null;
+  description?: string | null;
+  phone_number?: string | null;
+  website?: string | null;
+  image_url?: string | null;
+  image_alt?: string | null;
+}
+
+export type ListingCapacityCompleteness = "all" | "incomplete" | "complete";
+

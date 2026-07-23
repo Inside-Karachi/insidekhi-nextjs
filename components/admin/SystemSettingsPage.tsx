@@ -90,7 +90,12 @@ export function SystemSettingsPage() {
     useState("per_event");
 
   // Role Visibility states
-  const DEFAULT_ADMIN_VISIBLE_ROLES = ["writer", "lister", "organizer"];
+  const DEFAULT_ADMIN_VISIBLE_ROLES = [
+    "writer",
+    "lister",
+    "organizer",
+    "data_entry",
+  ];
   const TOGGLEABLE_ROLES = [
     {
       value: "business_owner",
@@ -106,6 +111,12 @@ export function SystemSettingsPage() {
       value: "lister",
       label: "Lister",
       description: "Users with listing management permissions",
+    },
+    {
+      value: "data_entry",
+      label: "Data Entry",
+      description:
+        "Limited accounts that only fill listing capacity and pricing fields",
     },
     {
       value: "organizer",

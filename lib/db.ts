@@ -12,8 +12,8 @@ const cleanConnectionString = connectionString
   ? connectionString.split("?")[0]
   : undefined;
 
-// Cache the pool on globalThis so Turbopack/webpack Fast Refresh (and Next.js
-// build workers within one process) don't spin up a new Pool on every reload.
+// Cache the pool on globalThis so Turbopack/webpack Fast Refresh (and warm
+// serverless isolates) don't spin up a new Pool per import.
 declare global {
   // eslint-disable-next-line no-var
   var __pgPool: Pool | undefined;
@@ -27,15 +27,29 @@ function isProductionBuildPhase(): boolean {
   );
 }
 
+/**
+ * Vercel / serverless: each concurrent function instance gets its own Pool.
+ * With DO Postgres ~25 slots (a few reserved for superuser), even max:3–5
+ * per instance exhausts the DB under load. Use max:1 unless overridden.
+ *
+ * Prefer DigitalOcean's *connection pool* URL (port 25061) over the direct
+ * DB URL (25060) in Vercel env vars.
+ */
+function resolvePoolMax(): number {
+  const fromEnv = Number(process.env.PG_POOL_MAX);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return Math.floor(fromEnv);
+  }
+  if (isProductionBuildPhase()) return 1;
+  // Serverless production: one connection per isolate.
+  if (process.env.VERCEL || process.env.NODE_ENV === "production") return 1;
+  return 4;
+}
+
 function createPool() {
   const building = isProductionBuildPhase();
   const isProd = process.env.NODE_ENV === "production";
-
-  // DO managed Postgres has a small connection cap (~25). Build-time SSG can
-  // spawn many workers that each open a pool — keep build max at 1 and never
-  // warm idle connections (min: 0) so we don't exhaust slots.
-  // Runtime serverless: keep max modest across concurrent lambdas.
-  const max = building ? 1 : isProd ? 5 : 4;
+  const max = resolvePoolMax();
 
   return new Pool({
     connectionString: cleanConnectionString,
@@ -46,16 +60,18 @@ function createPool() {
     max,
     min: 0,
 
-    // How long (ms) a connection can sit idle before being closed.
-    idleTimeoutMillis: isProd ? 30_000 : 10_000,
+    // Release idle connections quickly so slots aren't held by warm lambdas.
+    idleTimeoutMillis: isProd ? 5_000 : 10_000,
 
     // How long (ms) to wait when acquiring a connection from the pool.
-    // Fail fast instead of hanging indefinitely if DO is unreachable.
     connectionTimeoutMillis: building ? 8_000 : 5_000,
 
     // Recycle connections after 7500 uses to prevent long-lived connection
     // memory leaks on the DO managed Postgres side.
     maxUses: 7_500,
+
+    // Allow the process to exit even if idle clients linger (serverless).
+    allowExitOnIdle: true,
   });
 }
 
@@ -80,21 +96,17 @@ const RETRYABLE_ERROR_PATTERNS = [
   "sorry, too many clients already",
 ];
 
-// Standard Postgres connection-exception SQLSTATE codes (class 08) plus the
-// admin/crash-shutdown and cannot-connect-now codes (57P01/57P02/57P03) -
-// matching on these is more reliable than message text, which varies by
-// driver version and can drift out of sync with RETRYABLE_ERROR_PATTERNS.
 const RETRYABLE_ERROR_CODES = new Set([
-  "08000", // connection_exception
-  "08001", // sqlclient_unable_to_establish_sqlconnection
-  "08003", // connection_does_not_exist
-  "08004", // sqlserver_rejected_establishment_of_sqlconnection
-  "08006", // connection_failure
-  "08007", // transaction_resolution_unknown
-  "53300", // too_many_connections / remaining connection slots reserved
-  "57P01", // admin_shutdown
-  "57P02", // crash_shutdown
-  "57P03", // cannot_connect_now
+  "08000",
+  "08001",
+  "08003",
+  "08004",
+  "08006",
+  "08007",
+  "53300",
+  "57P01",
+  "57P02",
+  "57P03",
 ]);
 
 function isRetryableConnectionError(error: unknown): boolean {
@@ -106,14 +118,30 @@ function isRetryableConnectionError(error: unknown): boolean {
   return RETRYABLE_ERROR_PATTERNS.some((pattern) => message.includes(pattern));
 }
 
+function isConnectionSaturationError(error: unknown): boolean {
+  const code = (error as { code?: string } | undefined)?.code;
+  if (code === "53300") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("too many clients") ||
+    message.includes("remaining connection slots are reserved")
+  );
+}
+
 export async function query(text: string, params?: unknown[]) {
   try {
     const res = await pool.query(text, params);
     return res;
   } catch (error) {
     if (isRetryableConnectionError(error)) {
-      console.warn("query connection error, retrying once", { text, error });
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Saturation needs a longer backoff so other lambdas can release slots.
+      const delayMs = isConnectionSaturationError(error) ? 1200 : 300;
+      console.warn("query connection error, retrying once", {
+        text,
+        delayMs,
+        error,
+      });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
       try {
         const res = await pool.query(text, params);
         return res;

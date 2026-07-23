@@ -498,22 +498,6 @@ export default async function ListingPage({ params }: ListingPageProps) {
   );
 }
 
-export async function generateStaticParams() {
-  try {
-    const { rows: listings } = await query(
-      `SELECT slug FROM listings
-       WHERE status = 'published'
-       ORDER BY display_order DESC
-       LIMIT 20`,
-    );
-    return listings.map((listing) => ({
-      slug: String(listing.slug),
-    }));
-  } catch {
-    return [];
-  }
-}
-
 // Generate metadata for SEO
 export async function generateMetadata({ params }: ListingPageProps) {
   const { slug } = await params;
@@ -542,5 +526,8 @@ export async function generateMetadata({ params }: ListingPageProps) {
   }
 }
 
-// Enable ISR with 1 hour revalidation
-export const revalidate = 3600;
+// This page reads cookies (session/favorites via getFavoritedListingIdsForUser),
+// so it can never be statically cached — it bails to dynamic rendering at runtime
+// regardless. Render it on demand and skip the wasteful build-time prerender that
+// hammered the DB and crashed the build under connection exhaustion.
+export const dynamic = "force-dynamic";

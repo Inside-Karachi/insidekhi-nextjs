@@ -8,6 +8,8 @@ import { PremiumInsightsPanel } from "@/components/dashboard/PremiumInsightsPane
 import { PremiumQuickActions } from "@/components/dashboard/PremiumQuickActions";
 import { PremiumBottomSection } from "@/components/dashboard/PremiumBottomSection";
 import { InviteShareDashboardSection } from "@/components/dashboard/InviteShareDashboardSection";
+import { DashboardTabs } from "@/components/dashboard/DashboardTabs";
+import type { SavedLocation } from "@/components/dashboard/LocationSwitcher";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { query } from "@/lib/db";
 
@@ -84,12 +86,27 @@ interface ActivityItem {
   location?: string;
 }
 
-interface MinimalListing {
+interface NearbyListingRow {
   id: number;
   name: string;
   slug: string;
-  address?: string | null;
-  reviews?: { rating: number }[] | null;
+  address: string | null;
+  category_id: number;
+  category_name: string | null;
+  avg_rating: number | null;
+  distance_meters: number | null;
+  status: string;
+}
+
+interface RecommendedListing {
+  id: number;
+  name: string;
+  slug: string;
+  address: string;
+  rating?: number;
+  category?: string;
+  distanceKm?: number;
+  reason?: string;
 }
 
 interface Review {
@@ -216,6 +233,7 @@ export default async function DashboardPage() {
     allRanksRes,
     streakDataRes,
     previousWeekPointsRes,
+    savedLocationsRes,
   ] = await Promise.all([
     // 1. Points Log
     query(
@@ -335,6 +353,17 @@ export default async function DashboardPage() {
       `SELECT points FROM points_log WHERE user_id = $1 AND created_at >= $2 AND created_at < $3`,
       [user.id, previousWeekStart.toISOString(), previousWeekEnd.toISOString()]
     ),
+    // 15. Saved Locations (table may not exist yet if the migration hasn't run)
+    query(
+      `SELECT id, label, custom_label, address, latitude, longitude, is_active, created_at
+       FROM public.user_saved_locations
+       WHERE user_id = $1
+       ORDER BY is_active DESC, created_at ASC`,
+      [user.id],
+    ).catch((e) => {
+      console.error("Failed to load saved locations:", e);
+      return { rows: [] as SavedLocation[] };
+    }),
   ]);
 
   // Extract Data from Responses
@@ -351,7 +380,9 @@ export default async function DashboardPage() {
   const upcomingEvents = upcomingEventsRes.rows;
   const allRanks = allRanksRes.rows;
   const streakData = streakDataRes.rows[0];
-  const previousWeekPoints = previousWeekPointsRes.rows;;
+  const previousWeekPoints = previousWeekPointsRes.rows;
+  const savedLocations: SavedLocation[] = savedLocationsRes.rows;
+  const activeLocation = savedLocations.find((l) => l.is_active) || null;
 
   // --- Process Data & Derived State ---
 
@@ -445,37 +476,89 @@ export default async function DashboardPage() {
     .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
     .slice(0, 6);
 
-  // --- Retrieve Recommended Listings (Dependent on Favorites) ---
-  const favoriteCategories =
+  // --- Retrieve Recommended Listings (Favorites + Active Location) ---
+  const favoriteCategories: number[] =
     userFavorites?.map((f) => f.listing?.category_id).filter(Boolean) || [];
 
-  let recommendedListings: MinimalListing[] = [];
+  let recommendedListings: RecommendedListing[] = [];
 
-  if (favoriteCategories.length > 0) {
+  if (activeLocation) {
+    // Location-aware: pull nearby published listings ranked by distance,
+    // then bubble favorite-category matches to the top.
     try {
-      const res = await query(
-        `SELECT l.id, l.name, l.slug, l.address,
-                (SELECT json_agg(json_build_object('rating', r.rating)) FROM reviews r WHERE r.listing_id = l.id) AS reviews
-         FROM listings l
-         WHERE l.category_id = ANY($1) AND l.status = 'published'
-         LIMIT 4`,
-        [favoriteCategories]
+      const { rows: nearby } = await query(
+        `SELECT * FROM get_nearby_listings($1, $2, $3, $4)`,
+        [activeLocation.latitude, activeLocation.longitude, 10000, 16],
       );
-      recommendedListings = res.rows;
+
+      const published = (nearby as NearbyListingRow[]).filter(
+        (l) => l.status === "published",
+      );
+      const matched = published.filter((l) =>
+        favoriteCategories.includes(l.category_id),
+      );
+      const rest = published.filter(
+        (l) => !favoriteCategories.includes(l.category_id),
+      );
+
+      recommendedListings = [...matched, ...rest].slice(0, 6).map((l) => ({
+        id: l.id,
+        name: l.name,
+        slug: l.slug,
+        address: l.address || "Address not available",
+        rating: l.avg_rating ?? undefined,
+        category: l.category_name ?? undefined,
+        distanceKm: l.distance_meters != null ? l.distance_meters / 1000 : undefined,
+        reason: favoriteCategories.includes(l.category_id)
+          ? `Because you like ${l.category_name || "similar places"}`
+          : "Popular near your location",
+      }));
     } catch (e) {
-      console.error("Error fetching recommended listings:", e);
+      console.error("Error fetching location-based recommendations:", e);
     }
-  } else {
+  }
+
+  // Fallback (no active location, or the query above returned nothing)
+  if (recommendedListings.length === 0) {
     try {
-      const res = await query(
-        `SELECT l.id, l.name, l.slug, l.address,
-                (SELECT json_agg(json_build_object('rating', r.rating)) FROM reviews r WHERE r.listing_id = l.id) AS reviews
-         FROM listings l
-         WHERE l.status = 'published'
-         ORDER BY l.created_at DESC
-         LIMIT 4`
-      );
-      recommendedListings = res.rows;
+      const res = favoriteCategories.length > 0
+        ? await query(
+            `SELECT l.id, l.name, l.slug, l.address, c.name AS category_name,
+                    (SELECT json_agg(json_build_object('rating', r.rating)) FROM reviews r WHERE r.listing_id = l.id) AS reviews
+             FROM listings l
+             LEFT JOIN categories c ON l.category_id = c.id
+             WHERE l.category_id = ANY($1) AND l.status = 'published'
+             LIMIT 6`,
+            [favoriteCategories]
+          )
+        : await query(
+            `SELECT l.id, l.name, l.slug, l.address, c.name AS category_name,
+                    (SELECT json_agg(json_build_object('rating', r.rating)) FROM reviews r WHERE r.listing_id = l.id) AS reviews
+             FROM listings l
+             LEFT JOIN categories c ON l.category_id = c.id
+             WHERE l.status = 'published'
+             ORDER BY l.created_at DESC
+             LIMIT 6`
+          );
+
+      recommendedListings = res.rows.map((listing) => ({
+        id: listing.id,
+        name: listing.name,
+        slug: listing.slug,
+        address: listing.address || "Address not available",
+        category: listing.category_name ?? undefined,
+        reason:
+          favoriteCategories.length > 0
+            ? `Because you like ${listing.category_name || "similar places"}`
+            : "New on Inside Karachi",
+        rating:
+          listing.reviews && listing.reviews.length > 0
+            ? listing.reviews.reduce(
+                (sum: number, r: { rating: number }) => sum + r.rating,
+                0,
+              ) / listing.reviews.length
+            : undefined,
+      }));
     } catch (e) {
       console.error("Error fetching recommended listings:", e);
     }
@@ -483,6 +566,9 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-12 md:space-y-8 lg:space-y-12">
+      {/* Dashboard tab strip */}
+      <DashboardTabs />
+
       {/* Dashboard hero */}
       <PremiumDashboardHero
         user={{
@@ -506,6 +592,7 @@ export default async function DashboardPage() {
           reviewsWritten: weeklyReviews?.length || 0,
           eventsBooked: eventsBookedTotal || 0,
         }}
+        savedLocations={savedLocations}
       />
 
       {/* Stats grid */}
@@ -543,21 +630,7 @@ export default async function DashboardPage() {
 
       {/* Bottom section - two column layout */}
       <PremiumBottomSection
-        recommendations={
-          recommendedListings?.map((listing) => ({
-            id: listing.id,
-            name: listing.name,
-            address: listing.address || "Address not available",
-            slug: listing.slug,
-            rating:
-              listing.reviews && listing.reviews.length > 0
-                ? listing.reviews.reduce(
-                    (sum: number, r: { rating: number }) => sum + r.rating,
-                    0,
-                  ) / listing.reviews.length
-                : undefined,
-          })) || []
-        }
+        recommendations={recommendedListings}
         activities={recentActivity}
         upcomingEvents={
           upcomingEvents?.map((event) => ({

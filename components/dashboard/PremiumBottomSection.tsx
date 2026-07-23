@@ -36,6 +36,9 @@ interface Recommendation {
   address: string;
   slug: string;
   rating?: number;
+  category?: string;
+  distanceKm?: number;
+  reason?: string;
 }
 
 interface UpcomingEvent {
@@ -229,12 +232,18 @@ function RecommendationCard({
   title,
   subtitle,
   rating,
+  category,
+  distanceKm,
+  reason,
   href,
   delay = 0,
 }: {
   title: string;
   subtitle: string;
   rating?: number;
+  category?: string;
+  distanceKm?: number;
+  reason?: string;
   href: string;
   delay?: number;
 }) {
@@ -275,15 +284,38 @@ function RecommendationCard({
                 <p className="text-sm text-muted-foreground truncate">
                   {subtitle}
                 </p>
-                {rating && (
-                  <div className="flex items-center space-x-2">
+                <div className="flex items-center flex-wrap gap-2">
+                  {rating && (
                     <div className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-amber-500/15 border border-amber-500/20">
                       <Star className="h-3 w-3 text-amber-500 fill-current" />
                       <span className="text-xs font-medium text-amber-600 dark:text-amber-400">
                         {rating.toFixed(1)}
                       </span>
                     </div>
-                  </div>
+                  )}
+                  {category && (
+                    <div className="px-2 py-1 rounded-lg bg-primary/10 border border-primary/20">
+                      <span className="text-xs font-medium text-primary">
+                        {category}
+                      </span>
+                    </div>
+                  )}
+                  {typeof distanceKm === "number" && (
+                    <div className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-muted/60 border border-border/40">
+                      <MapPin className="h-3 w-3 text-muted-foreground" />
+                      <span className="text-xs font-medium text-muted-foreground">
+                        {distanceKm < 1
+                          ? `${Math.round(distanceKm * 1000)}m away`
+                          : `${distanceKm.toFixed(1)}km away`}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                {reason && (
+                  <p className="text-xs text-primary/80 font-medium flex items-center gap-1">
+                    <Sparkles className="h-3 w-3" />
+                    {reason}
+                  </p>
                 )}
               </div>
 
@@ -331,7 +363,7 @@ export function PremiumBottomSection({
               </h2>
             </div>
             <p className="text-sm md:text-lg text-muted-foreground">
-              Personalized recommendations based on your exploration history
+              Personalized picks based on your interests and location
             </p>
           </motion.div>
 
@@ -356,6 +388,9 @@ export function PremiumBottomSection({
                     title={place.name}
                     subtitle={place.address}
                     rating={place.rating}
+                    category={place.category}
+                    distanceKm={place.distanceKm}
+                    reason={place.reason}
                     href={`/listing/${place.slug}`}
                     delay={0.1 + index * 0.1}
                   />

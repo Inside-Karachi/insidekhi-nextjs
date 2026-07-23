@@ -9,6 +9,7 @@ import {
 } from "@/lib/notifications";
 import type { NotificationUserRole } from "@/types/notifications.types";
 import { canModerateShares } from "@/lib/auth/gamification-permissions";
+import type { UserRole } from "@/types/auth.types";
 
 const verifyShareSchema = z.object({
   share_id: z.number().int().positive(),
@@ -33,7 +34,7 @@ export async function POST(request: NextRequest) {
       "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
       [session.userId]
     );
-    const profile = profileRows[0] as { role: string } | undefined;
+    const profile = profileRows[0] as { role: UserRole } | undefined;
 
     if (!profile || !canModerateShares(profile.role)) {
       return NextResponse.json(

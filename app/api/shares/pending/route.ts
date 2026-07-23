@@ -2,6 +2,7 @@ import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { canModerateShares } from "@/lib/auth/gamification-permissions";
+import type { UserRole } from "@/types/auth.types";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +23,7 @@ export async function GET(_request: NextRequest) {
       "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
       [session.userId]
     );
-    const profile = profileRows[0] as { role: string } | undefined;
+    const profile = profileRows[0] as { role: UserRole } | undefined;
 
     if (!profile || !canModerateShares(profile.role)) {
       return NextResponse.json(

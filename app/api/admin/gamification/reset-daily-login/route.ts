@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { canManageGamificationSettings } from "@/lib/auth/gamification-permissions";
+import type { UserRole } from "@/types/auth.types";
 
 export async function POST(request: NextRequest) {
   const session = await getSessionFromCookies();
@@ -23,7 +24,7 @@ export async function POST(request: NextRequest) {
       `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
       [session.userId],
     );
-    const profile = profileRows[0] as { role: string } | undefined;
+    const profile = profileRows[0] as { role: UserRole } | undefined;
 
     if (!profile) {
       return NextResponse.json(

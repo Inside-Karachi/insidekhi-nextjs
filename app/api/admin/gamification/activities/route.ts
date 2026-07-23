@@ -11,6 +11,7 @@ import type { XPActivityUpsertRequest } from "@/types/gamification.types";
 import {
   isGamificationOperatorRole,
 } from "@/lib/auth/gamification-permissions";
+import type { UserRole } from "@/types/auth.types";
 
 /**
  * Verify user is super_admin
@@ -38,7 +39,7 @@ export async function GET(_request: NextRequest) {
       `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
       [session.userId],
     );
-    const profile = profileRows[0] as { role: string } | undefined;
+    const profile = profileRows[0] as { role: UserRole } | undefined;
 
     if (!profile) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { isGamificationOperatorRole } from "@/lib/auth/gamification-permissions";
+import type { UserRole } from "@/types/auth.types";
 
 /**
  * GET /api/admin/gamification/user-search?q=<term>
@@ -19,7 +20,7 @@ export async function GET(request: NextRequest) {
       `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
       [session.userId],
     );
-    const profile = profileRows[0] as { role: string } | undefined;
+    const profile = profileRows[0] as { role: UserRole } | undefined;
 
     if (!profile || !isGamificationOperatorRole(profile.role)) {
       return NextResponse.json(

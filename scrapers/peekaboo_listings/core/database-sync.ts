@@ -1138,7 +1138,7 @@ export class DatabaseSync {
           is_verified: (branch.is_verified as boolean) ?? false,
           custom_attributes: (branch.custom_attributes ||
             {}) as ListingBranch["custom_attributes"],
-        })) || []
+        } as ListingBranch)) || []
       );
     } catch (error) {
       console.error("[SYNC] Error fetching branches:", error);

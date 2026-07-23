@@ -28,12 +28,11 @@ function createPool() {
     // Connection pool sizing
     // Next.js serverless: keep max low to avoid exhausting DO's 25-connection limit
     // across concurrent lambda invocations.
-    max: 10,
-    min: 2, // Keep a couple warm connections to avoid cold-start latency
+    max: process.env.NODE_ENV === "production" ? 10 : 4,
+    min: process.env.NODE_ENV === "production" ? 2 : 0,
 
     // How long (ms) a connection can sit idle before being closed.
-    // 30s is a good balance — keeps connections warm without wasting resources.
-    idleTimeoutMillis: 30_000,
+    idleTimeoutMillis: process.env.NODE_ENV === "production" ? 30_000 : 10_000,
 
     // How long (ms) to wait when acquiring a connection from the pool.
     // Fail fast instead of hanging indefinitely if DO is unreachable.
@@ -66,6 +65,7 @@ const RETRYABLE_ERROR_PATTERNS = [
   "socket hang up",
   "connection to server was lost",
   "Client has encountered a connection error and is not queryable",
+  "remaining connection slots are reserved",
 ];
 
 // Standard Postgres connection-exception SQLSTATE codes (class 08) plus the
@@ -79,6 +79,7 @@ const RETRYABLE_ERROR_CODES = new Set([
   "08004", // sqlserver_rejected_establishment_of_sqlconnection
   "08006", // connection_failure
   "08007", // transaction_resolution_unknown
+  "53300", // too_many_connections / remaining connection slots reserved
   "57P01", // admin_shutdown
   "57P02", // crash_shutdown
   "57P03", // cannot_connect_now

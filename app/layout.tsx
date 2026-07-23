@@ -13,7 +13,6 @@ import { ConditionalLayout } from "@/components/layout/ConditionalLayout";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import RouteProgress from "@/components/layout/RouteProgress";
-import { PerformanceTracker } from "@/components/layout/PerformanceTracker";
 import { unstable_cache } from "next/cache";
 import { Suspense } from "react";
 
@@ -107,8 +106,6 @@ export default async function RootLayout({
                 <Suspense fallback={null}>
                   <RouteProgress />
                 </Suspense>
-                {/* Performance monitoring */}
-                <PerformanceTracker />
                 {children}
                 <Analytics />
                 <SpeedInsights />

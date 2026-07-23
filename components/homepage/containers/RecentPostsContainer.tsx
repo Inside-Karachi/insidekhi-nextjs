@@ -3,8 +3,9 @@ import { query } from "@/lib/db";
 import { RecentPostsSection } from "@/components/homepage/RecentPostsSection";
 
 export async function RecentPostsContainer() {
+  try {
     const { rows } = await query(
-        `SELECT p.id, p.title, p.slug, p.excerpt, p.featured_image_url,
+      `SELECT p.id, p.title, p.slug, p.excerpt, p.featured_image_url,
                 to_json(p.published_at) #>> '{}' AS published_at,
                 pr.full_name AS author_full_name
          FROM posts p
@@ -15,14 +16,18 @@ export async function RecentPostsContainer() {
     );
 
     const recentPosts = rows.map((row) => ({
-        id: Number(row.id),
-        title: row.title,
-        slug: row.slug,
-        excerpt: row.excerpt,
-        featured_image_url: row.featured_image_url,
-        published_at: row.published_at,
-        author: { full_name: row.author_full_name },
+      id: Number(row.id),
+      title: row.title,
+      slug: row.slug,
+      excerpt: row.excerpt,
+      featured_image_url: row.featured_image_url,
+      published_at: row.published_at,
+      author: { full_name: row.author_full_name },
     }));
 
     return <RecentPostsSection posts={recentPosts || []} />;
+  } catch (error) {
+    console.error("Recent posts fetch failed:", error);
+    return <RecentPostsSection posts={[]} />;
+  }
 }

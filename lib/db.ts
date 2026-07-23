@@ -8,35 +8,50 @@ if (!connectionString) {
 
 // Clean the query parameters (e.g. sslmode=require) from connectionString to prevent pg driver
 // from overriding the custom SSL configuration object below.
-const cleanConnectionString = connectionString ? connectionString.split("?")[0] : undefined;
+const cleanConnectionString = connectionString
+  ? connectionString.split("?")[0]
+  : undefined;
 
-// Cache the pool on globalThis so Turbopack/webpack Fast Refresh reusing this
-// module in dev doesn't spin up a new Pool (with its own min:2 warm
-// connections) on every hot reload, leaking connections against DO's cap.
+// Cache the pool on globalThis so Turbopack/webpack Fast Refresh (and Next.js
+// build workers within one process) don't spin up a new Pool on every reload.
 declare global {
   // eslint-disable-next-line no-var
   var __pgPool: Pool | undefined;
 }
 
+/** True while `next build` / export is prerendering pages. */
+function isProductionBuildPhase(): boolean {
+  return (
+    process.env.NEXT_PHASE === "phase-production-build" ||
+    process.env.NEXT_PHASE === "phase-export"
+  );
+}
+
 function createPool() {
+  const building = isProductionBuildPhase();
+  const isProd = process.env.NODE_ENV === "production";
+
+  // DO managed Postgres has a small connection cap (~25). Build-time SSG can
+  // spawn many workers that each open a pool — keep build max at 1 and never
+  // warm idle connections (min: 0) so we don't exhaust slots.
+  // Runtime serverless: keep max modest across concurrent lambdas.
+  const max = building ? 1 : isProd ? 5 : 4;
+
   return new Pool({
     connectionString: cleanConnectionString,
     ssl: connectionString?.includes("sslmode=require")
       ? { rejectUnauthorized: false }
       : undefined,
 
-    // Connection pool sizing
-    // Next.js serverless: keep max low to avoid exhausting DO's 25-connection limit
-    // across concurrent lambda invocations.
-    max: process.env.NODE_ENV === "production" ? 10 : 4,
-    min: process.env.NODE_ENV === "production" ? 2 : 0,
+    max,
+    min: 0,
 
     // How long (ms) a connection can sit idle before being closed.
-    idleTimeoutMillis: process.env.NODE_ENV === "production" ? 30_000 : 10_000,
+    idleTimeoutMillis: isProd ? 30_000 : 10_000,
 
     // How long (ms) to wait when acquiring a connection from the pool.
     // Fail fast instead of hanging indefinitely if DO is unreachable.
-    connectionTimeoutMillis: 5_000,
+    connectionTimeoutMillis: building ? 8_000 : 5_000,
 
     // Recycle connections after 7500 uses to prevent long-lived connection
     // memory leaks on the DO managed Postgres side.
@@ -45,11 +60,7 @@ function createPool() {
 }
 
 export const pool = global.__pgPool ?? createPool();
-
-if (process.env.NODE_ENV !== "production") {
-  global.__pgPool = pool;
-}
-
+global.__pgPool = pool;
 
 // Connection-level failures (never reached the server, so the query never
 // ran) that are safe to retry once - as opposed to errors from a query that
@@ -66,6 +77,7 @@ const RETRYABLE_ERROR_PATTERNS = [
   "connection to server was lost",
   "Client has encountered a connection error and is not queryable",
   "remaining connection slots are reserved",
+  "sorry, too many clients already",
 ];
 
 // Standard Postgres connection-exception SQLSTATE codes (class 08) plus the

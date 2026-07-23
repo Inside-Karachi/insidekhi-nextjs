@@ -27,14 +27,45 @@ function toNumericListingRow(row: Record<string, unknown>): ListingRowLike {
 }
 
 /**
- * GET /api/mobile/v1/user/recommendations?limit=
+ * Resolves a category id to the set of category names it covers: a top-level
+ * category expands to itself plus its subcategories, a subcategory resolves to
+ * just itself. Mirrors the expansion in GET /listings so filtering is
+ * consistent across the API. Returns null for an unknown/invalid id.
+ */
+async function resolveCategoryNames(
+  categoryParam: string | null,
+): Promise<string[] | null> {
+  if (!categoryParam || categoryParam === "all") return null;
+  const categoryId = Number(categoryParam);
+  if (!Number.isInteger(categoryId) || categoryId <= 0) return null;
+
+  const { rows } = await query(
+    `SELECT id, name, parent_id FROM categories WHERE id = $1`,
+    [categoryId],
+  );
+  const category = rows[0];
+  if (!category) return null;
+
+  if (category.parent_id === null) {
+    const { rows: subs } = await query(
+      `SELECT name FROM categories WHERE parent_id = $1`,
+      [category.id],
+    );
+    return [category.name, ...subs.map((s) => s.name)];
+  }
+  return [category.name];
+}
+
+/**
+ * GET /api/mobile/v1/user/recommendations?limit=&category=
  *
  * Personalized "Recommended For You" listings for the home screen. When the
  * caller has an active saved location, results are ranked by proximity to it
- * (via `get_nearby_listings`) with favorite-category matches bubbled to the
- * top. Otherwise falls back to featured/top-rated published listings. Returns
- * the same `ListingCard[]` shape as GET /listings so the client renders it
- * unchanged. Mirrors the website dashboard's recommendation logic.
+ * (via `get_nearby_listings`). Without a `category`, favorite-category matches
+ * are bubbled to the top; with one, results are scoped to that category (a
+ * top-level id includes its subcategories). Falls back to featured/top-rated
+ * published listings (within the category when given). Returns the same
+ * `ListingCard[]` shape as GET /listings so the client renders it unchanged.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
@@ -45,6 +76,11 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 20
     ? limitRaw
     : 6;
+
+  const categoryNames = await resolveCategoryNames(
+    searchParams.get("category"),
+  );
+  const hasCategory = categoryNames !== null && categoryNames.length > 0;
 
   // Active saved location + favorite categories drive the ranking.
   const [{ rows: activeRows }, { rows: favRows }] = await Promise.all([
@@ -74,40 +110,62 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   if (active) {
     try {
       const { rows: nearby } = await query(
-        `SELECT id, category_id, status FROM get_nearby_listings($1, $2, $3, $4)`,
-        [active.latitude, active.longitude, 10000, 24],
+        `SELECT id, category_id, category_name, status FROM get_nearby_listings($1, $2, $3, $4)`,
+        [active.latitude, active.longitude, 15000, 60],
       );
-      const published = nearby.filter((l) => l.status === "published");
-      const matched = published.filter((l) =>
-        favoriteCategories.includes(Number(l.category_id)),
-      );
-      const rest = published.filter(
-        (l) => !favoriteCategories.includes(Number(l.category_id)),
-      );
-      orderedIds = [...matched, ...rest].map((l) => Number(l.id)).slice(0, limit);
+      let published = nearby.filter((l) => l.status === "published");
+
+      if (hasCategory) {
+        // Scope strictly to the requested category (already distance-ordered).
+        const nameSet = new Set(categoryNames);
+        published = published.filter((l) => nameSet.has(l.category_name));
+        orderedIds = published.map((l) => Number(l.id)).slice(0, limit);
+      } else {
+        // General recs: float favorite-category matches to the top.
+        const matched = published.filter((l) =>
+          favoriteCategories.includes(Number(l.category_id)),
+        );
+        const rest = published.filter(
+          (l) => !favoriteCategories.includes(Number(l.category_id)),
+        );
+        orderedIds = [...matched, ...rest]
+          .map((l) => Number(l.id))
+          .slice(0, limit);
+      }
     } catch (error) {
       console.error("[mobile-api] nearby recommendations failed:", error);
     }
   }
 
-  // Fallback: favorite-category listings, else featured/top-rated.
+  // Fallback: featured/top-rated, scoped to the requested category when given,
+  // else favorite categories, else all published.
   if (orderedIds.length === 0) {
-    const { rows } =
-      favoriteCategories.length > 0
-        ? await query(
-            `SELECT id FROM listings_with_details
-             WHERE status = 'published' AND category_id = ANY($1::int[])
-             ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
-             LIMIT $2`,
-            [favoriteCategories, limit],
-          )
-        : await query(
-            `SELECT id FROM listings_with_details
-             WHERE status = 'published'
-             ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
-             LIMIT $1`,
-            [limit],
-          );
+    let rows;
+    if (hasCategory) {
+      ({ rows } = await query(
+        `SELECT id FROM listings_with_details
+         WHERE status = 'published' AND category_name = ANY($1::text[])
+         ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
+         LIMIT $2`,
+        [categoryNames, limit],
+      ));
+    } else if (favoriteCategories.length > 0) {
+      ({ rows } = await query(
+        `SELECT id FROM listings_with_details
+         WHERE status = 'published' AND category_id = ANY($1::int[])
+         ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
+         LIMIT $2`,
+        [favoriteCategories, limit],
+      ));
+    } else {
+      ({ rows } = await query(
+        `SELECT id FROM listings_with_details
+         WHERE status = 'published'
+         ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
+         LIMIT $1`,
+        [limit],
+      ));
+    }
     orderedIds = rows.map((r) => Number(r.id));
   }
 

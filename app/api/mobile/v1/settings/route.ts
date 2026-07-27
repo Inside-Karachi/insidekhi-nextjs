@@ -5,6 +5,7 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -40,17 +41,20 @@ type Settings = z.infer<typeof settingsSchema>;
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
-  // maybeSingle (not single): a brand-new user whose profiles row doesn't exist
-  // yet should get empty settings, not a 500.
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("user_preferences")
-    .eq("id", user.id)
-    .maybeSingle();
-  if (error) {
-    console.error("[mobile-api] settings fetch failed:", error.message);
+  let data;
+  try {
+    const result = await query(
+      `SELECT user_preferences FROM profiles WHERE id = $1`,
+      [user.id],
+    );
+    data = result.rows[0];
+  } catch (error) {
+    console.error(
+      "[mobile-api] settings fetch failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError("internal_error", "Failed to load settings.", 500);
   }
 
@@ -69,7 +73,7 @@ const updateSchema = z.object({ userPreferences: settingsSchema });
  */
 export const PATCH = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
 
   const parsed = updateSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
@@ -83,13 +87,18 @@ export const PATCH = mobileRoute(async (request: NextRequest) => {
   }
   const patch = parsed.data.userPreferences;
 
-  const { data: existingRow, error: readError } = await supabase
-    .from("profiles")
-    .select("user_preferences")
-    .eq("id", user.id)
-    .maybeSingle();
-  if (readError) {
-    console.error("[mobile-api] settings read failed:", readError.message);
+  let existingRow;
+  try {
+    const result = await query(
+      `SELECT user_preferences FROM profiles WHERE id = $1`,
+      [user.id],
+    );
+    existingRow = result.rows[0];
+  } catch (readError) {
+    console.error(
+      "[mobile-api] settings read failed:",
+      readError instanceof Error ? readError.message : readError,
+    );
     throw new MobileApiError(
       "internal_error",
       "Failed to update settings.",
@@ -114,17 +123,21 @@ export const PATCH = mobileRoute(async (request: NextRequest) => {
       : {}),
   };
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .update({
-      user_preferences: merged,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", user.id)
-    .select("user_preferences")
-    .single();
-  if (error) {
-    console.error("[mobile-api] settings update failed:", error.message);
+  let data;
+  try {
+    const result = await query(
+      `UPDATE profiles
+       SET user_preferences = $1, updated_at = $2
+       WHERE id = $3
+       RETURNING user_preferences`,
+      [JSON.stringify(merged), new Date().toISOString(), user.id],
+    );
+    data = result.rows[0];
+  } catch (error) {
+    console.error(
+      "[mobile-api] settings update failed:",
+      error instanceof Error ? error.message : error,
+    );
     throw new MobileApiError(
       "internal_error",
       "Failed to update settings.",

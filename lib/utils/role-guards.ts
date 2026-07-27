@@ -27,7 +27,29 @@ export function isSuperAdmin(profile: ProfileWithRole | null): boolean {
 
 export function isStaff(profile: ProfileWithRole | null): boolean {
   const active = getActiveRole(profile);
-  return active === "lister" || active === "admin" || active === "super_admin";
+  return (
+    active === "lister" ||
+    active === "admin" ||
+    active === "super_admin" ||
+    active === "data_entry"
+  );
+}
+
+export function isDataEntry(profile: ProfileWithRole | null): boolean {
+  const active = getActiveRole(profile);
+  return active === "data_entry";
+}
+
+export function canAccessListingCapacityRoute(
+  profile: ProfileWithRole | null,
+): boolean {
+  const active = getActiveRole(profile);
+  return (
+    active === "data_entry" ||
+    active === "lister" ||
+    active === "admin" ||
+    active === "super_admin"
+  );
 }
 
 export function canAccessAdminRoute(

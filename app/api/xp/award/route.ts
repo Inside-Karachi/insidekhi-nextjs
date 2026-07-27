@@ -1,4 +1,3 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 /**
  * POST /api/xp/award
  * Core endpoint for awarding XP to users
@@ -12,15 +11,17 @@ import { createServerSupabase } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
 import type { XPAwardRequest } from "@/types/gamification.types";
 import { awardXP } from "@/lib/gamification";
+import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { canAwardXpForTarget } from "@/lib/auth/gamification-permissions";
+import type { UserRole } from "@/types/auth.types";
 
 /**
  * Main XP award handler
  */
 export async function POST(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    const session = await getSessionFromCookies();
+  try {
+    const session = await getSessionFromCookies();
 
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -37,13 +38,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId],
+    );
+    const profile = profileRows[0] as { role: UserRole } | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 

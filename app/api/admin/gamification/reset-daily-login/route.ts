@@ -1,40 +1,32 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 /**
  * POST /api/admin/gamification/reset-daily-login
  * Admin endpoint to reset daily login claim status for testing
  * Allows re-claiming daily login XP on the same day
- * 
+ *
  * Body: { user_id?: string } - If not provided, resets for current user
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { canManageGamificationSettings } from "@/lib/auth/gamification-permissions";
+import type { UserRole } from "@/types/auth.types";
 
 export async function POST(request: NextRequest) {
   const session = await getSessionFromCookies();
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-    const authSupabase = await createServerSupabase();
-
-    // Get authenticated user
-    const {
-      data: { user },
-      error: authError,
-    } = await authSupabase.auth.getUser();
-
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Verify admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId],
+    );
+    const profile = profileRows[0] as { role: UserRole } | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { error: "Failed to verify admin role" },
         { status: 403 }
@@ -60,15 +52,27 @@ export async function POST(request: NextRequest) {
     }
 
     // Get current streak data
-    const { data: streakData, error: streakError } = await supabase
-      .from("daily_login_streaks")
-      .select("*")
-      .eq("user_id", targetUserId)
-      .single();
-
-    if (streakError) {
+    let streakData;
+    try {
+      const { rows } = await query(
+        `SELECT * FROM public.daily_login_streaks WHERE user_id = $1 LIMIT 1`,
+        [targetUserId],
+      );
+      streakData = rows[0];
+    } catch (streakError) {
       return NextResponse.json(
-        { error: "User streak data not found", details: streakError.message },
+        {
+          error: "User streak data not found",
+          details:
+            streakError instanceof Error ? streakError.message : "Unknown error",
+        },
+        { status: 404 }
+      );
+    }
+
+    if (!streakData) {
+      return NextResponse.json(
+        { error: "User streak data not found", details: undefined },
         { status: 404 }
       );
     }
@@ -78,31 +82,39 @@ export async function POST(request: NextRequest) {
     yesterday.setDate(yesterday.getDate() - 1);
     yesterday.setHours(23, 59, 59, 999);
 
-    const { error: updateError } = await supabase
-      .from("daily_login_streaks")
-      .update({
-        last_claimed_date: yesterday.toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("user_id", targetUserId);
-
-    if (updateError) {
+    try {
+      await query(
+        `UPDATE public.daily_login_streaks
+         SET last_claimed_date = $1, updated_at = $2
+         WHERE user_id = $3`,
+        [yesterday.toISOString(), new Date().toISOString(), targetUserId],
+      );
+    } catch (updateError) {
       return NextResponse.json(
-        { error: "Failed to reset daily login", details: updateError.message },
+        {
+          error: "Failed to reset daily login",
+          details:
+            updateError instanceof Error ? updateError.message : "Unknown error",
+        },
         { status: 500 }
       );
     }
 
     // Get updated data
-    const { data: updatedStreak, error: fetchError } = await supabase
-      .from("daily_login_streaks")
-      .select("*")
-      .eq("user_id", targetUserId)
-      .single();
-
-    if (fetchError) {
+    let updatedStreak;
+    try {
+      const { rows } = await query(
+        `SELECT * FROM public.daily_login_streaks WHERE user_id = $1 LIMIT 1`,
+        [targetUserId],
+      );
+      updatedStreak = rows[0];
+    } catch (fetchError) {
       return NextResponse.json(
-        { error: "Failed to fetch updated data", details: fetchError.message },
+        {
+          error: "Failed to fetch updated data",
+          details:
+            fetchError instanceof Error ? fetchError.message : "Unknown error",
+        },
         { status: 500 }
       );
     }

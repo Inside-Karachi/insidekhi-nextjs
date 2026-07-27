@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { z } from "zod";
@@ -22,10 +22,7 @@ const createShareSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-  try {    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
-
+  try {
     // Check authentication
     const session = await getSessionFromCookies();
 
@@ -59,29 +56,36 @@ export async function POST(request: NextRequest) {
       verification_method,
     } = validation.data;
 
-    const { data, error } = await serviceSupabase.rpc("create_share_record", {
-      p_content_type: content_type,
-      p_content_id: content_id,
-      p_content_title: content_title,
-      p_content_url: content_url,
-      p_platform: platform,
-      p_verification_method: verification_method,
-      p_user_id: session.userId,
-    });
-
-    if (error) {
-      console.error("Error creating share:", error);
+    let rpcRows;
+    try {
+      ({ rows: rpcRows } = await query(
+        `SELECT create_share_record($1, $2, $3, $4, $5, $6, $7) AS result`,
+        [
+          content_type,
+          content_id,
+          content_title,
+          content_url,
+          platform,
+          verification_method,
+          session.userId,
+        ]
+      ));
+    } catch (rpcError) {
+      console.error("Error creating share:", rpcError);
       return NextResponse.json(
         {
           success: false,
-          error: error.message || "Failed to create share",
+          error:
+            rpcError instanceof Error
+              ? rpcError.message
+              : "Failed to create share",
         },
         { status: 400 }
       );
     }
 
     // RPC returns JSONB
-    const result = data as {
+    const result = rpcRows[0]?.result as {
       success: boolean;
       share_id?: number;
       tracking_url?: string;

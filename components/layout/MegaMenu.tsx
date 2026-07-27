@@ -1,7 +1,7 @@
 import * as React from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   NavigationMenu,
   NavigationMenuContent,
@@ -69,15 +69,48 @@ const ListItem = React.forwardRef<
 ListItem.displayName = "ListItem";
 
 export async function MegaMenu() {
-  const supabase = await createServerSupabase({ publicAnon: true });
-  const { data: parentCategories, error } = await supabase
-    .from("categories")
-    .select("id, name, slug, categories!inner(id, name, slug)")
-    .is("parent_id", null)
-    .eq("is_enabled", true)
-    .order("name", { ascending: true });
+  let parentCategories: ParentCategory[];
+  try {
+    const { rows: parents } = await query(
+      `SELECT id, name, slug FROM categories
+       WHERE parent_id IS NULL AND is_enabled = true
+       ORDER BY name ASC`,
+    );
 
-  if (error || !parentCategories) return null;
+    const parentIds = parents.map((p) => p.id);
+    const subsByParent = new Map<number, SubCategory[]>();
+    if (parentIds.length > 0) {
+      const { rows: subs } = await query(
+        `SELECT id, name, slug, parent_id FROM categories WHERE parent_id = ANY($1)`,
+        [parentIds],
+      );
+      for (const sub of subs) {
+        const parentId = Number(sub.parent_id);
+        if (!subsByParent.has(parentId)) subsByParent.set(parentId, []);
+        subsByParent.get(parentId)!.push({
+          id: Number(sub.id),
+          name: sub.name,
+          slug: sub.slug,
+        });
+      }
+    }
+
+    // Mirrors the old `categories!inner(...)` embed: only keep parents that
+    // have at least one sub-category.
+    parentCategories = parents
+      .map((p) => ({
+        id: Number(p.id),
+        name: p.name,
+        slug: p.slug,
+        categories: subsByParent.get(Number(p.id)) || [],
+      }))
+      .filter((p) => p.categories.length > 0);
+  } catch (error) {
+    console.error("[MegaMenu] Error fetching categories:", error);
+    return null;
+  }
+
+  if (!parentCategories) return null;
 
   return (
     <NavigationMenu>

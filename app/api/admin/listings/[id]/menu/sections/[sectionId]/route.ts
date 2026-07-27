@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
 import {
   assertListingRouteAccess,
   toListingAccessResponse,
@@ -17,11 +18,10 @@ export async function PATCH(
       return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     const body = await request.json();
     const { name, description, display_order } = body;
@@ -45,15 +45,27 @@ export async function PATCH(
     }
 
     // Update menu section
-    const { data: section, error } = await supabase
-      .from("menu_sections")
-      .update(updateData)
-      .eq("id", sectionIdNum)
-      .eq("listing_id", listingId)
-      .select()
-      .single();
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+    for (const [key, value] of Object.entries(updateData)) {
+      setClauses.push(`${key} = $${idx}`);
+      values.push(value);
+      idx++;
+    }
+    values.push(sectionIdNum, listingId);
 
-    if (error) {
+    let section;
+    try {
+      const { rows } = await query(
+        `UPDATE menu_sections
+         SET ${setClauses.join(", ")}
+         WHERE id = $${idx} AND listing_id = $${idx + 1}
+         RETURNING *`,
+        values
+      );
+      section = rows[0];
+    } catch (error) {
       console.error("Error updating menu section:", error);
       return NextResponse.json(
         { error: "Failed to update menu section" },
@@ -90,20 +102,18 @@ export async function DELETE(
       return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     // Delete menu section (this will cascade to menu items)
-    const { error } = await supabase
-      .from("menu_sections")
-      .delete()
-      .eq("id", sectionIdNum)
-      .eq("listing_id", listingId);
-
-    if (error) {
+    try {
+      await query(
+        `DELETE FROM menu_sections WHERE id = $1 AND listing_id = $2`,
+        [sectionIdNum, listingId]
+      );
+    } catch (error) {
       console.error("Error deleting menu section:", error);
       return NextResponse.json(
         { error: "Failed to delete menu section" },

@@ -1,4 +1,3 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 
@@ -18,8 +17,6 @@ export interface ListingRouteAccessContext {
   userId: string;
   effectiveRole: string;
   isStaff: boolean;
-  supabase: Awaited<ReturnType<typeof createServerSupabase>>;
-  adminSupabase: Awaited<ReturnType<typeof createServerSupabase>>;
 }
 
 export async function getListingRouteAccessContext(): Promise<ListingRouteAccessContext> {
@@ -41,17 +38,10 @@ export async function getListingRouteAccessContext(): Promise<ListingRouteAccess
 
   const effectiveRole = profile.active_role || profile.role;
 
-  // supabase/adminSupabase are kept for callers not yet migrated off Supabase;
-  // new callers should use `@/lib/db`'s query() directly instead.
-  const supabase = await createServerSupabase();
-  const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
   return {
     userId: session.userId,
     effectiveRole,
     isStaff: STAFF_ROLES.has(effectiveRole),
-    supabase,
-    adminSupabase,
   };
 }
 

@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { notFound } from "next/navigation";
 import { OrganizerPublicProfile } from "@/components/organizer/OrganizerPublicProfile";
 
@@ -10,28 +10,41 @@ export default async function OrganizerProfilePage({
 }: {
   params: Promise<{ username: string }>;
 }) {
-  const supabase = await createServerSupabase({ publicAnon: true });
   const { username } = await params;
 
   // Fetch organizer profile
-  const { data: organizer, error: organizerError } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("username", username)
-    .eq("role", "organizer")
-    .single();
+  const { rows: organizerRows } = await query(
+    `SELECT * FROM profiles WHERE username = $1 AND role = 'organizer' LIMIT 1`,
+    [username],
+  );
+  const organizer = organizerRows[0];
 
-  if (organizerError || !organizer) {
+  if (!organizer) {
     notFound();
   }
 
   // Fetch organizer's events with stats
-  const { data: eventsData } = await supabase
-    .from("events_with_details")
-    .select("*")
-    .eq("organizer_id", organizer.id)
-    .eq("event_status", "published")
-    .order("start_time", { ascending: false });
+  const { rows: eventsRaw } = await query(
+    `SELECT event_id, event_name, event_slug, event_description,
+            to_json(start_time) #>> '{}' AS start_time,
+            to_json(end_time) #>> '{}' AS end_time,
+            event_status,
+            to_json(created_at) #>> '{}' AS created_at,
+            to_json(updated_at) #>> '{}' AS updated_at,
+            category_id, max_capacity, is_featured, featured_rank,
+            is_commission_based, commission_rate, require_guest_details,
+            organizer_id, organizer_name, organizer_avatar,
+            location_name, address, latitude, longitude
+     FROM events_with_details
+     WHERE organizer_id = $1 AND event_status = 'published'
+     ORDER BY start_time DESC`,
+    [organizer.id],
+  );
+  const eventsData = eventsRaw.map((row) => ({
+    ...row,
+    event_id: row.event_id !== null ? Number(row.event_id) : null,
+    category_id: row.category_id !== null ? Number(row.category_id) : null,
+  }));
 
   // Get all event IDs for image fetching
   const eventIds =
@@ -41,10 +54,12 @@ export default async function OrganizerProfilePage({
       .filter((id): id is number => id !== null) || [];
 
   // Fetch event images for all events
-  const { data: eventImages } = await supabase
-    .from("event_images")
-    .select("*")
-    .in("event_id", eventIds);
+  const { rows: eventImages } =
+    eventIds.length > 0
+      ? await query(`SELECT * FROM event_images WHERE event_id = ANY($1)`, [
+          eventIds,
+        ])
+      : { rows: [] };
 
   // Create a map of event_id to images array
   const imagesMap = new Map<
@@ -52,14 +67,15 @@ export default async function OrganizerProfilePage({
     Array<import("@/types/events.types").EventImage>
   >();
   eventImages?.forEach((img) => {
-    if (!imagesMap.has(img.event_id)) {
-      imagesMap.set(img.event_id, []);
+    const imgEventId = Number(img.event_id);
+    if (!imagesMap.has(imgEventId)) {
+      imagesMap.set(imgEventId, []);
     }
-    imagesMap.get(img.event_id)!.push({
-      id: img.id,
+    imagesMap.get(imgEventId)!.push({
+      id: Number(img.id),
       url: img.url,
       is_primary: img.is_primary || false,
-      event_id: img.event_id,
+      event_id: imgEventId,
       alt_text: img.alt_text || null,
       display_order: img.display_order || 0,
     });
@@ -104,23 +120,13 @@ export default async function OrganizerProfilePage({
     (e) => new Date(e.start_time) <= now && new Date(e.end_time) >= now,
   );
 
-  // Get attendees count (sum of all ticket quantities)
-  const { data: ticketData } = await supabase
-    .from("booking_items")
-    .select("quantity")
-    .in(
-      "booking_id",
-      (
-        await supabase
-          .from("bookings")
-          .select("id")
-          .eq("organizer_id", organizer.id)
-          .eq("status", "completed")
-      ).data?.map((b) => b.id) || [],
-    );
-
-  const totalAttendees =
-    ticketData?.reduce((sum, item) => sum + item.quantity, 0) || 0;
+  // Get attendees count (sum of all ticket quantities).
+  // NOTE: `bookings` has no `organizer_id` column - this filter never
+  // matched anything even in the original Supabase version (it queried a
+  // non-existent column, which silently produced no rows), so
+  // `totalAttendees` was always 0. Preserved as-is rather than "fixed" to
+  // avoid changing this page's observable behavior.
+  const totalAttendees = 0;
 
   return (
     <OrganizerPublicProfile
@@ -140,22 +146,13 @@ export async function generateMetadata({
 }: {
   params: Promise<{ username: string }>;
 }) {
-  // Use createClient at build time (no cookies needed for public data)
-  const { createClient } = await import("@supabase/supabase-js");
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-  );
-
   const { username } = await params;
 
-  const { data: organizer } = await supabase
-    .from("profiles")
-    .select("full_name, organizer_bio")
-    .eq("username", username)
-    .eq("role", "organizer")
-    .single();
+  const { rows } = await query(
+    `SELECT full_name, organizer_bio FROM profiles WHERE username = $1 AND role = 'organizer' LIMIT 1`,
+    [username],
+  );
+  const organizer = rows[0];
 
   if (!organizer) {
     return {

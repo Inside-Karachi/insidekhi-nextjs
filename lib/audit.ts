@@ -69,9 +69,9 @@ export async function logAuditEvent(data: AuditLogData) {
         : null;
 
     await query(
-      `INSERT INTO audit_logs
-         (admin_id, user_id, action, entity_type, entity_id, old_values, new_values, metadata, ip_address, user_agent, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+      `INSERT INTO public.audit_logs
+         (admin_id, user_id, action, entity_type, entity_id, old_values, new_values, metadata, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         data.admin_id || null,
         data.user_id || null,

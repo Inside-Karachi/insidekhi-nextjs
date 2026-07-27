@@ -1,6 +1,5 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { query } from "@/lib/db";
 import { awardXP } from "@/lib/gamification";
-import type { Database } from "@/types/supabase";
 
 export type ReviewModerationTarget = {
   reviewId: number;
@@ -11,35 +10,29 @@ export type ReviewModerationTarget = {
 const LEAVE_REVIEW = "leave_review";
 
 async function hasOtherApprovedReviewForListing(
-  adminSupabase: SupabaseClient<Database>,
   review: ReviewModerationTarget,
 ): Promise<boolean> {
-  const { data } = await adminSupabase
-    .from("reviews")
-    .select("id")
-    .eq("user_id", review.userId)
-    .eq("listing_id", review.listingId)
-    .eq("status", "approved")
-    .neq("id", review.reviewId)
-    .limit(1)
-    .maybeSingle();
+  const { rows } = await query(
+    `SELECT id FROM public.reviews
+     WHERE user_id = $1 AND listing_id = $2 AND status = 'approved' AND id != $3
+     LIMIT 1`,
+    [review.userId, review.listingId, review.reviewId],
+  );
 
-  return !!data;
+  return rows.length > 0;
 }
 
 async function deleteLeaveReviewXpLog(
-  adminSupabase: SupabaseClient<Database>,
   userId: string,
   listingId: number,
 ): Promise<void> {
-  const { error: deleteError } = await adminSupabase
-    .from("points_log")
-    .delete()
-    .eq("user_id", userId)
-    .eq("reason", LEAVE_REVIEW)
-    .eq("related_id", listingId);
-
-  if (deleteError) {
+  try {
+    await query(
+      `DELETE FROM public.points_log
+       WHERE user_id = $1 AND reason = $2 AND related_id = $3`,
+      [userId, LEAVE_REVIEW, listingId],
+    );
+  } catch (deleteError) {
     console.error(
       `[REVIEW XP] Failed to cleanup leave_review XP (user=${userId}, listing=${listingId}):`,
       deleteError,
@@ -49,37 +42,33 @@ async function deleteLeaveReviewXpLog(
 
 /** Remove listing-level leave_review XP when no other approved review remains. */
 export async function cleanupLeaveReviewXpOnReject(
-  adminSupabase: SupabaseClient<Database>,
   review: ReviewModerationTarget,
 ): Promise<void> {
-  if (await hasOtherApprovedReviewForListing(adminSupabase, review)) {
+  if (await hasOtherApprovedReviewForListing(review)) {
     return;
   }
-  await deleteLeaveReviewXpLog(adminSupabase, review.userId, review.listingId);
+  await deleteLeaveReviewXpLog(review.userId, review.listingId);
 }
 
 /** Same guard as reject - used when a review row is deleted. */
 export async function cleanupLeaveReviewXpOnDelete(
-  adminSupabase: SupabaseClient<Database>,
   review: ReviewModerationTarget,
 ): Promise<void> {
-  await cleanupLeaveReviewXpOnReject(adminSupabase, review);
+  await cleanupLeaveReviewXpOnReject(review);
 }
 
 /** Award leave_review XP once per user + listing (per_target). */
 export async function awardLeaveReviewXpOnApprove(
-  adminSupabase: SupabaseClient<Database>,
   review: ReviewModerationTarget,
 ): Promise<void> {
-  const { data: existingXP } = await adminSupabase
-    .from("points_log")
-    .select("id")
-    .eq("user_id", review.userId)
-    .eq("reason", LEAVE_REVIEW)
-    .eq("related_id", review.listingId)
-    .maybeSingle();
+  const { rows: existingXP } = await query(
+    `SELECT id FROM public.points_log
+     WHERE user_id = $1 AND reason = $2 AND related_id = $3
+     LIMIT 1`,
+    [review.userId, LEAVE_REVIEW, review.listingId],
+  );
 
-  if (existingXP) {
+  if (existingXP.length > 0) {
     return;
   }
 
@@ -99,14 +88,13 @@ export async function awardLeaveReviewXpOnApprove(
 }
 
 export async function applyLeaveReviewXpForModeration(
-  adminSupabase: SupabaseClient<Database>,
   review: ReviewModerationTarget,
   status: string,
 ): Promise<void> {
   if (status === "rejected") {
-    await cleanupLeaveReviewXpOnReject(adminSupabase, review);
+    await cleanupLeaveReviewXpOnReject(review);
   } else if (status === "approved") {
-    await awardLeaveReviewXpOnApprove(adminSupabase, review);
+    await awardLeaveReviewXpOnApprove(review);
   }
 }
 

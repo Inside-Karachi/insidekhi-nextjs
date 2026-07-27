@@ -49,7 +49,7 @@ export function useSupabaseUser(): SupabaseAuthState {
 
     const resolveSession = async () => {
       try {
-        const response = await fetch("/api/user/me");
+        const response = await fetch("/api/user/me", { cache: "no-store" });
         if (!response.ok) {
           throw new Error("Failed to fetch user session");
         }
@@ -59,7 +59,7 @@ export function useSupabaseUser(): SupabaseAuthState {
         if (data.user) {
           setAuthState({
             user: data.user,
-            session: { access_token: "dummy" } as any, // Mock Supabase Session object if needed
+            session: { access_token: "dummy" },
             userId: data.user.id,
             isLoading: false,
             error: null,
@@ -75,13 +75,14 @@ export function useSupabaseUser(): SupabaseAuthState {
         }
       } catch (error) {
         if (!isMounted) return;
-        setAuthState({
-          user: null,
-          session: null,
-          userId: null,
+        // A network or profile-service failure is not proof that the JWT
+        // session disappeared. Preserve a previously verified user instead of
+        // converting a transient 5xx into a client-side logout/redirect.
+        setAuthState((current) => ({
+          ...current,
           isLoading: false,
           error: buildError(error),
-        });
+        }));
       }
     };
 

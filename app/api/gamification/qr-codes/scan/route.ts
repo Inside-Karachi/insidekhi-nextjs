@@ -1,11 +1,10 @@
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 export async function POST(request: NextRequest) {
   const session = await getSessionFromCookies();
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
     const { code, location, deviceInfo } = await request.json();
 
     if (!code) {
@@ -15,25 +14,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get authenticated user
-    const authSupabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await authSupabase.auth.getUser();
-
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // 1. Fetch QR code details
-    const { data: qrCode, error: qrError } = await supabase
-      .from("qr_codes")
-      .select("*")
-      .eq("code", code)
-      .single();
+    const { rows: qrCodeRows } = await query(
+      `SELECT * FROM public.qr_codes WHERE code = $1 LIMIT 1`,
+      [code],
+    );
+    const qrCode = qrCodeRows[0];
 
-    if (qrError || !qrCode) {
+    if (!qrCode) {
       return NextResponse.json(
         { error: "Invalid QR code" },
         { status: 404 }
@@ -60,17 +52,14 @@ export async function POST(request: NextRequest) {
     let limitError = "";
 
     if (qrCode.scan_limit_type !== "unlimited") {
-      let query = supabase
-        .from("qr_scans")
-        .select("scanned_at", { count: "exact", head: true })
-        .eq("user_id", session.userId)
-        .eq("qr_code_id", qrCode.id);
-
       const now = new Date();
+      let sinceClause = "";
+      let sinceValue: string | null = null;
 
       if (qrCode.scan_limit_type === "daily") {
         const startOfDay = new Date(now.setHours(0, 0, 0, 0)).toISOString();
-        query = query.gte("scanned_at", startOfDay);
+        sinceClause = "AND scanned_at >= $3";
+        sinceValue = startOfDay;
         limitError = "You have already scanned this QR code today";
       } else if (qrCode.scan_limit_type === "weekly") {
         // Get start of week (Monday)
@@ -81,16 +70,25 @@ export async function POST(request: NextRequest) {
         d.setHours(0, 0, 0, 0);
         const startOfWeek = d.toISOString();
 
-        query = query.gte("scanned_at", startOfWeek);
+        sinceClause = "AND scanned_at >= $3";
+        sinceValue = startOfWeek;
         limitError = "You have already scanned this QR code this week";
       } else if (qrCode.scan_limit_type === "once") {
         // No date filter needed
         limitError = "You have already scanned this QR code";
       }
 
-      const { count, error: countError } = await query;
-
-      if (countError) {
+      let count: number;
+      try {
+        const params: unknown[] = [session.userId, qrCode.id];
+        if (sinceValue) params.push(sinceValue);
+        const { rows: countRows } = await query(
+          `SELECT COUNT(*) FROM public.qr_scans
+           WHERE user_id = $1 AND qr_code_id = $2 ${sinceClause}`,
+          params,
+        );
+        count = Number(countRows[0]?.count ?? 0);
+      } catch (countError) {
         console.error("Error checking scan limit:", countError);
         return NextResponse.json(
           { error: "Failed to verify scan eligibility" },
@@ -98,7 +96,7 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      if (count && count > 0) {
+      if (count > 0) {
         canScan = false;
       }
     }
@@ -112,19 +110,22 @@ export async function POST(request: NextRequest) {
 
     // 4. Award XP and Log Scan
 
-    const { data: insertedScan, error: scanError } = await supabase
-      .from("qr_scans")
-      .insert({
-        user_id: session.userId,
-        qr_code_id: qrCode.id,
-        xp_awarded: 0,
-        scan_location: location || null,
-        device_info: deviceInfo || null,
-      })
-      .select("id, scanned_at")
-      .single();
-
-    if (scanError || !insertedScan) {
+    let insertedScan: { id: number; scanned_at: string } | undefined;
+    try {
+      const { rows: insertedRows } = await query(
+        `INSERT INTO public.qr_scans (user_id, qr_code_id, xp_awarded, scan_location, device_info)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, scanned_at`,
+        [
+          session.userId,
+          qrCode.id,
+          0,
+          location ? JSON.stringify(location) : null,
+          deviceInfo ? JSON.stringify(deviceInfo) : null,
+        ],
+      );
+      insertedScan = insertedRows[0];
+    } catch (scanError) {
       console.error("Error logging scan:", scanError);
 
       if ((scanError as { code?: string } | null)?.code === "23505") {
@@ -140,34 +141,47 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!insertedScan) {
+      return NextResponse.json(
+        { error: "Failed to record scan" },
+        { status: 500 }
+      );
+    }
+
     // Deterministic winner selection for non-unlimited scans.
     if (qrCode.scan_limit_type !== "unlimited") {
-      let winnerQuery = supabase
-        .from("qr_scans")
-        .select("id")
-        .eq("user_id", session.userId)
-        .eq("qr_code_id", qrCode.id)
-        .order("scanned_at", { ascending: true })
-        .order("id", { ascending: true })
-        .limit(1);
-
+      let winnerSinceClause = "";
+      let winnerSinceValue: string | null = null;
       const scannedAt = new Date(insertedScan.scanned_at);
+
       if (qrCode.scan_limit_type === "daily") {
         const dayStart = new Date(scannedAt);
         dayStart.setHours(0, 0, 0, 0);
-        winnerQuery = winnerQuery.gte("scanned_at", dayStart.toISOString());
+        winnerSinceClause = "AND scanned_at >= $3";
+        winnerSinceValue = dayStart.toISOString();
       } else if (qrCode.scan_limit_type === "weekly") {
         const weekStart = new Date(scannedAt);
         const day = weekStart.getDay();
         const diff = weekStart.getDate() - day + (day === 0 ? -6 : 1);
         weekStart.setDate(diff);
         weekStart.setHours(0, 0, 0, 0);
-        winnerQuery = winnerQuery.gte("scanned_at", weekStart.toISOString());
+        winnerSinceClause = "AND scanned_at >= $3";
+        winnerSinceValue = weekStart.toISOString();
       }
 
-      const { data: winnerRows, error: winnerError } = await winnerQuery;
-
-      if (winnerError) {
+      let winnerRows: { id: number }[];
+      try {
+        const params: unknown[] = [session.userId, qrCode.id];
+        if (winnerSinceValue) params.push(winnerSinceValue);
+        const { rows } = await query(
+          `SELECT id FROM public.qr_scans
+           WHERE user_id = $1 AND qr_code_id = $2 ${winnerSinceClause}
+           ORDER BY scanned_at ASC, id ASC
+           LIMIT 1`,
+          params,
+        );
+        winnerRows = rows as { id: number }[];
+      } catch (winnerError) {
         console.error("Error evaluating scan winner:", winnerError);
         return NextResponse.json(
           { error: "Failed to verify scan eligibility" },
@@ -176,8 +190,8 @@ export async function POST(request: NextRequest) {
       }
 
       const winnerId = winnerRows?.[0]?.id;
-      if (winnerId && winnerId !== insertedScan.id) {
-        await supabase.from("qr_scans").delete().eq("id", insertedScan.id);
+      if (winnerId && Number(winnerId) !== Number(insertedScan.id)) {
+        await query(`DELETE FROM public.qr_scans WHERE id = $1`, [insertedScan.id]);
         return NextResponse.json(
           { error: limitError || "You have already scanned this QR code" },
           { status: 400 }
@@ -205,10 +219,10 @@ export async function POST(request: NextRequest) {
         message = `Successfully scanned! +${xpAwarded} XP`;
 
         // Update the scan record with the actual XP awarded
-        await supabase
-          .from("qr_scans")
-          .update({ xp_awarded: xpAwarded })
-          .eq("id", insertedScan.id);
+        await query(
+          `UPDATE public.qr_scans SET xp_awarded = $1 WHERE id = $2`,
+          [xpAwarded, insertedScan.id],
+        );
       } else if ("error" in result && result.status !== 403) {
         // Log error but don't fail the user interaction if it's just a gamification issue
         console.warn("Gamification award warning:", result.error);

@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { ThumbsUp, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { createClient } from "@/lib/supabase/client";
+import { useSupabaseUser } from "@/hooks/useSupabaseUser";
 
 interface HelpfulVoteButtonProps {
   reviewId: number;
@@ -22,10 +22,9 @@ export function HelpfulVoteButton({
   const [userVoted, setUserVoted] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isCheckingStatus, setIsCheckingStatus] = useState(true);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const { toast } = useToast();
-  const supabaseRef = useRef(createClient());
-  const supabase = supabaseRef.current;
+  const { userId } = useSupabaseUser();
+  const isAuthenticated = !!userId;
 
   const checkVotingStatus = useCallback(async () => {
     try {
@@ -42,26 +41,6 @@ export function HelpfulVoteButton({
       setIsCheckingStatus(false);
     }
   }, [reviewId]);
-
-  // Check authentication status
-  useEffect(() => {
-    const checkAuth = async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      setIsAuthenticated(!!user);
-    };
-    checkAuth();
-
-    // Listen for auth changes
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
-      setIsAuthenticated(!!session?.user);
-    });
-
-    return () => subscription.unsubscribe();
-  }, [supabase.auth]);
 
   // Check user's voting status on component mount
   useEffect(() => {

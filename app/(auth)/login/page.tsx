@@ -20,6 +20,8 @@ import {
 import { PasswordInput } from "@/components/auth/PasswordInput";
 import { AuthBackground } from "@/components/auth/AuthBackground";
 import { AuthFormPanel, WelcomePanel } from "@/components/auth/GlassPanel";
+import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
+import { AppleSignInButton } from "@/components/auth/AppleSignInButton";
 import { useToast } from "@/hooks/use-toast";
 
 function LoginForm() {
@@ -109,13 +111,25 @@ function LoginForm() {
         description: "You have been successfully logged in.",
       });
 
+      const data = await response.json().catch(() => ({}));
+      const role =
+        data && typeof data === "object" && "role" in data
+          ? String(data.role)
+          : null;
+
       // Prefer next, then returnUrl (middleware uses returnUrl for admin intercepts).
       const nextUrl =
         searchParams.get("next") || searchParams.get("returnUrl");
-      const destination =
+      let destination =
         nextUrl && nextUrl.startsWith("/") && !nextUrl.startsWith("//")
           ? nextUrl
           : "/dashboard";
+
+      // data_entry accounts may only use listing capacity
+      if (role === "data_entry") {
+        destination = "/admin/listing-capacity";
+      }
+
       window.location.href = destination;
     } catch (err) {
       const message =
@@ -337,6 +351,49 @@ function LoginForm() {
                   )}
                 </Button>
               </motion.form>
+
+              {/* Divider */}
+              <motion.div
+                className="my-6 flex items-center gap-3"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.6, delay: 0.5 }}
+              >
+                <div className="h-px flex-1 bg-white/20" />
+                <span className="text-xs text-white/60">OR</span>
+                <div className="h-px flex-1 bg-white/20" />
+              </motion.div>
+
+              {/* Google Sign In */}
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.55 }}
+              >
+                <GoogleSignInButton
+                  next={
+                    searchParams.get("next") ||
+                    searchParams.get("returnUrl") ||
+                    undefined
+                  }
+                />
+              </motion.div>
+
+              {/* Apple Sign In */}
+              <motion.div
+                className="mt-3"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.6 }}
+              >
+                <AppleSignInButton
+                  next={
+                    searchParams.get("next") ||
+                    searchParams.get("returnUrl") ||
+                    undefined
+                  }
+                />
+              </motion.div>
 
               {/* Sign Up Link */}
               <motion.div

@@ -156,7 +156,7 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   const { rows: existingRows } = await query(
     `SELECT id FROM bookings
      WHERE user_id = $1 AND event_id = $2 AND basket_id = $3
-       AND payment_status = ANY($4::text[])
+       AND payment_status::text = ANY($4::text[])
      ORDER BY id DESC
      LIMIT 1`,
     [user.id, eventId, basket, ["awaiting_payment", "pending"]],

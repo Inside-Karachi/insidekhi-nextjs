@@ -18,6 +18,17 @@ import { sortFetchedListingsBySearchRelevance } from "@/lib/listings/search-rele
 const LISTING_CARD_SQL_COLUMNS =
   "id, name, slug, description, address, category_id, category_name, latitude, longitude, avg_rating, review_count, is_featured, status, menu_pdf_url, google_maps_url";
 
+/** `id`/`category_id`/etc come back as strings from pg for bigint columns - convert before use. */
+function toNumericListingRow(row: Record<string, unknown>): ListingRowLike {
+  return {
+    ...row,
+    id: Number(row.id),
+    category_id: row.category_id !== null ? Number(row.category_id) : null,
+    review_count: row.review_count !== null ? Number(row.review_count) : null,
+    avg_rating: row.avg_rating !== null ? Number(row.avg_rating) : null,
+  } as unknown as ListingRowLike;
+}
+
 export const dynamic = "force-dynamic";
 
 /** Sorts supported in this version. Deal/distance-ranked sorts are not yet wired. */
@@ -164,7 +175,7 @@ export const GET = mobileRoute(async (request: NextRequest) => {
        LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
       dataParams,
     );
-    data = rows as ListingRowLike[];
+    data = rows.map(toNumericListingRow);
   } catch (error) {
     console.error(
       "[mobile-api] listings query failed:",

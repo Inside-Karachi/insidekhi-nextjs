@@ -1,5 +1,5 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import disposableDomains from "disposable-email-domains";
 
@@ -9,8 +9,8 @@ import disposableDomains from "disposable-email-domains";
  * Query params: email, excludeUserId (optional - for editing existing user)
  */
 export async function GET(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    // Check authentication
+  try {
+    // Check authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -18,11 +18,11 @@ export async function GET(request: NextRequest) {
     }
 
     // Verify admin role
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
     if (
       !profile ||
@@ -73,30 +73,16 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Use service role to check auth.users for email uniqueness
-    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
-
-    // Check if email exists in auth.users
-    const { data: authUsers, error: authError2 } =
-      await serviceSupabase.auth.admin.listUsers();
-
-    if (authError2) {
-      console.error("Email check error:", authError2);
-      return NextResponse.json(
-        { error: "Failed to check email availability" },
-        { status: 500 }
-      );
-    }
-
-    // Filter to find matching email (excluding current user if editing)
-    const existingUser = authUsers.users.find(
-      (u) => u.email === email && (!excludeUserId || u.id !== excludeUserId)
+    // Check if email exists in auth.users (excluding current user if editing)
+    const { rows: existingRows } = await query(
+      excludeUserId
+        ? `SELECT id FROM auth.users WHERE LOWER(email) = LOWER($1) AND id != $2 LIMIT 1`
+        : `SELECT id FROM auth.users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+      excludeUserId ? [email, excludeUserId] : [email]
     );
 
     // Email is available if no existing user was found
-    const available = !existingUser;
+    const available = existingRows.length === 0;
 
     return NextResponse.json({
       available,

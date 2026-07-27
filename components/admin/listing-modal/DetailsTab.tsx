@@ -35,6 +35,8 @@ import {
   Youtube,
   MapPin,
 } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Badge } from "@/components/ui/badge";
 
 interface Category {
   value: string;
@@ -73,6 +75,40 @@ export function DetailsTab({
   // Check if location should be managed by primary branch
   const hasPrimaryBranch = branches?.some((b) => b.is_primary);
   const primaryBranch = branches?.find((b) => b.is_primary);
+
+  const selectedCategoryIds = formData.category_ids?.length
+    ? formData.category_ids
+    : formData.category_id
+      ? [formData.category_id]
+      : [];
+
+  const toggleCategory = (categoryValue: string, checked: boolean) => {
+    let next = checked
+      ? [...selectedCategoryIds, categoryValue]
+      : selectedCategoryIds.filter((id) => id !== categoryValue);
+    next = [...new Set(next)];
+
+    let primary = formData.category_id;
+    if (checked && !primary) {
+      primary = categoryValue;
+    }
+    if (!checked && primary === categoryValue) {
+      primary = next[0] || "";
+    }
+    if (primary && !next.includes(primary) && next.length > 0) {
+      primary = next[0];
+    }
+
+    onInputChange("category_ids", next);
+    onInputChange("category_id", primary);
+  };
+
+  const setPrimaryCategory = (categoryValue: string) => {
+    if (!selectedCategoryIds.includes(categoryValue)) return;
+    const rest = selectedCategoryIds.filter((id) => id !== categoryValue);
+    onInputChange("category_ids", [categoryValue, ...rest]);
+    onInputChange("category_id", categoryValue);
+  };
 
   const validateUrl = (url: string, fieldName: string) => {
     if (!url.trim()) {
@@ -298,44 +334,74 @@ export function DetailsTab({
             )}
             <div className="space-y-2">
               <div className="flex items-center gap-1">
-                <Label htmlFor="category_id">Category</Label>
+                <Label>Categories</Label>
                 <span className="text-destructive text-sm">*</span>
               </div>
-              <div className="flex gap-2">
-                <Select
-                  value={formData.category_id}
-                  onValueChange={(value) => onInputChange("category_id", value)}
-                  disabled={categoriesLoading}
-                  name="category_id"
-                >
-                  <SelectTrigger id="category_id" className="h-11 flex-1">
-                    <SelectValue placeholder="Select a category" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {categories.map((category) => (
-                      <SelectItem key={category.value} value={category.value}>
-                        {category.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  id="custom_category"
-                  name="custom_category"
-                  autoComplete="off"
-                  value={formData.custom_category}
-                  onChange={(e) =>
-                    onInputChange("custom_category", e.target.value)
-                  }
-                  placeholder="Or enter custom category"
-                  className="h-11 flex-1"
-                />
+              <p className="text-xs text-muted-foreground">
+                Select one or more subcategories. The primary category is used
+                for display cards and legacy fields.
+              </p>
+              <div className="max-h-48 overflow-y-auto rounded-md border p-3 space-y-2">
+                {categoriesLoading && (
+                  <p className="text-sm text-muted-foreground">
+                    Loading categories...
+                  </p>
+                )}
+                {!categoriesLoading &&
+                  categories.map((category) => {
+                    const checked = selectedCategoryIds.includes(category.value);
+                    const isPrimary = formData.category_id === category.value;
+                    return (
+                      <div
+                        key={category.value}
+                        className="flex items-center justify-between gap-2"
+                      >
+                        <label className="flex items-center gap-2 text-sm cursor-pointer flex-1 min-w-0">
+                          <Checkbox
+                            checked={checked}
+                            onCheckedChange={(value) =>
+                              toggleCategory(category.value, value === true)
+                            }
+                          />
+                          <span className="truncate">{category.label}</span>
+                        </label>
+                        {checked && (
+                          <button
+                            type="button"
+                            className="shrink-0"
+                            onClick={() => setPrimaryCategory(category.value)}
+                          >
+                            <Badge
+                              variant={isPrimary ? "default" : "outline"}
+                              className="text-[10px]"
+                            >
+                              {isPrimary ? "Primary" : "Make primary"}
+                            </Badge>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
               </div>
-              {categoriesLoading && (
-                <p className="text-sm text-muted-foreground">
-                  Loading categories...
+              {selectedCategoryIds.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {selectedCategoryIds.length} selected
+                  {formData.category_id
+                    ? ` · primary #${formData.category_id}`
+                    : ""}
                 </p>
               )}
+              <Input
+                id="custom_category"
+                name="custom_category"
+                autoComplete="off"
+                value={formData.custom_category}
+                onChange={(e) =>
+                  onInputChange("custom_category", e.target.value)
+                }
+                placeholder="Or enter custom category"
+                className="h-11"
+              />
             </div>
           </div>
         </div>

@@ -1,11 +1,9 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { requireSuperAdmin } from "@/lib/auth/admin";
 
 // GET /api/admin/security/blocked-ips - List blocked IPs
 export async function GET(request: NextRequest) {
-  const session = await getSessionFromCookies();
   try {
     // Verify super admin
     await requireSuperAdmin(request);
@@ -13,26 +11,11 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const activeOnly = searchParams.get("active_only") === "true";
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    let query = adminSupabase
-      .from("blocked_ips")
-      .select("*")
-      .order("blocked_at", { ascending: false });
-
-    if (activeOnly) {
-      query = query.is("unblocked_at", null);
-    }
-
-    const { data: blocked_ips, error } = await query;
-
-    if (error) {
-      console.error("[BLOCKED IPS API] Error fetching:", error);
-      return NextResponse.json(
-        { error: "Failed to fetch blocked IPs" },
-        { status: 500 }
-      );
-    }
+    const { rows: blocked_ips } = await query(
+      `SELECT * FROM public.blocked_ips
+       ${activeOnly ? "WHERE unblocked_at IS NULL" : ""}
+       ORDER BY blocked_at DESC`
+    );
 
     return NextResponse.json({ blocked_ips });
   } catch (error) {
@@ -46,7 +29,6 @@ export async function GET(request: NextRequest) {
 
 // POST /api/admin/security/blocked-ips - Manually block an IP
 export async function POST(request: NextRequest) {
-  const session = await getSessionFromCookies();
   try {
     // Verify super admin
     const adminCheck = await requireSuperAdmin(request);
@@ -62,23 +44,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    const { data, error } = await adminSupabase.rpc("block_ip", {
-      p_ip_address: ip_address,
-      p_reason: reason,
-      p_severity: severity,
-      p_duration_minutes: duration_minutes ?? undefined,
-      p_blocked_by: adminCheck.user.id,
-    });
-
-    if (error) {
-      console.error("[BLOCKED IPS API] Error blocking IP:", error);
+    let rpcRows;
+    try {
+      ({ rows: rpcRows } = await query(
+        `SELECT block_ip($1, $2, $3, $4, $5) AS result`,
+        [
+          ip_address,
+          reason,
+          severity,
+          duration_minutes ?? null,
+          adminCheck.user.id,
+        ]
+      ));
+    } catch (rpcError) {
+      console.error("[BLOCKED IPS API] Error blocking IP:", rpcError);
       return NextResponse.json(
         { error: "Failed to block IP" },
         { status: 500 }
       );
     }
+
+    const data = rpcRows[0]?.result;
 
     return NextResponse.json({ success: true, data }, { status: 201 });
   } catch (error) {

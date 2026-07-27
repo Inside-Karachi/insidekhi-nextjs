@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { logAuditEvent } from "@/lib/audit";
@@ -13,14 +13,30 @@ import {
 } from "@/types/category.types";
 import type { GradientStyle } from "@/lib/utils/gradientStyles";
 
+type CategoryRow = {
+  id: number;
+  name: string;
+  slug: string;
+  parent_id: number | null;
+  icon_name: string | null;
+  show_in_nav: boolean;
+  show_in_featured: boolean;
+  show_in_filters: boolean;
+  is_enabled: boolean;
+  category_type: string;
+  display_order: number | null;
+  gradient_style: string | null;
+  created_at: string;
+};
+
 /**
  * GET /api/admin/categories
  * Fetch all categories with optional filters
  * Query params: parent_id, show_in_nav, search
  */
 export async function GET(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    // Verify authentication
+  try {
+    // Verify authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -28,13 +44,13 @@ export async function GET(request: NextRequest) {
     }
 
     // Verify super_admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
 
@@ -53,10 +69,60 @@ export async function GET(request: NextRequest) {
     const searchParam = searchParams.get("search");
 
     // Build query - fetch categories (no nested select due to missing FK constraint)
-    let query = supabase
-      .from("categories")
-      .select(
-        `
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let paramIdx = 1;
+
+    // Filter by parent_id
+    if (parentIdParam !== null && parentIdParam !== "all") {
+      if (parentIdParam === "null" || parentIdParam === "roots") {
+        conditions.push("parent_id IS NULL");
+      } else {
+        const parentId = parseInt(parentIdParam);
+        if (!isNaN(parentId)) {
+          conditions.push(`parent_id = $${paramIdx}`);
+          params.push(parentId);
+          paramIdx++;
+        }
+      }
+    }
+
+    // Filter by show_in_nav
+    if (showInNavParam !== null && showInNavParam !== "all") {
+      conditions.push(`show_in_nav = $${paramIdx}`);
+      params.push(showInNavParam === "true");
+      paramIdx++;
+    }
+
+    // Filter by category_type
+    if (categoryTypeParam && categoryTypeParam !== "all") {
+      if (categoryTypeParam === "listing" || categoryTypeParam === "event") {
+        conditions.push(
+          `(category_type = $${paramIdx} OR category_type = 'both')`
+        );
+        params.push(categoryTypeParam);
+        paramIdx++;
+      } else if (categoryTypeParam === "both") {
+        conditions.push(`category_type = $${paramIdx}`);
+        params.push("both");
+        paramIdx++;
+      }
+    }
+
+    // Search filter
+    if (searchParam) {
+      conditions.push(
+        `(name ILIKE $${paramIdx} OR slug ILIKE $${paramIdx})`
+      );
+      params.push(`%${searchParam}%`);
+      paramIdx++;
+    }
+
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const { rows: categories } = await query(
+      `SELECT
         id,
         name,
         slug,
@@ -70,113 +136,78 @@ export async function GET(request: NextRequest) {
         display_order,
         gradient_style,
         created_at
-      `
-      )
-      .order("name", { ascending: true });
+      FROM public.categories
+      ${whereClause}
+      ORDER BY name ASC`,
+      params
+    );
 
-    // Filter by parent_id
-    if (parentIdParam !== null && parentIdParam !== "all") {
-      if (parentIdParam === "null" || parentIdParam === "roots") {
-        query = query.is("parent_id", null);
-      } else {
-        const parentId = parseInt(parentIdParam);
-        if (!isNaN(parentId)) {
-          query = query.eq("parent_id", parentId);
-        }
-      }
-    }
-
-    // Filter by show_in_nav
-    if (showInNavParam !== null && showInNavParam !== "all") {
-      query = query.eq("show_in_nav", showInNavParam === "true");
-    }
-
-    // Filter by category_type
-    if (categoryTypeParam && categoryTypeParam !== "all") {
-      if (categoryTypeParam === "listing" || categoryTypeParam === "event") {
-        query = query.or(
-          `category_type.eq.${categoryTypeParam},category_type.eq.both`
-        );
-      } else if (categoryTypeParam === "both") {
-        query = query.eq("category_type", "both");
-      }
-    }
-
-    // Search filter
-    if (searchParam) {
-      query = query.or(
-        `name.ilike.%${searchParam}%,slug.ilike.%${searchParam}%`
-      );
-    }
-
-    const { data: categories, error: fetchError } = await query;
-
-    if (fetchError) {
-      console.error("Error fetching categories:", fetchError);
-      return NextResponse.json(
-        { error: "Failed to fetch categories" },
-        { status: 500 }
-      );
-    }
+    const typedCategories = categories as CategoryRow[];
 
     // Build a map of category id -> category for parent lookups
     const categoryMap = new Map<number, { name: string; slug: string }>();
-    (categories || []).forEach((cat) => {
+    typedCategories.forEach((cat) => {
       categoryMap.set(cat.id, { name: cat.name, slug: cat.slug });
     });
 
-    // Fetch all listings to count them (manual aggregation for accuracy)
-    const { data: allListings } = await supabase
-      .from("listings")
-      .select("category_id")
-      .eq("status", "published");
+    // Count published listings per category via junction (supports multi-category)
+    const { rows: allListings } = await query(
+      `SELECT lc.category_id
+       FROM public.listing_categories lc
+       INNER JOIN public.listings l ON l.id = lc.listing_id
+       WHERE l.status = 'published'`
+    );
 
     const listingCountMap = new Map<number, number>();
-    if (allListings) {
-      allListings.forEach((l) => {
-        if (l.category_id) {
-          listingCountMap.set(
-            l.category_id,
-            (listingCountMap.get(l.category_id) || 0) + 1
-          );
-        }
-      });
-    }
+    (allListings as { category_id: number | null }[]).forEach((l) => {
+      if (l.category_id) {
+        listingCountMap.set(
+          l.category_id,
+          (listingCountMap.get(l.category_id) || 0) + 1
+        );
+      }
+    });
 
     // Fetch all events to count them
-    const { data: allEvents } = await supabase
-      .from("events")
-      .select("category_id")
-      .eq("status", "published");
+    const { rows: allEvents } = await query(
+      `SELECT category_id FROM public.events WHERE status = 'published'`
+    );
 
     const eventCountMap = new Map<number, number>();
-    if (allEvents) {
-      allEvents.forEach((evt) => {
-        if (evt.category_id) {
-          eventCountMap.set(
-            evt.category_id,
-            (eventCountMap.get(evt.category_id) || 0) + 1
-          );
-        }
-      });
-    }
+    (allEvents as { category_id: number | null }[]).forEach((evt) => {
+      if (evt.category_id) {
+        eventCountMap.set(
+          evt.category_id,
+          (eventCountMap.get(evt.category_id) || 0) + 1
+        );
+      }
+    });
 
     // Build tree to calculate cumulative counts for parents
-    const categoryTree = new Map<number, { id: number; parent_id: number | null; listing_count: number; event_count: number; children: number[] }>();
+    const categoryTree = new Map<
+      number,
+      {
+        id: number;
+        parent_id: number | null;
+        listing_count: number;
+        event_count: number;
+        children: number[];
+      }
+    >();
 
     // Initialize tree nodes
-    (categories || []).forEach(cat => {
+    typedCategories.forEach((cat) => {
       categoryTree.set(cat.id, {
         id: cat.id,
         parent_id: cat.parent_id,
         listing_count: listingCountMap.get(cat.id) || 0,
         event_count: eventCountMap.get(cat.id) || 0,
-        children: []
+        children: [],
       });
     });
 
     // Build hierarchy
-    (categories || []).forEach(cat => {
+    typedCategories.forEach((cat) => {
       if (cat.parent_id && categoryTree.has(cat.parent_id)) {
         categoryTree.get(cat.parent_id)!.children.push(cat.id);
       }
@@ -190,7 +221,7 @@ export async function GET(request: NextRequest) {
       let listings = node.listing_count;
       let events = node.event_count;
 
-      node.children.forEach(childId => {
+      node.children.forEach((childId) => {
         const childCounts = getTotalCounts(childId);
         listings += childCounts.listings;
         events += childCounts.events;
@@ -201,12 +232,12 @@ export async function GET(request: NextRequest) {
 
     // Calculate final counts for all categories
     const finalCounts = new Map<number, { listings: number; events: number }>();
-    (categories || []).forEach(cat => {
+    typedCategories.forEach((cat) => {
       finalCounts.set(cat.id, getTotalCounts(cat.id));
     });
 
     // Transform data to include parent name and counts
-    const transformedCategories: CategoryWithParent[] = (categories || []).map(
+    const transformedCategories: CategoryWithParent[] = typedCategories.map(
       (cat) => {
         const parentInfo = cat.parent_id
           ? categoryMap.get(cat.parent_id)
@@ -275,8 +306,8 @@ export async function GET(request: NextRequest) {
  * Create a new category
  */
 export async function POST(request: NextRequest) {
-    const supabase = await createServerSupabase();
-  try {    // Verify authentication
+  try {
+    // Verify authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -284,13 +315,13 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify super_admin role
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
 
@@ -334,13 +365,12 @@ export async function POST(request: NextRequest) {
     const slug = providedSlug || generateCategorySlug(name);
 
     // Check slug uniqueness
-    const { data: existingSlug } = await supabase
-      .from("categories")
-      .select("id")
-      .ilike("slug", slug)
-      .single();
+    const { rows: existingSlugRows } = await query(
+      "SELECT id FROM public.categories WHERE slug ILIKE $1 LIMIT 1",
+      [slug]
+    );
 
-    if (existingSlug) {
+    if (existingSlugRows.length > 0) {
       return NextResponse.json(
         {
           success: false,
@@ -352,11 +382,13 @@ export async function POST(request: NextRequest) {
 
     // Validate parent_id exists (if provided)
     if (parent_id !== null && parent_id !== undefined) {
-      const { data: parentCategory } = await supabase
-        .from("categories")
-        .select("id, parent_id")
-        .eq("id", parent_id)
-        .single();
+      const { rows: parentRows } = await query(
+        "SELECT id, parent_id FROM public.categories WHERE id = $1 LIMIT 1",
+        [parent_id]
+      );
+      const parentCategory = parentRows[0] as
+        | { id: number; parent_id: number | null }
+        | undefined;
 
       if (!parentCategory) {
         return NextResponse.json(
@@ -382,25 +414,29 @@ export async function POST(request: NextRequest) {
     }
 
     // Create category
-    const { data: newCategory, error: insertError } = await supabase
-      .from("categories")
-      .insert({
-        name: name.trim(),
-        slug,
-        parent_id: parent_id ?? null,
-        icon_name: icon_name || DEFAULT_CATEGORY_ICON,
-        show_in_nav: show_in_nav ?? false,
-        show_in_featured: show_in_featured ?? false,
-        show_in_filters: show_in_filters ?? true,
-        is_enabled: is_enabled ?? true,
-        category_type: category_type ?? "listing",
-        display_order: display_order ?? null,
-        gradient_style: gradient_style ?? "slate",
-      })
-      .select()
-      .single();
-
-    if (insertError) {
+    let newCategory: CategoryRow;
+    try {
+      const { rows: insertedRows } = await query(
+        `INSERT INTO public.categories
+          (name, slug, parent_id, icon_name, show_in_nav, show_in_featured, show_in_filters, is_enabled, category_type, display_order, gradient_style)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING *`,
+        [
+          name.trim(),
+          slug,
+          parent_id ?? null,
+          icon_name || DEFAULT_CATEGORY_ICON,
+          show_in_nav ?? false,
+          show_in_featured ?? false,
+          show_in_filters ?? true,
+          is_enabled ?? true,
+          category_type ?? "listing",
+          display_order ?? null,
+          gradient_style ?? "slate",
+        ]
+      );
+      newCategory = insertedRows[0] as CategoryRow;
+    } catch (insertError) {
       console.error("Error creating category:", insertError);
       return NextResponse.json(
         { success: false, error: "Failed to create category" },

@@ -6,7 +6,7 @@ import {
   type SyncConfig,
 } from "@/lib/scraper/sync-executor";
 import { syncStateManager } from "@/lib/scraper/redis-state-manager";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { checkListingSyncFreshness } from "@/lib/scraper/alerts";
 import {
   captureWorkerException,
@@ -215,23 +215,14 @@ async function handleStop(req: IncomingMessage, res: ServerResponse) {
 
 async function markSyncAsStopping(syncId: string) {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-    const { error } = await supabase
-      .from("listing_sync_history")
-      .update({
-        status: "stopping",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", syncId)
-      .eq("status", "running");
-
-    if (error) {
-      console.warn(
-        `[WORKER] Failed to mark sync as stopping (syncId=${syncId}): ${error.message}`,
-      );
-    }
+    await query(
+      `UPDATE listing_sync_history
+       SET status = 'stopping', updated_at = NOW()
+       WHERE id = $1 AND status = 'running'`,
+      [syncId],
+    );
   } catch (error) {
-    console.warn(`[WORKER] Failed to update stopping state for ${syncId}:`, error);
+    console.warn(`[WORKER] Failed to mark sync as stopping (syncId=${syncId}):`, error);
     captureWorkerException(error, {
       scope: "worker_runtime",
       operation: "markSyncAsStopping",
@@ -241,18 +232,20 @@ async function markSyncAsStopping(syncId: string) {
 }
 
 async function loadWorkerAutomationConfig() {
-  const supabase = await createServerSupabase({ useServiceRole: true });
-  const { data, error } = await supabase
-    .from("system_config")
-    .select("config_value")
-    .eq("config_key", WORKER_CONFIG_KEY)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(`Failed to load worker automation config: ${error.message}`);
+  let configValue: unknown;
+  try {
+    const { rows } = await query(
+      `SELECT config_value FROM system_config WHERE config_key = $1 LIMIT 1`,
+      [WORKER_CONFIG_KEY],
+    );
+    configValue = rows[0]?.config_value;
+  } catch (error) {
+    throw new Error(
+      `Failed to load worker automation config: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
-  const parsed = WorkerAutomationSchema.safeParse(data?.config_value || {});
+  const parsed = WorkerAutomationSchema.safeParse(configValue || {});
   if (!parsed.success) {
     throw new Error("Worker automation config is invalid");
   }

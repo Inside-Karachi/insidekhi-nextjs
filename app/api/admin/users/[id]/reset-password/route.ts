@@ -1,6 +1,7 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
+import { hashPassword } from "@/lib/auth/password";
 
 export async function POST(
   request: NextRequest,
@@ -29,7 +30,7 @@ export async function POST(
       );
     }
 
-    // Create authenticated supabase client first to verify admin    // Check if user is authenticated
+    // Check if user is authenticated
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -70,20 +71,14 @@ export async function POST(
       `[RESET PASSWORD] Rate limit check passed. Remaining: ${rateLimitCheck.remaining}/20`
     );
 
-    // Create service role client for admin operations
-    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
-
     // Verify user is admin or super_admin
-    const { data: profile, error: profileError } = await serviceSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId]
+    );
+    const profile = profileRows[0];
 
     if (
-      profileError ||
       !profile ||
       (profile.role !== "admin" && profile.role !== "super_admin")
     ) {
@@ -93,65 +88,56 @@ export async function POST(
       );
     }
 
-    // Update the user's password using auth admin API
-    const { data: updateData, error: updateError } =
-      await serviceSupabase.auth.admin.updateUserById(userId, {
-        password: password,
-      });
-
-    if (updateError) {
+    // Update the user's password
+    const encryptedPassword = await hashPassword(password);
+    let updatedUser;
+    try {
+      const { rows } = await query(
+        `UPDATE auth.users SET encrypted_password = $1, updated_at = NOW() WHERE id = $2 RETURNING id, email`,
+        [encryptedPassword, userId]
+      );
+      updatedUser = rows[0];
+    } catch (updateError) {
       console.error("Password reset error:", updateError);
       return NextResponse.json(
-        { error: `Failed to reset password: ${updateError.message}` },
+        { error: "Failed to reset password" },
         { status: 500 }
       );
     }
 
-    // Log the password reset action (optional but recommended for audit trails)
-    await serviceSupabase.from("audit_logs").insert({
-      user_id: session.userId,
-      action: "password_reset",
-      resource_type: "user",
-      resource_id: userId,
-      details: {
-        timestamp: new Date().toISOString(),
-        action_type: "password_reset",
-      },
-    });
-
-    // Session invalidation: Force re-authentication after password reset
-    console.log(`[RESET PASSWORD] Invalidating user session for security...`);
-    try {
-      const { error: signOutError } = await serviceSupabase.auth.admin.signOut(
-        userId,
-        "global" // Sign out from all devices for password reset
-      );
-
-      if (signOutError) {
-        console.error(
-          `[RESET PASSWORD] Failed to invalidate user session:`,
-          signOutError
-        );
-        // Log but don't fail - password was reset successfully
-      } else {
-        console.log(
-          `[RESET PASSWORD] User session invalidated globally. User must log in with new password.`
-        );
-      }
-    } catch (sessionError) {
-      console.error(
-        `[RESET PASSWORD] Error during session invalidation:`,
-        sessionError
-      );
-      // Continue - don't fail the operation
+    if (!updatedUser) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
+    // Log the password reset action
+    try {
+      await query(
+        `INSERT INTO audit_logs (admin_id, user_id, action, entity_type, entity_id, metadata)
+         VALUES ($1, $2, 'password_reset', 'user', $3, $4)`,
+        [
+          session.userId,
+          userId,
+          userId,
+          { timestamp: new Date().toISOString(), action_type: "password_reset" },
+        ]
+      );
+    } catch (logError) {
+      console.error("Failed to log password reset:", logError);
+      // Don't fail the operation if logging fails
+    }
+
+    // NOTE: sessions here are stateless JWTs with no server-side revocation
+    // list, so unlike the old Supabase-backed flow, there is currently no way
+    // to force the user's existing session to expire early. Anyone with an
+    // active session before this reset stays logged in until it expires
+    // naturally (up to 7 days) - the new password only takes effect the next
+    // time they log in.
     return NextResponse.json({
       success: true,
       message:
-        "Password reset successfully. User will be required to log in again.",
-      user: updateData.user,
-      session_invalidated: true,
+        "Password reset successfully. Note: their existing session remains valid until it expires naturally (up to 7 days) - there is currently no way to force it to expire immediately.",
+      user: updatedUser,
+      session_invalidated: false,
     });
   } catch (error) {
     console.error("Password reset error:", error);

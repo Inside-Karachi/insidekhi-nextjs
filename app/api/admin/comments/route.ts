@@ -1,29 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  createServerSupabase,
-  getSupabaseClientForRole,
-} from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { CommentWithAuthor, CommentListResponse } from "@/types/comment.types";
 
 // GET /api/admin/comments - Get all comments for moderation
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
+    const session = await getSessionFromCookies();
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    // Use a regular client for profile lookup
-    const profileClient = await createServerSupabase();
-    const { data: profile, error: profileError } = await profileClient
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-    if (profileError || !profile) {
+
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
+
+    if (!profile) {
       return NextResponse.json({ error: "Profile not found" }, { status: 403 });
     }
     if (!["admin", "super_admin", "lister"].includes(profile.role)) {
@@ -32,8 +26,6 @@ export async function GET(request: NextRequest) {
         { status: 403 }
       );
     }
-    // Use correct client for DB operations
-    const adminSupabase = await getSupabaseClientForRole(profile.role);
 
     const { searchParams } = new URL(request.url);
 
@@ -48,56 +40,87 @@ export async function GET(request: NextRequest) {
     const sort_by = searchParams.get("sort_by") || "created_at";
     const sort_order = searchParams.get("sort_order") || "desc";
 
-    // Build query
-    let query = adminSupabase.from("review_comments").select(
-      `
-        *,
-        profiles!review_comments_user_id_fkey(full_name, avatar_url),
-        reviews!review_comments_review_id_fkey(listing_id, user_id)
-      `,
-      { count: "exact" }
-    );
-
     // Apply status filter if provided
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let paramIdx = 1;
+
     if (
       status &&
       ["pending", "approved", "rejected", "flagged"].includes(status)
     ) {
-      query = query.eq("status", status);
+      conditions.push(`rc.status = $${paramIdx}`);
+      params.push(status);
+      paramIdx++;
     }
 
-    // Apply sorting
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    // Apply sorting (allow-list to avoid SQL injection via ORDER BY)
     const validSortFields = ["created_at", "updated_at"];
     const sortField = validSortFields.includes(sort_by)
       ? sort_by
       : "created_at";
-    const sortDirection = sort_order === "asc" ? true : false;
+    const sortDirection = sort_order === "asc" ? "ASC" : "DESC";
 
-    query = query.order(sortField, { ascending: sortDirection });
-    query = query.range(offset, offset + limit - 1);
+    const commentsSql = `
+      SELECT
+        rc.*,
+        p.full_name  AS author_full_name,
+        p.avatar_url AS author_avatar_url,
+        r.listing_id AS review_listing_id,
+        r.user_id    AS review_user_id
+      FROM public.review_comments rc
+      LEFT JOIN public.profiles p ON p.id = rc.user_id
+      LEFT JOIN public.reviews r ON r.id = rc.review_id
+      ${whereClause}
+      ORDER BY rc.${sortField} ${sortDirection}
+      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}
+    `;
+    params.push(limit, offset);
 
-    const { data: comments, error: commentsError, count } = await query;
+    const { rows: comments } = await query(commentsSql, params);
 
-    if (commentsError) {
-      console.error("Error fetching comments for moderation:", commentsError);
-      return NextResponse.json(
-        { error: "Failed to fetch comments" },
-        { status: 500 }
-      );
-    }
+    const countParams = params.slice(0, paramIdx - 1);
+    const countSql = `
+      SELECT COUNT(*)::int AS count
+      FROM public.review_comments rc
+      ${whereClause}
+    `;
+    const { rows: countRows } = await query(countSql, countParams);
+    const count = (countRows[0] as { count: number })?.count ?? 0;
 
     // Transform data
-    const transformedComments =
-      comments?.map((comment) => ({
-        ...comment,
-        author_name: comment.profiles?.full_name || null,
-        author_avatar: comment.profiles?.avatar_url || null,
-      })) || [];
+    type RawCommentRow = {
+      author_full_name: string | null;
+      author_avatar_url: string | null;
+      review_listing_id: number | null;
+      review_user_id: string | null;
+      [key: string]: unknown;
+    };
+
+    const transformedComments = (comments as RawCommentRow[]).map(
+      (comment) => {
+        const {
+          author_full_name,
+          author_avatar_url,
+          review_listing_id: _review_listing_id,
+          review_user_id: _review_user_id,
+          ...rest
+        } = comment;
+        return {
+          ...rest,
+          author_name: author_full_name || null,
+          author_avatar: author_avatar_url || null,
+        };
+      }
+    );
 
     // Get statistics
-    const { data: statsData, error: statsError } = await adminSupabase
-      .from("review_comments")
-      .select("status");
+    const { rows: statsData } = await query(
+      "SELECT status FROM public.review_comments"
+    );
 
     const statistics = (() => {
       const stats = {
@@ -107,30 +130,28 @@ export async function GET(request: NextRequest) {
         rejectedComments: 0,
         flaggedComments: 0,
       };
-      if (!statsError && statsData) {
-        stats.totalComments = statsData.length;
-        statsData.forEach((comment) => {
-          switch (comment.status) {
-            case "pending":
-              stats.pendingComments++;
-              break;
-            case "approved":
-              stats.approvedComments++;
-              break;
-            case "rejected":
-              stats.rejectedComments++;
-              break;
-            case "flagged":
-              stats.flaggedComments++;
-              break;
-          }
-        });
-      }
+      stats.totalComments = statsData.length;
+      (statsData as { status: string }[]).forEach((comment) => {
+        switch (comment.status) {
+          case "pending":
+            stats.pendingComments++;
+            break;
+          case "approved":
+            stats.approvedComments++;
+            break;
+          case "rejected":
+            stats.rejectedComments++;
+            break;
+          case "flagged":
+            stats.flaggedComments++;
+            break;
+        }
+      });
       return stats;
     })();
 
     const response: CommentListResponse & { statistics: typeof statistics } = {
-      comments: transformedComments as CommentWithAuthor[],
+      comments: transformedComments as unknown as CommentWithAuthor[],
       total: count || 0,
       page,
       limit,

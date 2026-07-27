@@ -32,50 +32,37 @@ export function MaintenancePage({
   useEffect(() => {
     setMounted(true);
 
-    // Subscribe to real-time changes in maintenance configuration
-    // This will instantly redirect users when admin disables maintenance mode
-    const setupRealtimeSubscription = async () => {
+    // Poll the public system config for maintenance.enabled and redirect
+    // as soon as an admin disables maintenance mode (Supabase Realtime is
+    // no longer available, so this replaces the old postgres_changes sub).
+    const POLL_MS = 30000;
+
+    const checkMaintenanceStatus = async () => {
       try {
-        // Dynamically import Supabase client to avoid SSR issues
-        const { createClient } = await import("@/lib/supabase/client");
-        const supabase = createClient();
+        const res = await fetch("/api/system/config", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        const newValue = data?.config?.["maintenance.enabled"];
+        const enabled =
+          newValue === true ||
+          newValue === "true" ||
+          (typeof newValue === "string" && newValue.toLowerCase() === "true");
 
-        // Subscribe to changes in system_config table for maintenance.enabled
-        const channel = supabase
-          .channel("maintenance-status")
-          .on(
-            "postgres_changes",
-            {
-              event: "UPDATE",
-              schema: "public",
-              table: "system_config",
-              filter: "config_key=eq.maintenance.enabled",
-            },
-            (payload) => {
-              const newValue = payload.new.config_value;
-              const enabled =
-                newValue === true ||
-                newValue === "true" ||
-                (typeof newValue === "string" &&
-                  newValue.toLowerCase() === "true");
-
-              if (!enabled) {
-                // Maintenance mode disabled - redirect to home
-                window.location.href = "/";
-              }
-            },
-          )
-          .subscribe();
-
-        return () => {
-          supabase.removeChannel(channel);
-        };
+        if (!enabled) {
+          // Maintenance mode disabled - redirect to home
+          window.location.href = "/";
+        }
       } catch (error) {
-        console.error("Error setting up realtime subscription:", error);
+        console.error("Error polling maintenance status:", error);
       }
     };
 
-    setupRealtimeSubscription();
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void checkMaintenanceStatus();
+    }, POLL_MS);
+
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {

@@ -33,12 +33,12 @@ function ResetPasswordForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isValidToken, setIsValidToken] = useState<boolean | null>(null);
-  const [code, setCode] = useState<string | null>(null);
+  const [resetCode, setResetCode] = useState<string | null>(null);
 
   useEffect(() => {
-    const resetCode = searchParams.get("code") || searchParams.get("token");
+    const code = searchParams.get("code") || searchParams.get("token");
 
-    if (!resetCode) {
+    if (!code) {
       setError(
         "Invalid or expired reset link. Please request a new password reset.",
       );
@@ -46,7 +46,10 @@ function ResetPasswordForm() {
       return;
     }
 
-    setCode(resetCode);
+    // Actual validation (does the code match a live, unexpired recovery
+    // token) happens server-side on submit - this just confirms a code was
+    // present in the link before showing the password form.
+    setResetCode(code);
     setIsValidToken(true);
   }, [searchParams]);
 
@@ -87,10 +90,10 @@ function ResetPasswordForm() {
     }
 
     try {
-      const response = await fetch("/api/auth/update-password", {
+      const response = await fetch("/api/auth/reset-password/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, password }),
+        body: JSON.stringify({ code: resetCode, password }),
       });
 
       const data = await response.json();
@@ -109,9 +112,10 @@ function ResetPasswordForm() {
           description: "Your password has been successfully updated.",
         });
 
-        // Redirect to login after a short delay
+        // Already logged in via the session cookie set by the confirm
+        // endpoint - send them straight to the dashboard.
         setTimeout(() => {
-          router.push("/login");
+          router.push("/dashboard");
         }, 2000);
       }
     } catch (err) {
@@ -264,14 +268,14 @@ function ResetPasswordForm() {
                   className="text-center space-y-4"
                 >
                   <p className="text-white/80 text-sm">
-                    You will be redirected to the login page shortly...
+                    You will be redirected to your dashboard shortly...
                   </p>
 
                   <Link
-                    href="/login"
+                    href="/dashboard"
                     className="inline-flex items-center space-x-2 px-6 py-3 bg-white/20 hover:bg-white/30 border border-white/30 text-white font-medium rounded-lg transition-all duration-300 hover:border-white/50"
                   >
-                    Go to Login
+                    Go to Dashboard
                     <ArrowRight className="h-4 w-4" />
                   </Link>
                 </motion.div>

@@ -1,4 +1,3 @@
-import { createServerSupabase } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { requireSuperAdmin, getAdminAuthErrorStatus } from "@/lib/auth/admin";
@@ -84,9 +83,6 @@ export async function POST(
       );
     }
 
-    // Use service role client for the notification call (shared lib still requires it).
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     // Try to use the atomic RPC function first (preferred)
     const signingSecret = process.env.TICKET_SIGNING_SECRET;
 
@@ -158,32 +154,29 @@ export async function POST(
             passesCreated,
           });
 
-          const notificationResult = await createNotification(
-            {
-              recipientId: bookingData.user_id,
-              roleScope: "public_user",
-              categorySlug: "public_booking_confirmation",
-              title: "🎉 Payment Confirmed!",
-              body: `Your tickets for ${eventName} are ready. ${passesCreated} pass${
-                passesCreated !== 1 ? "es" : ""
-              } issued.`,
-              priority: "high",
-              ctaLabel: "View My Tickets",
-              ctaUrl: `/dashboard/bookings`,
-              metadata: {
-                booking_id: bookingId,
-                booking_reference: bookingData.booking_reference,
-                event_name: eventName,
-                passes_count: passesCreated,
-              },
-              channelOverrides: {
-                bell: true,
-                email: true,
-                push: false,
-              },
+          const notificationResult = await createNotification({
+            recipientId: bookingData.user_id,
+            roleScope: "public_user",
+            categorySlug: "public_booking_confirmation",
+            title: "🎉 Payment Confirmed!",
+            body: `Your tickets for ${eventName} are ready. ${passesCreated} pass${
+              passesCreated !== 1 ? "es" : ""
+            } issued.`,
+            priority: "high",
+            ctaLabel: "View My Tickets",
+            ctaUrl: `/dashboard/bookings`,
+            metadata: {
+              booking_id: bookingId,
+              booking_reference: bookingData.booking_reference,
+              event_name: eventName,
+              passes_count: passesCreated,
             },
-            { supabase: adminSupabase },
-          );
+            channelOverrides: {
+              bell: true,
+              email: true,
+              push: false,
+            },
+          });
 
           console.log("[RPC PATH] Notification created:", {
             notification_id: notificationResult.notification.id,
@@ -203,7 +196,6 @@ export async function POST(
                 await import("@/lib/notifications/dispatcher");
               const dispatchResult =
                 await dispatchModule.dispatchEmailOutboxBatch({
-                  supabase: adminSupabase,
                   limit: 10,
                 });
               console.log("[RPC PATH] Email dispatch result:", {
@@ -428,32 +420,29 @@ export async function POST(
           const eventName = (fullBooking.event as { name: string }).name;
 
           // Create in-app notification
-          await createNotification(
-            {
-              recipientId: booking.user_id,
-              roleScope: "public_user",
-              categorySlug: "public_booking_confirmation",
-              title: "🎉 Payment Confirmed!",
-              body: `Your tickets for ${eventName} are ready. ${passesCreated} pass${
-                passesCreated !== 1 ? "es" : ""
-              } issued.`,
-              priority: "high",
-              ctaLabel: "View My Tickets",
-              ctaUrl: `/dashboard/bookings`,
-              metadata: {
-                booking_id: bookingId,
-                booking_reference: fullBooking.booking_reference,
-                event_name: eventName,
-                passes_count: passesCreated,
-              },
-              channelOverrides: {
-                bell: true,
-                email: true, // Will send email via dispatcher
-                push: false,
-              },
+          await createNotification({
+            recipientId: booking.user_id,
+            roleScope: "public_user",
+            categorySlug: "public_booking_confirmation",
+            title: "🎉 Payment Confirmed!",
+            body: `Your tickets for ${eventName} are ready. ${passesCreated} pass${
+              passesCreated !== 1 ? "es" : ""
+            } issued.`,
+            priority: "high",
+            ctaLabel: "View My Tickets",
+            ctaUrl: `/dashboard/bookings`,
+            metadata: {
+              booking_id: bookingId,
+              booking_reference: fullBooking.booking_reference,
+              event_name: eventName,
+              passes_count: passesCreated,
             },
-            { supabase: adminSupabase },
-          );
+            channelOverrides: {
+              bell: true,
+              email: true, // Will send email via dispatcher
+              push: false,
+            },
+          });
 
           console.log(
             `Notification sent for booking ${bookingId} to user ${booking.user_id}`,

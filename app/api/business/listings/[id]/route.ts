@@ -301,7 +301,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         const { createNotification } =
           await import("@/lib/notifications/service");
         const { rows: admins } = await query(
-          `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+          `SELECT id FROM profiles WHERE role::text = ANY($1::text[])`,
           [["lister", "admin", "super_admin"]],
         );
 
@@ -449,7 +449,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         const { createNotification } =
           await import("@/lib/notifications/service");
         const { rows: admins } = await query(
-          `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+          `SELECT id FROM profiles WHERE role::text = ANY($1::text[])`,
           [["lister", "admin", "super_admin"]],
         );
 
@@ -580,6 +580,23 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       updatedListing = updatedRows[0];
     } catch (error) {
       updateError = error as Error & { code?: string };
+    }
+
+    if (!updateError && updateKeys.includes("category_id") && updatedListing) {
+      try {
+        const { syncListingCategories } = await import(
+          "@/lib/listings/sync-listing-categories"
+        );
+        const catId = (updatedListing as { category_id?: number | null })
+          .category_id;
+        await syncListingCategories(
+          listingId,
+          catId != null ? [catId] : [],
+          catId,
+        );
+      } catch (syncError) {
+        console.error("Failed to sync listing categories:", syncError);
+      }
     }
 
     if (updateError) {
@@ -869,7 +886,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     try {
       const { createNotification } = await import("@/lib/notifications/service");
       const { rows: admins } = await query(
-        `SELECT id FROM profiles WHERE role = ANY($1::text[])`,
+        `SELECT id FROM profiles WHERE role::text = ANY($1::text[])`,
         [["lister", "admin", "super_admin"]],
       );
 

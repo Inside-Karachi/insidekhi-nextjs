@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
 import { OpeningHours } from "@/components/listing/OpeningHours";
 import { useBranchSelection } from "@/lib/context/BranchSelectionContext";
 import { OpeningHoursSkeleton } from "@/components/listing/skeletons";
@@ -30,26 +29,22 @@ export function OpeningHoursContainer({
   useEffect(() => {
     async function fetchOpeningHours() {
       setIsLoading(true);
-      const supabase = createClient();
 
-      // Fetch opening hours - filter by branch if one is selected
-      const query = supabase
-        .from("opening_hours")
-        .select("*")
-        .eq("listing_id", listingId)
-        .order("day_of_week", { ascending: true });
+      // Fetch opening hours - filter by branch if one is selected.
+      // If a branch is selected, show branch-specific hours; otherwise show
+      // listing-level hours (branch_id IS NULL) via the API route.
+      const url = selectedBranchId
+        ? `/api/listings/${listingId}/opening-hours?branch_id=${selectedBranchId}`
+        : `/api/listings/${listingId}/opening-hours`;
 
-      // If a branch is selected, show branch-specific hours
-      // Otherwise, show listing-level hours (branch_id IS NULL)
-      if (selectedBranchId) {
-        query.eq("branch_id", selectedBranchId);
-      } else {
-        query.is("branch_id", null);
+      try {
+        const res = await fetch(url);
+        const json = await res.json();
+        setOpeningHours(json?.data || []);
+      } catch {
+        setOpeningHours([]);
       }
 
-      const { data } = await query;
-
-      setOpeningHours(data || []);
       setIsLoading(false);
     }
 

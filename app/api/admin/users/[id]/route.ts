@@ -1,6 +1,5 @@
-import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth/admin";
 
 // GET /api/admin/users/[id] - Get user by ID (for OrganizerSelect)
@@ -8,21 +7,22 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await getSessionFromCookies();
   try {
     // Use existing admin authentication utility
     await requireAdmin(request);
-    const supabase = await createServerSupabase();
     const { id } = await params;
 
-    // Get user profile using regular authenticated client with RLS
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("id, full_name, email, avatar_url, role")
-      .eq("id", id)
-      .single();
+    const { rows } = await query(
+      `SELECT p.id, p.full_name, u.email, p.avatar_url, p.role
+       FROM public.profiles p
+       LEFT JOIN auth.users u ON u.id = p.id
+       WHERE p.id = $1
+       LIMIT 1`,
+      [id],
+    );
+    const profile = rows[0];
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "User not found" },
         { status: 404 },
@@ -50,7 +50,6 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await getSessionFromCookies();
   const startTime = Date.now();
 
   try {
@@ -60,6 +59,22 @@ export async function PUT(
     const resolvedParams = await params;
     const userId = resolvedParams.id;
     const body = await request.json();
+
+    // Get current user data up front - needed both for logging and for
+    // validating role/active_role combinations below.
+    const { rows: currentProfileRows } = await query(
+      `SELECT * FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [userId],
+    );
+    const currentProfile = currentProfileRows[0];
+
+    if (!currentProfile) {
+      console.error(`[UPDATE USER] User not found: ${userId}`);
+      return NextResponse.json(
+        { success: false, error: "User not found" },
+        { status: 404 },
+      );
+    }
 
     // Validate input
     const allowedFields = [
@@ -90,6 +105,7 @@ export async function PUT(
       "business_owner",
       "writer",
       "lister",
+      "data_entry",
       "organizer",
       "admin",
       "super_admin",
@@ -102,30 +118,51 @@ export async function PUT(
       );
     }
 
-    // active_role handling:
-    // - super_admin: can set active_role to any valid value explicitly
-    // - non-super_admin: active_role is always auto-synced from role; explicit overrides are stripped
+    // active_role handling. This must mirror the DB's validate_active_role
+    // trigger exactly (see profiles table), which enforces:
+    // - "staff" roles (lister, admin, super_admin, business_owner) may have
+    //   active_role be either themselves or 'public_user'
+    // - every other role (writer, organizer, public_user) must have
+    //   active_role === role, with no override allowed
+    // Getting this wrong doesn't just produce a bad value - the trigger
+    // rejects the whole UPDATE, so the effective role (new if provided,
+    // else the user's current one) decides what's actually allowed here.
+    const STAFF_SWITCHABLE_ROLES = new Set([
+      "lister",
+      "admin",
+      "super_admin",
+      "business_owner",
+    ]);
+    const effectiveRole = updateData.role || currentProfile.role;
+
     if (adminAuth.profile.role !== "super_admin") {
       // Strip any explicit active_role sent by the client - we'll sync it from role below
       delete updateData.active_role;
-    } else {
-      // super_admin explicit active_role validation
-      if (
-        updateData.active_role &&
-        !validRoles.includes(updateData.active_role)
-      ) {
-        console.error(
-          `[UPDATE USER] Invalid active_role: ${updateData.active_role}`,
-        );
-        return NextResponse.json(
-          { success: false, error: "Invalid active_role" },
-          { status: 400 },
-        );
-      }
+    } else if (!STAFF_SWITCHABLE_ROLES.has(effectiveRole)) {
+      // Only one valid active_role exists for this role - correct it
+      // automatically rather than rejecting the save over what's usually
+      // just a stale form value from before "Role" was changed, not a
+      // deliberate override attempt (only staff-switchable roles support
+      // a genuine override, handled below).
+      updateData.active_role = effectiveRole;
+    } else if (
+      updateData.active_role &&
+      !["public_user", effectiveRole].includes(updateData.active_role)
+    ) {
+      console.error(
+        `[UPDATE USER] Invalid active_role ${updateData.active_role} for role ${effectiveRole}`,
+      );
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Active role must be "${effectiveRole}" or "public_user" for this role.`,
+        },
+        { status: 400 },
+      );
     }
 
     // When role changes and no explicit active_role override is set, sync active_role = new role
-    // This ensures the user's session reflects the new permanent role immediately
+    // This ensures the user's dashboard reflects the new permanent role immediately
     if (updateData.role && !updateData.active_role) {
       updateData.active_role = updateData.role;
     }
@@ -149,11 +186,6 @@ export async function PUT(
       }
     }
 
-    // Get service role client for validation and updates
-    const serviceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
-
     // Validate username uniqueness if provided and not empty/null
     if (updateData.username && updateData.username !== null) {
       // Check username format
@@ -173,14 +205,12 @@ export async function PUT(
       }
 
       // Check if username is already taken by another user (exclude current user)
-      const { data: existingUsername } = await serviceSupabase
-        .from("profiles")
-        .select("id")
-        .ilike("username", updateData.username)
-        .neq("id", userId)
-        .single();
+      const { rows: existingUsernameRows } = await query(
+        `SELECT id FROM public.profiles WHERE username ILIKE $1 AND id != $2 LIMIT 1`,
+        [updateData.username, userId],
+      );
 
-      if (existingUsername) {
+      if (existingUsernameRows.length > 0) {
         console.error(
           `[UPDATE USER] Username already taken: ${updateData.username}`,
         );
@@ -193,7 +223,6 @@ export async function PUT(
 
     // Validate and handle email update if provided
     let emailChanged = false;
-    let oldEmail: string | undefined;
     let newEmail: string | undefined;
     if (updateData.email) {
       newEmail = updateData.email;
@@ -225,32 +254,31 @@ export async function PUT(
       }
 
       // Get current user email from auth.users
-      const { data: currentAuthUser, error: currentAuthError } =
-        await serviceSupabase.auth.admin.getUserById(userId);
+      const { rows: currentAuthRows } = await query(
+        `SELECT email FROM auth.users WHERE id = $1 LIMIT 1`,
+        [userId],
+      );
+      const currentAuthUser = currentAuthRows[0];
 
-      if (currentAuthError || !currentAuthUser.user) {
-        console.error(
-          `[UPDATE USER] Failed to get current auth user`,
-          currentAuthError,
-        );
+      if (!currentAuthUser) {
+        console.error(`[UPDATE USER] Auth user not found for id ${userId}`);
         return NextResponse.json(
           { success: false, error: "User not found" },
           { status: 404 },
         );
       }
 
-      oldEmail = currentAuthUser.user.email;
+      const oldEmail = currentAuthUser.email;
 
       // Check if email is actually changing
       if (newEmail !== oldEmail) {
         // Check if new email is already in use by another user
-        const { data: existingUsers } =
-          await serviceSupabase.auth.admin.listUsers();
-        const emailExists = existingUsers?.users?.some(
-          (u) => u.email === newEmail && u.id !== userId,
+        const { rows: existingEmailRows } = await query(
+          `SELECT id FROM auth.users WHERE LOWER(email) = LOWER($1) AND id != $2 LIMIT 1`,
+          [newEmail, userId],
         );
 
-        if (emailExists) {
+        if (existingEmailRows.length > 0) {
           console.error(`[UPDATE USER] Email already in use: ${newEmail}`);
           return NextResponse.json(
             {
@@ -268,24 +296,6 @@ export async function PUT(
 
       // Always remove email from updateData since it's not stored in profiles table
       delete updateData.email;
-    }
-
-    // Get current user data before update for logging (use service role to bypass RLS)
-    const { data: currentProfile, error: fetchError } = await serviceSupabase
-      .from("profiles")
-      .select("*")
-      .eq("id", userId)
-      .single();
-
-    if (fetchError) {
-      console.error(
-        `[UPDATE USER] Error fetching current user data:`,
-        fetchError,
-      );
-      return NextResponse.json(
-        { success: false, error: "User not found" },
-        { status: 404 },
-      );
     }
 
     // Role escalation validation: Prevent regular admin from assigning super_admin/admin roles
@@ -344,22 +354,37 @@ export async function PUT(
       }
     }
 
-    // Use service role for admin profile updates to bypass RLS
-
     // Auto-sync active_role when role changes but active_role is not explicitly set.
     // This ensures the user's dashboard reflects their new role immediately.
     if (updateData.role && updateData.active_role === undefined) {
       updateData.active_role = updateData.role;
     }
 
-    const { data: updatedProfile, error: updateError } = await serviceSupabase
-      .from("profiles")
-      .update(updateData)
-      .eq("id", userId)
-      .select()
-      .single();
+    if (Object.keys(updateData).length === 0) {
+      return NextResponse.json(
+        { success: false, error: "No fields to update" },
+        { status: 400 },
+      );
+    }
 
-    if (updateError) {
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+    for (const [key, value] of Object.entries(updateData)) {
+      setClauses.push(`${key} = $${idx}`);
+      values.push(value);
+      idx++;
+    }
+    values.push(userId);
+
+    let updatedProfile;
+    try {
+      const { rows } = await query(
+        `UPDATE public.profiles SET ${setClauses.join(", ")} WHERE id = $${idx} RETURNING *`,
+        values,
+      );
+      updatedProfile = rows[0];
+    } catch (updateError) {
       console.error(`[UPDATE USER] Database error:`, updateError);
       return NextResponse.json(
         { success: false, error: "Failed to update user" },
@@ -369,18 +394,17 @@ export async function PUT(
 
     // Update email in auth.users if it was changed
     if (emailChanged && newEmail) {
-      const { error: emailUpdateError } =
-        await serviceSupabase.auth.admin.updateUserById(userId, {
-          email: newEmail,
-        });
-
-      if (emailUpdateError) {
+      try {
+        await query(`UPDATE auth.users SET email = $1, updated_at = NOW() WHERE id = $2`, [
+          newEmail,
+          userId,
+        ]);
+      } catch (emailUpdateError) {
         console.error(
           `[UPDATE USER] Failed to update email in auth.users:`,
           emailUpdateError,
         );
         // This is a critical error - profile updated but auth email didn't
-        // Log the issue but don't fail the entire operation
         console.error(
           `[UPDATE USER] CRITICAL: Profile updated but auth email update failed. Manual intervention may be required.`,
         );
@@ -388,7 +412,6 @@ export async function PUT(
           {
             success: false,
             error: "Failed to update user email. Please contact support.",
-            details: emailUpdateError.message,
           },
           { status: 500 },
         );
@@ -412,42 +435,22 @@ export async function PUT(
       // Don't fail the operation if logging fails
     }
 
-    // Session invalidation: Force re-authentication on critical changes
+    // NOTE: sessions here are stateless JWTs with no server-side revocation list,
+    // so unlike the old Supabase-backed flow, there is currently no way to force
+    // an existing session to expire early after an email/role change. The
+    // response reflects that honestly rather than claiming a session was
+    // invalidated when it wasn't.
     const roleChanged =
       updateData.role && currentProfile.role !== updateData.role;
-    const shouldInvalidateSession = emailChanged || roleChanged;
-
-    if (shouldInvalidateSession) {
-      try {
-        const { error: signOutError } =
-          await serviceSupabase.auth.admin.signOut(
-            userId,
-            "local", // Sign out from this device only
-          );
-
-        if (signOutError) {
-          console.error(
-            `[UPDATE USER] Failed to invalidate user session:`,
-            signOutError,
-          );
-          // Log but don't fail - session will expire naturally
-        }
-      } catch (sessionError) {
-        console.error(
-          `[UPDATE USER] Error during session invalidation:`,
-          sessionError,
-        );
-        // Continue - don't fail the operation
-      }
-    }
+    const sensitiveChange = emailChanged || roleChanged;
 
     return NextResponse.json({
       success: true,
       data: updatedProfile,
-      message: shouldInvalidateSession
-        ? "User updated successfully. User will be required to log in again."
+      message: sensitiveChange
+        ? "User updated successfully. Note: their existing session remains valid until it expires naturally (up to 7 days) - there is currently no way to force it to expire immediately."
         : "User updated successfully",
-      session_invalidated: shouldInvalidateSession,
+      session_invalidated: false,
     });
   } catch (error) {
     const duration = Date.now() - startTime;
@@ -462,34 +465,29 @@ export async function PUT(
   }
 }
 
-// DELETE /api/admin/users/[id] - Delete user using RPC function
+// DELETE /api/admin/users/[id] - Delete user completely (profile, related data, and auth.users row)
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await getSessionFromCookies();
   const startTime = Date.now();
 
   try {
     // Use existing admin authentication utility
     const adminAuth = await requireAdmin(request);
-    const supabase = await createServerSupabase();
-    const adminServiceSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
 
     const resolvedParams = await params;
     const userId = resolvedParams.id;
 
     // Get user data before deletion for logging
-    const { data: userToDelete, error: fetchError } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", userId)
-      .single();
+    const { rows: userRows } = await query(
+      `SELECT * FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [userId],
+    );
+    const userToDelete = userRows[0];
 
-    if (fetchError) {
-      console.error(`[DELETE USER] Error fetching user data:`, fetchError);
+    if (!userToDelete) {
+      console.error(`[DELETE USER] User not found: ${userId}`);
       return NextResponse.json(
         { success: false, error: "User not found" },
         { status: 404 },
@@ -523,20 +521,12 @@ export async function DELETE(
 
     // Prevent deleting the last super_admin
     if (userToDelete.role === "super_admin") {
-      const { count: superAdminCount, error: countError } = await supabase
-        .from("profiles")
-        .select("*", { count: "exact", head: true })
-        .eq("role", "super_admin");
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*)::int AS count FROM public.profiles WHERE role = 'super_admin'`,
+      );
+      const superAdminCount = countRows[0]?.count ?? 0;
 
-      if (countError) {
-        console.error(`[DELETE USER] Error counting super_admins:`, countError);
-        return NextResponse.json(
-          { success: false, error: "Failed to verify super_admin count" },
-          { status: 500 },
-        );
-      }
-
-      if (superAdminCount !== null && superAdminCount <= 1) {
+      if (superAdminCount <= 1) {
         console.error(
           `[DELETE USER] Prevented deletion of last super_admin (count: ${superAdminCount})`,
         );
@@ -551,121 +541,69 @@ export async function DELETE(
       }
     }
 
-    // Use the RPC function to handle complete user deletion
-    const { data: rpcResult, error: rpcError } = await adminServiceSupabase.rpc(
-      "delete_user_completely",
-      {
-        user_uuid: userId,
-        p_admin_id: adminAuth.user.id,
-      },
-    );
-
-    if (rpcError) {
-      console.error(`[DELETE USER] RPC function error:`, rpcError);
-      return NextResponse.json(
-        {
-          success: false,
-          error: `Failed to delete user: ${rpcError.message}`,
-          details: rpcError,
-        },
-        { status: 500 },
-      );
-    }
-
-    // Type guard to check if the RPC result has the expected structure
-    const isValidRpcResult = (
-      data: unknown,
-    ): data is {
+    // Use the DB function to handle complete cleanup of profile + related data
+    interface DeleteUserResult {
       success: boolean;
       error?: string;
       message?: string;
       user_id?: string;
       admin_id?: string;
-    } => {
-      return (
-        typeof data === "object" &&
-        data !== null &&
-        typeof (data as Record<string, unknown>).success === "boolean"
-      );
-    };
+    }
 
-    // Check if RPC result has the expected structure
-    if (!rpcResult || !isValidRpcResult(rpcResult)) {
+    let rpcResult: DeleteUserResult | undefined;
+    try {
+      const { rows: rpcRows } = await query(
+        `SELECT delete_user_completely($1, $2) AS result`,
+        [userId, adminAuth.user.id],
+      );
+      rpcResult = rpcRows[0]?.result as DeleteUserResult | undefined;
+    } catch (rpcError) {
+      console.error(`[DELETE USER] delete_user_completely error:`, rpcError);
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Failed to delete user",
+        },
+        { status: 500 },
+      );
+    }
+
+    if (!rpcResult || typeof rpcResult.success !== "boolean") {
       console.error(
-        `[DELETE USER] RPC function returned invalid result:`,
+        `[DELETE USER] delete_user_completely returned invalid result:`,
         rpcResult,
       );
       return NextResponse.json(
         {
           success: false,
           error: "Invalid response from user deletion service",
-          details: rpcResult,
         },
         { status: 500 },
       );
     }
 
-    // Now we can safely access the properties
     if (!rpcResult.success) {
-      console.error(`[DELETE USER] RPC function returned failure:`, rpcResult);
+      console.error(`[DELETE USER] delete_user_completely returned failure:`, rpcResult);
       return NextResponse.json(
         {
           success: false,
           error: rpcResult.error || "User deletion failed",
-          details: rpcResult,
         },
         { status: 500 },
       );
     }
 
-    // Now handle the Supabase Auth user deletion separately
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Check if auth user exists
-    const { data: authUser, error: getUserError } =
-      await adminSupabase.auth.admin.getUserById(userId);
-
-    if (getUserError) {
-      // If auth user doesn't exist, that's actually fine - the profile deletion succeeded
-    } else if (authUser) {
-      // Sign out user from all sessions first
-      try {
-        await adminSupabase.auth.admin.signOut(userId);
-      } catch {
-        // Sign out failure is non-critical (might be expected)
-      }
-
-      // Attempt auth user deletion with retry
-      let deleteAuthError;
-      const maxRetries = 2;
-
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          const result = await adminSupabase.auth.admin.deleteUser(userId);
-
-          if (!result.error) {
-            break;
-          }
-
-          deleteAuthError = result.error;
-
-          if (attempt < maxRetries) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-          }
-        } catch (attemptError) {
-          console.error(
-            `[DELETE USER] Unexpected error on attempt ${attempt}:`,
-            attemptError,
-          );
-          deleteAuthError = attemptError as Error;
-        }
-      }
-
-      if (deleteAuthError) {
-        console.error(`[DELETE USER] Auth deletion failed:`, deleteAuthError);
-        // Don't fail the entire operation if auth deletion fails
-        // The profile and all related data have been successfully deleted
-      }
+    // Now delete the auth.users row - delete_user_completely only cleans up
+    // the public schema; profiles.id and auth.users.id are linked by
+    // convention (matching UUIDs), not an enforced foreign key.
+    let authUserDeleted = true;
+    try {
+      await query(`DELETE FROM auth.users WHERE id = $1`, [userId]);
+    } catch (authDeleteError) {
+      console.error(`[DELETE USER] Auth user deletion failed:`, authDeleteError);
+      authUserDeleted = false;
+      // Don't fail the entire operation - the profile and all related data
+      // have already been successfully deleted
     }
 
     const duration = Date.now() - startTime;
@@ -676,7 +614,7 @@ export async function DELETE(
       details: {
         profile_deleted: true,
         related_data_cleaned: true,
-        auth_user_handled: !rpcError,
+        auth_user_handled: authUserDeleted,
         duration_ms: duration,
       },
     });

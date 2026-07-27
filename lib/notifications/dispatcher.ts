@@ -1,14 +1,13 @@
 import { randomUUID } from "crypto";
 
+import { query } from "@/lib/db";
 import { logNotificationFailed, logNotificationSent } from "@/lib/audit";
-import { createServerSupabase } from "@/lib/supabase/server";
-import type { Database, Json } from "@/types/supabase";
+import type { Json } from "@/types/supabase";
 import type {
   NotificationChannelRecord,
   NotificationOutboxRecord,
   NotificationRecord,
 } from "@/types/notifications.types";
-import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { NotificationEmailError, sendNotificationEmail } from "./email";
 import { generateBookingConfirmationEmail } from "@/lib/emails/booking-confirmation-template";
@@ -27,8 +26,6 @@ class NotificationDispatchError extends Error {
     this.name = "NotificationDispatchError";
   }
 }
-
-type ServiceSupabaseClient = SupabaseClient<Database>;
 
 type RecipientProfile = {
   id: string;
@@ -53,7 +50,6 @@ interface RecipientInfo {
 }
 
 interface DispatchOptions {
-  supabase?: ServiceSupabaseClient;
   limit?: number;
 }
 
@@ -176,28 +172,17 @@ function getBackoffDelayMs(retryCount: number): number {
   );
 }
 
-async function releaseStaleLocks(
-  supabase: ServiceSupabaseClient,
-  thresholdIso: string,
-): Promise<number> {
+async function releaseStaleLocks(thresholdIso: string): Promise<number> {
   try {
-    const { data, error } = await supabase
-      .from("notification_outbox")
-      .update({
-        status: "pending",
-        locked_at: null,
-        locked_by: null,
-      })
-      .eq("status", "processing")
-      .lt("locked_at", thresholdIso)
-      .select("id");
+    const { rows } = await query(
+      `UPDATE public.notification_outbox
+       SET status = 'pending', locked_at = NULL, locked_by = NULL
+       WHERE status = 'processing' AND locked_at < $1
+       RETURNING id`,
+      [thresholdIso],
+    );
 
-    if (error) {
-      console.error("[notifications] Failed to release stale locks", error);
-      return 0;
-    }
-
-    return data?.length ?? 0;
+    return rows.length;
   } catch (error) {
     console.error("[notifications] Unexpected error releasing locks", error);
     return 0;
@@ -205,78 +190,62 @@ async function releaseStaleLocks(
 }
 
 async function fetchEmailOutboxRows(
-  supabase: ServiceSupabaseClient,
   limit: number,
   now: Date,
 ): Promise<EmailOutboxRow[]> {
   const nowIso = now.toISOString();
 
-  const { data, error } = await supabase
-    .from("notification_outbox")
-    .select(
-      `
-        id,
-        notification_channel_id,
-        retry_count,
-        scheduled_for,
-        status,
-        next_attempt_at,
-        locked_at,
-        locked_by,
-        last_error,
-        created_at,
-        updated_at,
-        notification_channel:notification_channels!inner(
-          id,
-          notification_id,
-          channel,
-          status,
-          attempt_count,
-          last_attempted_at,
-          sent_at,
-          provider_message_id,
-          deliver_after,
-          error,
-          created_at,
-          updated_at,
-          notification:notifications!inner(
-            id,
-            recipient_id,
-            role_scope,
-            category_slug,
-            title,
-            body,
-            metadata,
-            priority,
-            triggered_at,
-            cta_label,
-            cta_url,
-            recipient_profile:profiles!notifications_recipient_id_fkey(
-              id,
-              full_name
-            )
-          )
-        )
-      `,
-    )
-    .eq("status", "pending")
-    .is("locked_at", null)
-    .lte("scheduled_for", nowIso)
-    .eq("notification_channel.channel", "email")
-    .order("scheduled_for", { ascending: true })
-    .limit(limit);
+  const { rows } = await query(
+    `SELECT
+       o.id, o.notification_channel_id, o.retry_count, o.scheduled_for, o.status,
+       o.next_attempt_at, o.locked_at, o.locked_by, o.last_error, o.created_at, o.updated_at,
+       json_build_object(
+         'id', nc.id,
+         'notification_id', nc.notification_id,
+         'channel', nc.channel,
+         'status', nc.status,
+         'attempt_count', nc.attempt_count,
+         'last_attempted_at', nc.last_attempted_at,
+         'sent_at', nc.sent_at,
+         'provider_message_id', nc.provider_message_id,
+         'deliver_after', nc.deliver_after,
+         'error', nc.error,
+         'created_at', nc.created_at,
+         'updated_at', nc.updated_at,
+         'notification', json_build_object(
+           'id', n.id,
+           'recipient_id', n.recipient_id,
+           'role_scope', n.role_scope,
+           'category_slug', n.category_slug,
+           'title', n.title,
+           'body', n.body,
+           'metadata', n.metadata,
+           'priority', n.priority,
+           'triggered_at', n.triggered_at,
+           'cta_label', n.cta_label,
+           'cta_url', n.cta_url,
+           'recipient_profile', CASE WHEN p.id IS NOT NULL
+             THEN json_build_object('id', p.id, 'full_name', p.full_name)
+             ELSE NULL
+           END
+         )
+       ) AS notification_channel
+     FROM public.notification_outbox o
+     INNER JOIN public.notification_channels nc ON nc.id = o.notification_channel_id AND nc.channel = 'email'
+     INNER JOIN public.notifications n ON n.id = nc.notification_id
+     LEFT JOIN public.profiles p ON p.id = n.recipient_id
+     WHERE o.status = 'pending'
+       AND o.locked_at IS NULL
+       AND o.scheduled_for <= $1
+     ORDER BY o.scheduled_for ASC
+     LIMIT $2`,
+    [nowIso, limit],
+  );
 
-  if (error) {
-    throw new NotificationDispatchError(
-      `Failed to load email outbox rows: ${error.message}`,
-      error,
-    );
-  }
-
-  const rows = (data ?? []) as unknown as EmailOutboxRow[];
+  const typedRows = rows as unknown as EmailOutboxRow[];
   const nowTs = now.getTime();
 
-  return rows.filter((row) => {
+  return typedRows.filter((row) => {
     if (!row.notification_channel || !row.notification_channel.notification) {
       return false;
     }
@@ -289,84 +258,67 @@ async function fetchEmailOutboxRows(
 }
 
 async function attemptLockOutboxRow(
-  supabase: ServiceSupabaseClient,
   outboxId: number,
   lockToken: string,
 ): Promise<boolean> {
   const lockedAt = new Date().toISOString();
 
-  const { data, error } = await supabase
-    .from("notification_outbox")
-    .update({
-      status: "processing",
-      locked_at: lockedAt,
-      locked_by: lockToken,
-    })
-    .eq("id", outboxId)
-    .eq("status", "pending")
-    .is("locked_at", null)
-    .select("id")
-    .maybeSingle();
+  try {
+    const { rows } = await query(
+      `UPDATE public.notification_outbox
+       SET status = 'processing', locked_at = $1, locked_by = $2
+       WHERE id = $3 AND status = 'pending' AND locked_at IS NULL
+       RETURNING id`,
+      [lockedAt, lockToken, outboxId],
+    );
 
-  if (error) {
+    return rows.length > 0;
+  } catch (error) {
     console.error(
-      `[notifications] Failed to lock outbox row ${outboxId}: ${error.message}`,
+      `[notifications] Failed to lock outbox row ${outboxId}`,
       error,
     );
     return false;
   }
-
-  return Boolean(data);
 }
 
 async function markChannelSuccess(
-  supabase: ServiceSupabaseClient,
   channel: NotificationChannelRecord,
   attemptIso: string,
   providerMessageId: string | null,
 ): Promise<void> {
-  const { error } = await supabase
-    .from("notification_channels")
-    .update({
-      status: "sent",
-      sent_at: attemptIso,
-      last_attempted_at: attemptIso,
-      attempt_count: (channel.attempt_count ?? 0) + 1,
-      provider_message_id: providerMessageId,
-      error: null,
-    })
-    .eq("id", channel.id);
-
-  if (error) {
+  try {
+    await query(
+      `UPDATE public.notification_channels
+       SET status = 'sent', sent_at = $1, last_attempted_at = $1,
+           attempt_count = $2, provider_message_id = $3, error = NULL
+       WHERE id = $4`,
+      [attemptIso, (channel.attempt_count ?? 0) + 1, providerMessageId, channel.id],
+    );
+  } catch (error) {
     throw new NotificationDispatchError(
-      `Failed to update channel ${channel.id}: ${error.message}`,
+      `Failed to update channel ${channel.id}: ${(error as Error).message}`,
       error,
     );
   }
 }
 
 async function markOutboxSuccess(
-  supabase: ServiceSupabaseClient,
   outboxId: number,
   lockToken: string,
   attemptIso: string,
 ): Promise<void> {
-  const { error } = await supabase
-    .from("notification_outbox")
-    .update({
-      status: "sent",
-      locked_at: null,
-      locked_by: null,
-      next_attempt_at: null,
-      last_error: null,
-      updated_at: attemptIso,
-    })
-    .eq("id", outboxId)
-    .eq("locked_by", lockToken);
-
-  if (error) {
+  try {
+    await query(
+      `UPDATE public.notification_outbox
+       SET status = 'sent', locked_at = NULL, locked_by = NULL,
+           next_attempt_at = NULL, last_error = NULL, updated_at = $1
+       WHERE id = $2 AND locked_by = $3`,
+      [attemptIso, outboxId, lockToken],
+    );
+  } catch (error) {
     throw new NotificationDispatchError(
-      `Failed to finalize outbox ${outboxId}: ${error.message}`,
+      `Failed to finalize outbox ${outboxId}: ${(error as Error).message}`,
       error,
     );
   }
@@ -416,7 +368,6 @@ async function safeLogFailure(
 }
 
 async function getRecipientInfo(
-  supabase: ServiceSupabaseClient,
   notification: NotificationRecord & { recipient_profile: RecipientProfile },
   cache: Map<string, RecipientInfo>,
 ): Promise<RecipientInfo> {
@@ -432,14 +383,12 @@ async function getRecipientInfo(
   };
 
   try {
-    const { data, error } = await supabase.auth.admin.getUserById(key);
-    if (!error && data?.user?.email) {
-      info.email = data.user.email;
-    } else if (error) {
-      console.error(
-        `[notifications] Failed to load auth user for ${key}: ${error.message}`,
-        error,
-      );
+    const { rows } = await query(
+      `SELECT email FROM auth.users WHERE id = $1 LIMIT 1`,
+      [key],
+    );
+    if (rows[0]?.email) {
+      info.email = rows[0].email;
     }
   } catch (error) {
     console.error(
@@ -457,21 +406,13 @@ async function getRecipientInfo(
  * Returns null if default template should be used
  */
 async function buildCustomEmailHtml(
-  supabase: ServiceSupabaseClient,
   notification: NotificationRecord,
 ): Promise<string | null> {
   // Use booking confirmation template
   if (notification.category_slug === "public_booking_confirmation") {
     try {
-      console.log(
-        "[dispatcher] Building custom email for category:",
-        notification.category_slug,
-      );
-
       const metadata = notification.metadata as Record<string, unknown> | null;
       const bookingId = metadata?.booking_id as number | undefined;
-
-      console.log("[dispatcher] Booking ID from metadata:", bookingId);
 
       if (!bookingId) {
         console.warn("[dispatcher] No booking_id in notification metadata");
@@ -479,90 +420,36 @@ async function buildCustomEmailHtml(
       }
 
       // Fetch booking details with event and venue
-      const { data: booking, error: bookingError } = await supabase
-        .from("bookings")
-        .select(
-          `
-          booking_reference,
-          customer_name,
-          total_amount,
-          event_id,
-          events!inner (
-            name,
-            start_time,
-            location_name,
-            address
-          )
-        `,
-        )
-        .eq("id", bookingId)
-        .single();
+      const { rows: bookingRows } = await query(
+        `SELECT
+           b.booking_reference, b.customer_name, b.total_amount, b.event_id,
+           e.name AS event_name, e.start_time AS event_start_time,
+           e.location_name AS event_location_name, e.address AS event_address
+         FROM public.bookings b
+         INNER JOIN public.events e ON e.id = b.event_id
+         WHERE b.id = $1
+         LIMIT 1`,
+        [bookingId],
+      );
+      const booking = bookingRows[0];
 
-      console.log("[dispatcher] Booking query result:", {
-        hasData: !!booking,
-        hasError: !!bookingError,
-        error: bookingError,
-      });
-
-      if (bookingError || !booking) {
-        console.error("[dispatcher] Failed to fetch booking:", bookingError);
+      if (!booking) {
+        console.error("[dispatcher] Failed to fetch booking", bookingId);
         return null;
       }
-
-      // Extract event data (Supabase returns it as an array or object depending on query)
-      type EventWithLocation = {
-        name: string;
-        start_time: string;
-        location_name: string | null;
-        address: string | null;
-      };
-
-      type BookingWithEvents = typeof booking & {
-        events: EventWithLocation | EventWithLocation[];
-      };
-
-      const bookingData = booking as BookingWithEvents;
-      const eventData = Array.isArray(bookingData.events)
-        ? bookingData.events[0]
-        : bookingData.events;
-
-      if (!eventData) {
-        console.error("[dispatcher] No event data in booking");
-        return null;
-      }
-
-      console.log("[dispatcher] Event data found:", {
-        name: eventData.name,
-        hasLocation: !!eventData.location_name,
-      });
 
       // Fetch ticket passes with guest details including CNIC
-      const { data: passes, error: passesError } = await supabase
-        .from("ticket_passes")
-        .select(
-          `
-          code,
-          guest_name,
-          cnic_last4,
-          ticket_type:ticket_types (
-            name
-          )
-        `,
-        )
-        .eq("booking_id", bookingId)
-        .order("issued_at", { ascending: true });
-
-      if (passesError) {
-        console.error("[dispatcher] Failed to fetch passes:", passesError);
-        return null;
-      }
-
-      console.log("[dispatcher] Passes fetched:", {
-        count: passes?.length || 0,
-      });
+      const { rows: passes } = await query(
+        `SELECT tp.code, tp.guest_name, tp.cnic_last4, tt.name AS ticket_type_name
+         FROM public.ticket_passes tp
+         LEFT JOIN public.ticket_types tt ON tt.id = tp.ticket_type_id
+         WHERE tp.booking_id = $1
+         ORDER BY tp.issued_at ASC`,
+        [bookingId],
+      );
 
       // Format event date and time
-      const eventDate = new Date(eventData.start_time);
+      const eventDate = new Date(booking.event_start_time);
       const formattedDate = eventDate.toLocaleDateString("en-US", {
         weekday: "long",
         year: "numeric",
@@ -575,55 +462,40 @@ async function buildCustomEmailHtml(
       });
 
       // Extract event location
-      const venueName = eventData.location_name || "To be announced";
-      const venueAddress = eventData.address || "Check your tickets";
-
-      console.log("[dispatcher] Location info:", { venueName, venueAddress });
+      const venueName = booking.event_location_name || "To be announced";
+      const venueAddress = booking.event_address || "Check your tickets";
 
       // Generate HTML
       const premiumHtml = generateBookingConfirmationEmail({
         customerName: booking.customer_name || "Valued Customer",
         bookingReference: booking.booking_reference || "N/A",
-        eventName: eventData.name,
+        eventName: booking.event_name,
         eventDate: formattedDate,
         eventTime: formattedTime,
         eventVenue: `${venueName}, ${venueAddress}`,
-        ticketCount: passes?.length || 0,
+        ticketCount: passes.length,
         totalAmount: booking.total_amount || 0,
-        passes:
-          passes?.map((pass) => ({
-            code: pass.code,
-            guestName: pass.guest_name,
-            cnicLast4: pass.cnic_last4,
-            ticketTypeName:
-              (pass.ticket_type as { name: string } | null)?.name ||
-              "General Admission",
-          })) || [],
+        passes: passes.map((pass) => ({
+          code: pass.code,
+          guestName: pass.guest_name,
+          cnicLast4: pass.cnic_last4,
+          ticketTypeName: pass.ticket_type_name || "General Admission",
+        })),
         viewTicketsUrl: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard/bookings`,
       });
 
-      console.log("[dispatcher] Premium HTML generated successfully");
       return premiumHtml;
     } catch (error) {
       console.error("[dispatcher] Error building custom email:", error);
-      console.error("[dispatcher] Error details:", {
-        message: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
-      });
       return null;
     }
   }
 
   // Default: no custom template
-  console.log(
-    "[dispatcher] Using default template for category:",
-    notification.category_slug,
-  );
   return null;
 }
 
 async function handleDispatchFailure(
-  supabase: ServiceSupabaseClient,
   row: EmailOutboxRow,
   channel: EmailChannelRecord,
   notification: NotificationRecord & { recipient_profile: RecipientProfile },
@@ -636,44 +508,49 @@ async function handleDispatchFailure(
   const hasRetriesLeft =
     nextRetryCount < MAX_RETRY_ATTEMPTS && isRetryableError(error);
 
-  const { error: channelError } = await supabase
-    .from("notification_channels")
-    .update({
-      status: hasRetriesLeft ? "pending" : "failed",
-      last_attempted_at: attemptIso,
-      attempt_count: (channel.attempt_count ?? 0) + 1,
-      error: serializedError,
-    })
-    .eq("id", channel.id);
-
-  if (channelError) {
+  try {
+    await query(
+      `UPDATE public.notification_channels
+       SET status = $1, last_attempted_at = $2, attempt_count = $3, error = $4
+       WHERE id = $5`,
+      [
+        hasRetriesLeft ? "pending" : "failed",
+        attemptIso,
+        (channel.attempt_count ?? 0) + 1,
+        serializedError,
+        channel.id,
+      ],
+    );
+  } catch (channelError) {
     throw new NotificationDispatchError(
-      `Failed to update channel ${channel.id} after error: ${channelError.message}`,
+      `Failed to update channel ${channel.id} after error: ${(channelError as Error).message}`,
       channelError,
     );
   }
 
-  const outboxUpdate: Record<string, unknown> = {
-    retry_count: nextRetryCount,
-    last_error: serializedError,
-    locked_at: null,
-    locked_by: null,
-    updated_at: attemptIso,
-    status: hasRetriesLeft ? "pending" : "failed",
-    next_attempt_at: hasRetriesLeft
-      ? new Date(Date.now() + getBackoffDelayMs(nextRetryCount)).toISOString()
-      : null,
-  };
+  const nextAttemptAt = hasRetriesLeft
+    ? new Date(Date.now() + getBackoffDelayMs(nextRetryCount)).toISOString()
+    : null;
 
-  const { error: outboxError } = await supabase
-    .from("notification_outbox")
-    .update(outboxUpdate)
-    .eq("id", row.id)
-    .eq("locked_by", lockToken);
-
-  if (outboxError) {
+  try {
+    await query(
+      `UPDATE public.notification_outbox
+       SET retry_count = $1, last_error = $2, locked_at = NULL, locked_by = NULL,
+           updated_at = $3, status = $4, next_attempt_at = $5
+       WHERE id = $6 AND locked_by = $7`,
+      [
+        nextRetryCount,
+        serializedError,
+        attemptIso,
+        hasRetriesLeft ? "pending" : "failed",
+        nextAttemptAt,
+        row.id,
+        lockToken,
+      ],
+    );
+  } catch (outboxError) {
     throw new NotificationDispatchError(
-      `Failed to persist outbox failure for ${row.id}: ${outboxError.message}`,
+      `Failed to persist outbox failure for ${row.id}: ${(outboxError as Error).message}`,
       outboxError,
     );
   }
@@ -685,7 +562,7 @@ async function handleDispatchFailure(
     nextRetryCount,
     row.id,
     error,
-    outboxUpdate.next_attempt_at as string | null,
+    nextAttemptAt,
   );
 
   return hasRetriesLeft ? "deferred" : "failed";
@@ -704,16 +581,13 @@ function formatError(error: unknown): string {
 export async function dispatchEmailOutboxBatch(
   options?: DispatchOptions,
 ): Promise<DispatchSummary> {
-  const supabase =
-    options?.supabase ?? (await createServerSupabase({ useServiceRole: true }));
   const limit = clampLimit(options?.limit);
   const now = new Date();
   const recoveredLocks = await releaseStaleLocks(
-    supabase,
     new Date(now.getTime() - LOCK_TIMEOUT_MS).toISOString(),
   );
 
-  const rows = await fetchEmailOutboxRows(supabase, limit, now);
+  const rows = await fetchEmailOutboxRows(limit, now);
 
   const summary: DispatchSummary = {
     attempted: 0,
@@ -745,7 +619,7 @@ export async function dispatchEmailOutboxBatch(
     }
 
     const lockToken = randomUUID();
-    const locked = await attemptLockOutboxRow(supabase, row.id, lockToken);
+    const locked = await attemptLockOutboxRow(row.id, lockToken);
     if (!locked) {
       summary.skipped += 1;
       continue;
@@ -755,11 +629,7 @@ export async function dispatchEmailOutboxBatch(
     const attemptIso = new Date().toISOString();
 
     try {
-      const recipient = await getRecipientInfo(
-        supabase,
-        notification,
-        recipientCache,
-      );
+      const recipient = await getRecipientInfo(notification, recipientCache);
 
       if (!recipient.email) {
         throw new NotificationEmailError("Recipient email is required");
@@ -771,17 +641,15 @@ export async function dispatchEmailOutboxBatch(
           email: recipient.email,
           fullName: recipient.fullName ?? undefined,
         },
-        customHtml:
-          (await buildCustomEmailHtml(supabase, notification)) ?? undefined,
+        customHtml: (await buildCustomEmailHtml(notification)) ?? undefined,
       });
 
       await markChannelSuccess(
-        supabase,
         channel,
         attemptIso,
         sendResult.providerMessageId ?? null,
       );
-      await markOutboxSuccess(supabase, row.id, lockToken, attemptIso);
+      await markOutboxSuccess(row.id, lockToken, attemptIso);
       await safeLogSent(
         notification.id,
         row.id,
@@ -791,7 +659,6 @@ export async function dispatchEmailOutboxBatch(
     } catch (error) {
       try {
         const outcome = await handleDispatchFailure(
-          supabase,
           row,
           channel,
           notification,

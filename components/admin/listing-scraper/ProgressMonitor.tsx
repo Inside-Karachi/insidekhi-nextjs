@@ -15,34 +15,36 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
-import { createClient } from "@/lib/supabase/client";
-import type {
-  RealtimeChannel,
-  RealtimePostgresChangesPayload,
-} from "@supabase/supabase-js";
 
-interface SyncHistoryRecord {
-  id: string;
-  status: "running" | "completed" | "failed" | "partial" | "stopping" | "cancelled";
-  config?: {
-    maxConcurrent?: number;
-    total_entities?: number;
-    entity_fetch_warning?: {
-      type: string;
-      message: string;
-      failedOffset: number;
-      fetchedCount: number;
-    };
-  };
-  entities_processed: number;
-  entities_created: number;
-  entities_updated: number;
-  entities_skipped: number;
-  errors_count: number;
-  error_message?: string | null;
-  started_at: string;
-  completed_at: string | null;
-  duration_ms: number | null;
+// Worker /sync/status response shapes (see apps/scraper-worker/src/worker-runtime.ts
+// handleStatus + lib/scraper/redis-state-manager.ts), proxied through
+// /api/admin/listing-scraper/status.
+interface WorkerSyncProgress {
+  current: number;
+  total: number;
+  status: string;
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: number;
+  currentEntity?: string;
+}
+
+interface WorkerScraperStats {
+  entitiesProcessed: number;
+  entitiesCreated: number;
+  entitiesUpdated: number;
+  entitiesSkipped: number;
+  errors: number;
+}
+
+interface WorkerStatusResponse {
+  status?: "running" | "completed" | "idle" | string;
+  syncId?: string;
+  progress?: WorkerSyncProgress;
+  report?: { summary: WorkerScraperStats };
+  message?: string;
+  error?: string;
 }
 
 interface ProgressMonitorProps {
@@ -74,112 +76,82 @@ export function ProgressMonitor({
   const [isStopping, setIsStopping] = React.useState(false);
   const [entityFetchWarning, setEntityFetchWarning] = React.useState<string | null>(null);
 
+  // Poll the worker sync status (Supabase Realtime is no longer available).
+  // Polls quickly (4s) while a sync is running/stopping so the progress bar
+  // feels live, and backs off to a slow heartbeat (15s) when idle/completed
+  // so a newly-started sync is still picked up without hammering the worker.
   React.useEffect(() => {
     let isMounted = true;
-    let channel: RealtimeChannel | null = null;
-    let previousStatus: "idle" | "running" | "completed" | "failed" | "partial" | "stopping" | "cancelled" = "idle";
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let previousStatus: "idle" | "running" | "completed" = "idle";
 
-    const supabase = createClient();
-
-    async function setupRealtimeSubscription() {
+    async function poll() {
       try {
-        // Fetch the most recent sync to check status
-        const { data: recentSync } = await supabase
-          .from("listing_sync_history")
-          .select("*")
-          .order("started_at", { ascending: false })
-          .limit(1)
-          .single();
+        const res = await fetch("/api/admin/listing-scraper/status", {
+          cache: "no-store",
+        });
 
         if (!isMounted) return;
 
-        if (recentSync) {
-          const syncData = recentSync as unknown as SyncHistoryRecord;
-          updateProgressFromRecord(syncData);
+        if (!res.ok) {
+          scheduleNext("idle");
+          return;
         }
 
-        // Subscribe to realtime changes on listing_sync_history
-        channel = supabase
-          .channel("listing-sync-realtime")
-          .on(
-            "postgres_changes",
-            {
-              event: "*",
-              schema: "public",
-              table: "listing_sync_history",
-            },
-            (payload: RealtimePostgresChangesPayload<SyncHistoryRecord>) => {
-              if (!isMounted) return;
-
-              const record = payload.new as SyncHistoryRecord;
-              updateProgressFromRecord(record);
-            },
-          )
-          .subscribe();
-
-        console.log("[ProgressMonitor] Realtime subscription active");
+        const data = (await res.json()) as WorkerStatusResponse;
+        updateProgressFromStatus(data);
+        scheduleNext(
+          data.status === "running" ? "running" : "idle"
+        );
       } catch (error) {
-        console.error("[ProgressMonitor] Setup failed:", error);
+        console.error("[ProgressMonitor] Poll failed:", error);
+        if (isMounted) scheduleNext("idle");
       }
     }
 
-    function updateProgressFromRecord(record: SyncHistoryRecord) {
-      const warningFromConfig = record.config?.entity_fetch_warning?.message;
-      const warningFromError =
-        record.error_message && record.error_message.includes("offset 10000")
-          ? record.error_message
-          : null;
+    function scheduleNext(effectiveStatus: "running" | "idle") {
+      if (!isMounted) return;
+      const delay = effectiveStatus === "running" ? 4000 : 15000;
+      timer = setTimeout(poll, delay);
+    }
 
-      setEntityFetchWarning(warningFromConfig || warningFromError || null);
-
-      const newStatus =
-        record.status === "running"
+    function updateProgressFromStatus(data: WorkerStatusResponse) {
+      const newStatus: "idle" | "running" | "completed" =
+        data.status === "running"
           ? "running"
-          : record.status === "completed"
+          : data.status === "completed"
             ? "completed"
-            : record.status === "failed"
-              ? "failed"
-                : record.status === "partial"
-                  ? "partial"
-                  : record.status === "stopping"
-                    ? "stopping"
-                    : record.status === "cancelled"
-                      ? "cancelled"
-                      : "idle";
+            : "idle";
 
       setSyncStatus(newStatus);
-      if (newStatus !== "stopping") {
+      if (newStatus !== "running") {
         setIsStopping(false);
       }
+      setEntityFetchWarning(null);
 
-      if (
-        record.status === "running" ||
-        record.status === "completed" ||
-        record.status === "partial" ||
-        record.status === "stopping" ||
-        record.status === "cancelled"
-      ) {
-        const total = record.config?.total_entities || record.entities_processed;
-        const chunkSize = Math.max(1, record.config?.maxConcurrent || 5);
-        const chunkIndex = Math.max(1, Math.ceil(record.entities_processed / chunkSize));
-        const chunkTotal = Math.max(1, Math.ceil(total / chunkSize));
-        const chunkPosition = record.entities_processed % chunkSize;
-        const inChunk = chunkPosition === 0 ? chunkSize : chunkPosition;
-
+      if (newStatus === "running" && data.progress) {
+        const p = data.progress;
         setProgress({
-          current: record.entities_processed,
-          total,
-          status: record.status,
-          created: record.entities_created,
-          updated: record.entities_updated,
-          errors: record.errors_count,
-          chunkSize,
-          chunkIndex,
-          chunkTotal,
-          chunkProgress: `${inChunk}/${chunkSize}`,
+          current: p.current,
+          total: p.total,
+          status: p.status || "running",
+          created: p.created,
+          updated: p.updated,
+          errors: p.errors,
+          currentEntity: p.currentEntity,
         });
-      } else if (record.status === "failed") {
-        setProgress((prev) => (prev ? { ...prev, status: "failed" } : null));
+      } else if (newStatus === "completed" && data.report?.summary) {
+        const s = data.report.summary;
+        setProgress({
+          current: s.entitiesProcessed,
+          total: s.entitiesProcessed,
+          status: "completed",
+          created: s.entitiesCreated,
+          updated: s.entitiesUpdated,
+          errors: s.errors,
+        });
+      } else if (newStatus === "idle") {
+        setProgress(null);
       }
 
       // Trigger callbacks on status transitions
@@ -191,29 +163,20 @@ export function ProgressMonitor({
         onSyncComplete();
       } else if (
         previousStatus === "running" &&
-        newStatus === "failed" &&
+        newStatus === "idle" &&
         onSyncFailed
       ) {
-        onSyncFailed("Sync operation failed");
-      } else if (
-        previousStatus === "stopping" &&
-        newStatus === "cancelled" &&
-        onSyncFailed
-      ) {
-        onSyncFailed("Sync operation cancelled");
+        onSyncFailed("Sync operation stopped");
       }
 
       previousStatus = newStatus;
     }
 
-    setupRealtimeSubscription();
+    void poll();
 
     return () => {
       isMounted = false;
-      if (channel) {
-        supabase.removeChannel(channel);
-        console.log("[ProgressMonitor] Realtime subscription cleaned up");
-      }
+      if (timer) clearTimeout(timer);
     };
   }, [onSyncComplete, onSyncFailed]);
 

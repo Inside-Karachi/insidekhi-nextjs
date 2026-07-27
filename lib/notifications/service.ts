@@ -1,11 +1,8 @@
-import { cache } from "react";
-
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import {
   getDefaultChannelConfig,
   getEffectiveChannelConfig,
 } from "@/lib/notifications/preferences";
-import type { Database } from "@/types/supabase";
 import type {
   CreateNotificationInput,
   CreateNotificationOptions,
@@ -29,7 +26,6 @@ import type {
   NotificationUserRole,
   UnreadCountResult,
 } from "@/types/notifications.types";
-import type { SupabaseClient } from "@supabase/supabase-js";
 
 const CHANNELS: NotificationChannel[] = ["bell", "email", "push"];
 const ASYNC_CHANNELS = new Set<NotificationChannel>(["email", "push"]);
@@ -42,8 +38,6 @@ class NotificationServiceError extends Error {
   }
 }
 
-type SupabaseClientType = SupabaseClient<Database>;
-
 type ListQueryRow = NotificationRecord & {
   notification_channels: NotificationChannelRecord[];
   category: {
@@ -53,165 +47,91 @@ type ListQueryRow = NotificationRecord & {
 
 const getNowIso = () => new Date().toISOString();
 
-const getServiceClient = cache(async () =>
-  createServerSupabase({ useServiceRole: true })
-);
-
-function escapeIlike(search: string): string {
-  return search.replace(/[\\%_]/g, (match) => `\\${match}`);
-}
-
 export async function resolveCategorySlugForRole(
-  supabase: SupabaseClientType,
   role: NotificationUserRole,
   fallbackSlug?: string
 ): Promise<string> {
-  const { data: targetedCategory, error: targetedError } = await supabase
-    .from("notification_categories")
-    .select("slug")
-    .contains("audience_roles", [role])
-    .order("is_mandatory", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const { rows: targetedRows } = await query(
+    `SELECT slug FROM public.notification_categories
+     WHERE audience_roles @> ARRAY[$1]::text[]
+     ORDER BY is_mandatory DESC
+     LIMIT 1`,
+    [role]
+  );
 
-  if (targetedError) {
-    throw new NotificationServiceError(
-      `Failed to resolve notification category for role ${role}: ${targetedError.message}`,
-      targetedError
-    );
-  }
-
-  if (targetedCategory?.slug) {
-    return targetedCategory.slug;
+  if (targetedRows[0]?.slug) {
+    return targetedRows[0].slug;
   }
 
   if (fallbackSlug) {
-    const { data: explicitFallback, error: explicitFallbackError } = await supabase
-      .from("notification_categories")
-      .select("slug")
-      .eq("slug", fallbackSlug)
-      .maybeSingle();
-
-    if (explicitFallbackError) {
-      throw new NotificationServiceError(
-        `Failed to validate fallback notification category ${fallbackSlug}: ${explicitFallbackError.message}`,
-        explicitFallbackError
-      );
-    }
-
-    if (explicitFallback?.slug) {
-      return explicitFallback.slug;
-    }
-  }
-
-  const { data: fallbackCategory, error: fallbackError } = await supabase
-    .from("notification_categories")
-    .select("slug")
-    .order("slug", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (fallbackError) {
-    throw new NotificationServiceError(
-      `Failed to load fallback notification category: ${fallbackError.message}`,
-      fallbackError
+    const { rows: fallbackRows } = await query(
+      `SELECT slug FROM public.notification_categories WHERE slug = $1 LIMIT 1`,
+      [fallbackSlug]
     );
+
+    if (fallbackRows[0]?.slug) {
+      return fallbackRows[0].slug;
+    }
   }
 
-  if (!fallbackCategory?.slug) {
+  const { rows: defaultRows } = await query(
+    `SELECT slug FROM public.notification_categories ORDER BY slug ASC LIMIT 1`
+  );
+
+  if (!defaultRows[0]?.slug) {
     throw new NotificationServiceError(
       "No notification categories available for fallback"
     );
   }
 
-  return fallbackCategory.slug;
+  return defaultRows[0].slug;
 }
 
-async function ensureServiceClient(
-  provided?: SupabaseClientType
-): Promise<SupabaseClientType> {
-  if (provided) {
-    return provided;
-  }
-  return getServiceClient();
-}
+async function loadRecipientRole(recipientId: string): Promise<string | null> {
+  const { rows } = await query(
+    `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+    [recipientId]
+  );
 
-async function loadRecipientRole(
-  supabase: SupabaseClientType,
-  recipientId: string
-): Promise<Database["public"]["Enums"]["user_role"] | null> {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", recipientId)
-    .single();
-
-  if (error) {
-    throw new NotificationServiceError(
-      `Failed to load recipient profile: ${error.message}`,
-      error
-    );
-  }
-
-  return data?.role ?? null;
+  return rows[0]?.role ?? null;
 }
 
 async function findExistingNotification(
-  supabase: SupabaseClientType,
   recipientId: string,
   dedupeKey: string
 ): Promise<CreateNotificationResult | null> {
-  const { data, error } = await supabase
-    .from("notifications")
-    .select("*")
-    .eq("recipient_id", recipientId)
-    .eq("dedupe_key", dedupeKey)
-    .single();
-
-  if (error && error.code !== "PGRST116") {
-    throw new NotificationServiceError(
-      `Failed to check existing notification: ${error.message}`,
-      error
-    );
-  }
+  const { rows: notificationRows } = await query(
+    `SELECT * FROM public.notifications
+     WHERE recipient_id = $1 AND dedupe_key = $2
+     LIMIT 1`,
+    [recipientId, dedupeKey]
+  );
+  const data = notificationRows[0];
 
   if (!data) {
     return null;
   }
 
-  const { data: channels, error: channelsError } = await supabase
-    .from("notification_channels")
-    .select("*")
-    .eq("notification_id", data.id);
-
-  if (channelsError) {
-    throw new NotificationServiceError(
-      `Failed to load notification channels for dedupe match: ${channelsError.message}`,
-      channelsError
-    );
-  }
+  const { rows: channels } = await query(
+    `SELECT * FROM public.notification_channels WHERE notification_id = $1`,
+    [data.id]
+  );
 
   let outbox: NotificationOutboxRecord[] = [];
-  if (channels && channels.length) {
+  if (channels.length) {
     const channelIds = channels.map((channel) => channel.id);
-    const { data: outboxRows, error: outboxError } = await supabase
-      .from("notification_outbox")
-      .select("*")
-      .in("notification_channel_id", channelIds);
+    const { rows: outboxRows } = await query(
+      `SELECT * FROM public.notification_outbox
+       WHERE notification_channel_id = ANY($1::bigint[])`,
+      [channelIds]
+    );
 
-    if (outboxError) {
-      throw new NotificationServiceError(
-        `Failed to load notification outbox entries: ${outboxError.message}`,
-        outboxError
-      );
-    }
-
-    outbox = outboxRows ?? [];
+    outbox = outboxRows as NotificationOutboxRecord[];
   }
 
   return {
     notification: data,
-    channels: channels ?? [],
+    channels: channels as NotificationChannelRecord[],
     outbox,
     deduped: true,
   };
@@ -271,11 +191,10 @@ function buildChannelInserts(
   return { records, asyncChannels };
 }
 
-async function buildOutboxInserts(
-  supabase: SupabaseClientType,
+function buildOutboxInserts(
   channels: NotificationChannelRecord[],
   scheduleOverrides?: CreateNotificationInput["scheduleOverrides"]
-): Promise<NotificationOutboxInsert[]> {
+): NotificationOutboxInsert[] {
   if (!channels.length) {
     return [];
   }
@@ -331,12 +250,10 @@ function mapRowToFeedItem(row: ListQueryRow): NotificationFeedItem {
 
 export async function createNotification(
   input: CreateNotificationInput,
-  options?: CreateNotificationOptions
+  _options?: CreateNotificationOptions
 ): Promise<CreateNotificationResult> {
-  const supabase = await ensureServiceClient(options?.supabase);
-
   if (input.validateRecipientRole) {
-    const role = await loadRecipientRole(supabase, input.recipientId);
+    const role = await loadRecipientRole(input.recipientId);
     if (role && role !== input.roleScope) {
       throw new NotificationServiceError(
         `Recipient role mismatch. Expected ${input.roleScope} but found ${role}.`
@@ -346,7 +263,6 @@ export async function createNotification(
 
   if (input.dedupeKey) {
     const existing = await findExistingNotification(
-      supabase,
       input.recipientId,
       input.dedupeKey
     );
@@ -355,12 +271,10 @@ export async function createNotification(
     }
   }
 
-  let channelConfigResult: EffectiveChannelConfig | null = null;
   let effectiveCategorySlug = input.categorySlug;
 
   try {
     effectiveCategorySlug = await resolveCategorySlugForRole(
-      supabase,
       input.roleScope,
       input.categorySlug
     );
@@ -371,9 +285,9 @@ export async function createNotification(
     );
   }
 
+  let channelConfigResult: EffectiveChannelConfig;
   try {
     channelConfigResult = await getEffectiveChannelConfig(
-      supabase,
       input.recipientId,
       effectiveCategorySlug,
       input.channelOverrides
@@ -389,15 +303,35 @@ export async function createNotification(
     ...input,
     categorySlug: effectiveCategorySlug,
   });
-  const { data: notification, error: insertError } = await supabase
-    .from("notifications")
-    .insert(notificationInsert)
-    .select("*")
-    .single();
 
-  if (insertError || !notification) {
+  let notification: NotificationRecord;
+  try {
+    const { rows } = await query(
+      `INSERT INTO public.notifications
+         (recipient_id, role_scope, category_slug, title, body, metadata, priority,
+          cta_label, cta_url, dedupe_key, actor_id, expires_at, triggered_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING *`,
+      [
+        notificationInsert.recipient_id,
+        notificationInsert.role_scope,
+        notificationInsert.category_slug,
+        notificationInsert.title,
+        notificationInsert.body,
+        notificationInsert.metadata,
+        notificationInsert.priority,
+        notificationInsert.cta_label,
+        notificationInsert.cta_url,
+        notificationInsert.dedupe_key,
+        notificationInsert.actor_id,
+        notificationInsert.expires_at,
+        notificationInsert.triggered_at,
+      ]
+    );
+    notification = rows[0] as NotificationRecord;
+  } catch (insertError) {
     throw new NotificationServiceError(
-      `Failed to insert notification: ${insertError?.message ?? "unknown"}`,
+      `Failed to insert notification: ${(insertError as Error).message}`,
       insertError
     );
   }
@@ -410,44 +344,73 @@ export async function createNotification(
 
   let channelRows: NotificationChannelRecord[] = [];
   if (channelInserts.length) {
-    const { data: insertedChannels, error: channelError } = await supabase
-      .from("notification_channels")
-      .insert(channelInserts)
-      .select("*");
+    try {
+      const values: unknown[] = [];
+      const placeholders = channelInserts
+        .map((c, i) => {
+          const base = i * 5;
+          values.push(
+            c.notification_id,
+            c.channel,
+            c.status,
+            c.sent_at,
+            c.deliver_after
+          );
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+        })
+        .join(", ");
 
-    if (channelError) {
-      await supabase.from("notifications").delete().eq("id", notification.id);
+      const { rows } = await query(
+        `INSERT INTO public.notification_channels
+           (notification_id, channel, status, sent_at, deliver_after)
+         VALUES ${placeholders}
+         RETURNING *`,
+        values
+      );
+      channelRows = rows as NotificationChannelRecord[];
+    } catch (channelError) {
+      await query(`DELETE FROM public.notifications WHERE id = $1`, [
+        notification.id,
+      ]);
 
       throw new NotificationServiceError(
-        `Failed to insert notification channels: ${channelError.message}`,
+        `Failed to insert notification channels: ${(channelError as Error).message}`,
         channelError
       );
     }
-
-    channelRows = insertedChannels ?? [];
   }
 
-  const outboxInserts = await buildOutboxInserts(
-    supabase,
+  const outboxInserts = buildOutboxInserts(
     channelRows,
     input.scheduleOverrides
   );
 
   let outboxRows: NotificationOutboxRecord[] = [];
   if (outboxInserts.length) {
-    const { data: insertedOutbox, error: outboxError } = await supabase
-      .from("notification_outbox")
-      .insert(outboxInserts)
-      .select("*");
+    try {
+      const values: unknown[] = [];
+      const placeholders = outboxInserts
+        .map((o, i) => {
+          const base = i * 3;
+          values.push(o.notification_channel_id, o.status, o.scheduled_for);
+          return `($${base + 1}, $${base + 2}, $${base + 3})`;
+        })
+        .join(", ");
 
-    if (outboxError) {
+      const { rows } = await query(
+        `INSERT INTO public.notification_outbox
+           (notification_channel_id, status, scheduled_for)
+         VALUES ${placeholders}
+         RETURNING *`,
+        values
+      );
+      outboxRows = rows as NotificationOutboxRecord[];
+    } catch (outboxError) {
       throw new NotificationServiceError(
-        `Failed to insert notification outbox entries: ${outboxError.message}`,
+        `Failed to insert notification outbox entries: ${(outboxError as Error).message}`,
         outboxError
       );
     }
-
-    outboxRows = insertedOutbox ?? [];
   }
 
   return {
@@ -459,77 +422,84 @@ export async function createNotification(
 }
 
 export async function listNotifications(
-  supabase: SupabaseClientType,
   params: ListNotificationsParams
 ): Promise<ListNotificationsResult> {
   const limit = Math.min(params.limit ?? FEED_PAGE_SIZE_DEFAULT, 100);
   const status: NotificationFeedStatusFilter = params.status ?? "all";
   const includeArchived = params.includeArchived ?? false;
 
-  let query = supabase
-    .from("notifications")
-    .select(
-      `id, title, body, category_slug, priority, metadata, triggered_at, read_at, archived_at, expires_at, cta_label, cta_url,
-       actor_id, recipient_id, dedupe_key, created_at, updated_at, role_scope,
-       notification_channels(id, channel, status, sent_at, deliver_after, last_attempted_at, error, attempt_count, created_at, notification_id, provider_message_id, updated_at),
-       category:notification_categories(label)`
-    )
-    .eq("recipient_id", params.profileId)
-    .order("triggered_at", { ascending: false })
-    .limit(limit + 1);
+  const conditions: string[] = ["n.recipient_id = $1"];
+  const values: unknown[] = [params.profileId];
+  let idx = 2;
 
   if (status === "archived") {
-    query = query.not("archived_at", "is", null);
+    conditions.push("n.archived_at IS NOT NULL");
   } else {
     if (!includeArchived) {
-      query = query.is("archived_at", null);
+      conditions.push("n.archived_at IS NULL");
     }
-
     if (status === "unread") {
-      query = query.is("read_at", null);
+      conditions.push("n.read_at IS NULL");
     }
   }
 
   if (params.priority) {
-    query = query.eq("priority", params.priority);
+    conditions.push(`n.priority = $${idx}`);
+    values.push(params.priority);
+    idx++;
   }
 
   if (params.channel) {
-    query = query.filter("notification_channels.channel", "eq", params.channel);
+    conditions.push(
+      `EXISTS (SELECT 1 FROM public.notification_channels nc WHERE nc.notification_id = n.id AND nc.channel = $${idx})`
+    );
+    values.push(params.channel);
+    idx++;
   }
 
   const trimmedSearch = params.search?.trim();
   if (trimmedSearch) {
-    const escaped = escapeIlike(trimmedSearch);
-    query = query.or(
-      [
-        `title.ilike.%${escaped}%`,
-        `body.ilike.%${escaped}%`,
-        `category_slug.ilike.%${escaped}%`,
-      ].join(",")
+    conditions.push(
+      `(n.title ILIKE $${idx} OR n.body ILIKE $${idx} OR n.category_slug ILIKE $${idx})`
     );
+    values.push(`%${trimmedSearch}%`);
+    idx++;
   }
 
   if (params.cursor) {
-    query = query.lt("triggered_at", params.cursor);
+    conditions.push(`n.triggered_at < $${idx}`);
+    values.push(params.cursor);
+    idx++;
   }
 
-  const { data, error } = await query;
+  values.push(limit + 1);
 
-  if (error) {
-    throw new NotificationServiceError(
-      `Failed to fetch notifications: ${error.message}`,
-      error
-    );
-  }
+  const { rows } = await query(
+    `SELECT
+       n.id, n.title, n.body, n.category_slug, n.priority, n.metadata, n.triggered_at,
+       n.read_at, n.archived_at, n.expires_at, n.cta_label, n.cta_url,
+       n.actor_id, n.recipient_id, n.dedupe_key, n.created_at, n.updated_at, n.role_scope,
+       COALESCE(
+         (SELECT json_agg(nc.* ORDER BY nc.created_at)
+          FROM public.notification_channels nc WHERE nc.notification_id = n.id),
+         '[]'
+       ) AS notification_channels,
+       CASE WHEN cat.slug IS NOT NULL THEN json_build_object('label', cat.label) ELSE NULL END AS category
+     FROM public.notifications n
+     LEFT JOIN public.notification_categories cat ON cat.slug = n.category_slug
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY n.triggered_at DESC
+     LIMIT $${idx}`,
+    values
+  );
 
-  const rows = (data ?? []) as unknown as ListQueryRow[];
-  const hasMore = rows.length > limit;
-  const sliced = hasMore ? rows.slice(0, limit) : rows;
+  const typedRows = rows as unknown as ListQueryRow[];
+  const hasMore = typedRows.length > limit;
+  const sliced = hasMore ? typedRows.slice(0, limit) : typedRows;
 
   const notifications = sliced.map(mapRowToFeedItem);
   const nextCursor = hasMore
-    ? sliced[sliced.length - 1]?.triggered_at ?? null
+    ? (sliced[sliced.length - 1]?.triggered_at ?? null)
     : null;
 
   return {
@@ -540,68 +510,65 @@ export async function listNotifications(
 }
 
 export async function getUnreadCount(
-  supabase: SupabaseClientType,
   profileId: string,
   options?: { excludeDemo?: boolean }
 ): Promise<UnreadCountResult> {
-  let query = supabase
-    .from("notifications")
-    .select("id", { count: "exact", head: true })
-    .eq("recipient_id", profileId)
-    .is("read_at", null)
-    .is("archived_at", null);
+  const conditions = [
+    "recipient_id = $1",
+    "read_at IS NULL",
+    "archived_at IS NULL",
+  ];
 
   if (options?.excludeDemo) {
-    query = query.or("metadata->>demo.is.null,metadata->>demo.neq.true");
-  }
-
-  const { count, error } = await query;
-
-  if (error) {
-    throw new NotificationServiceError(
-      `Failed to fetch unread count: ${error.message}`,
-      error
+    conditions.push(
+      "(metadata->>'demo' IS NULL OR metadata->>'demo' != 'true')"
     );
   }
 
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS count FROM public.notifications WHERE ${conditions.join(" AND ")}`,
+    [profileId]
+  );
+
   return {
-    unreadCount: count ?? 0,
+    unreadCount: rows[0]?.count ?? 0,
   };
 }
 
 export async function markNotificationRead(
-  supabase: SupabaseClientType,
-  params: MarkNotificationReadParams
+  params: MarkNotificationReadParams,
+  recipientId: string
 ): Promise<void> {
-  const { error } = await supabase.rpc("mark_notification_read", {
-    p_notification_id: params.notificationId,
-    p_archive: params.archive ?? false,
-  });
+  const { rows } = await query(
+    `UPDATE public.notifications
+     SET read_at = COALESCE(read_at, timezone('utc', now())),
+         archived_at = CASE WHEN $1 THEN COALESCE(archived_at, timezone('utc', now())) ELSE archived_at END,
+         updated_at = timezone('utc', now())
+     WHERE id = $2 AND recipient_id = $3
+     RETURNING id`,
+    [params.archive ?? false, params.notificationId, recipientId]
+  );
 
-  if (error) {
+  if (rows.length === 0) {
     throw new NotificationServiceError(
-      `Failed to mark notification read: ${error.message}`,
-      error
+      `Failed to mark notification read: notification not found or not owned by this user`
     );
   }
 }
 
 export async function markAllNotificationsRead(
-  supabase: SupabaseClientType,
   profileId: string
 ): Promise<number> {
-  const { data, error } = await supabase.rpc("mark_all_notifications_read", {
-    p_profile_id: profileId,
-  });
+  const { rows } = await query(
+    `UPDATE public.notifications
+     SET read_at = COALESCE(read_at, timezone('utc', now())),
+         updated_at = timezone('utc', now())
+     WHERE recipient_id = $1 AND read_at IS NULL
+     RETURNING id`,
+    [profileId]
+  );
 
-  if (error) {
-    throw new NotificationServiceError(
-      `Failed to mark notifications read: ${error.message}`,
-      error
-    );
-  }
-
-  return data ?? 0;
+  return rows.length;
 }
 
 export function getChannelFallbackConfig(): NotificationChannelConfig {

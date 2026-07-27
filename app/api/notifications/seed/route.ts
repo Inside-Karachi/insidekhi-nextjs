@@ -39,6 +39,13 @@ const SCENARIO_COPY: Record<NotificationUserRole, ScenarioCopy> = {
     ctaLabel: "Read latest reviews",
     ctaUrl: "/dashboard/reviews",
   },
+  data_entry: {
+    title: "Listings waiting for capacity details",
+    body: "Some listings still need price per person and guest capacity filled in. Open the capacity tool to keep coverage moving.",
+    priority: "normal",
+    ctaLabel: "Open listing capacity",
+    ctaUrl: "/admin/listing-capacity",
+  },
   business_owner: {
     title: "New lead captured from your premium page",
     body: "Someone just requested more details from your listing. Follow up quickly to close the loop and keep momentum high.",

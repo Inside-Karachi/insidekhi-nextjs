@@ -5,7 +5,7 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { createMobileServiceClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -65,23 +65,29 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
   const input = parsed.data;
 
-  const service = createMobileServiceClient();
-  const { data, error } = await service.rpc("create_share_record", {
-    p_content_type: input.content_type,
-    p_content_id: input.content_id,
-    p_content_title: input.content_title,
-    p_content_url: input.content_url,
-    p_platform: input.platform,
-    p_verification_method: input.verification_method,
-    p_user_id: user.id,
-  });
-
-  if (error) {
-    console.error("[mobile-api] create_share_record failed:", error.message);
+  let rpcRows;
+  try {
+    ({ rows: rpcRows } = await query(
+      `SELECT create_share_record($1, $2, $3, $4, $5, $6, $7) AS result`,
+      [
+        input.content_type,
+        input.content_id,
+        input.content_title,
+        input.content_url,
+        input.platform,
+        input.verification_method,
+        user.id,
+      ],
+    ));
+  } catch (rpcError) {
+    console.error(
+      "[mobile-api] create_share_record failed:",
+      rpcError instanceof Error ? rpcError.message : rpcError,
+    );
     throw new MobileApiError("internal_error", "Failed to record share.", 500);
   }
 
-  const result = data as CreateShareResult;
+  const result = rpcRows[0]?.result as CreateShareResult;
   if (!result?.success) {
     throw new MobileApiError(
       "share_rejected",

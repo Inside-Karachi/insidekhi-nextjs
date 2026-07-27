@@ -1,6 +1,6 @@
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { syncStateManager } from "@/lib/scraper/redis-state-manager";
 
 export async function POST(_request: NextRequest) {
@@ -14,22 +14,17 @@ export async function POST(_request: NextRequest) {
       );
     }
 
-    const authSupabase = await createServerSupabase();
-    const {
-      data: { user },
-    } = await authSupabase.auth.getUser();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId],
+    );
+    const profile = profileRows[0];
 
-    if (!user) {
+    if (!profile) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { data: profile } = await authSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profile?.role !== "super_admin") {
+    if (profile.role !== "super_admin") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 

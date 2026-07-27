@@ -64,10 +64,15 @@ export async function POST(request: NextRequest) {
     }
 
     if (filters.categoryId && filters.categoryId !== "all") {
-      const categoryId = Number(filters.categoryId);
-      if (Number.isFinite(categoryId)) {
-        whereParams.push(categoryId);
-        whereClauses.push(`category_id = $${whereParams.length}`);
+      const categoryIdNum = Number(filters.categoryId);
+      if (Number.isFinite(categoryIdNum)) {
+        whereParams.push(categoryIdNum);
+        whereClauses.push(
+          `EXISTS (
+             SELECT 1 FROM listing_categories lc
+             WHERE lc.listing_id = listings.id AND lc.category_id = $${whereParams.length}
+           )`,
+        );
       }
     }
 

@@ -1,13 +1,21 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
+
+async function getAdminProfile(userId: string) {
+  const { rows } = await query(
+    "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+    [userId]
+  );
+  return rows[0] as { role: string } | undefined;
+}
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await params;    // Check admin authentication
+    const { id } = await params;    // Check admin authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -17,17 +25,9 @@ export async function GET(
       );
     }
 
-    // Use service role client for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
+    const profile = await getAdminProfile(session.userId);
 
-    // Get user profile with role
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -49,54 +49,37 @@ export async function GET(
     const reviewId = parseInt(id);
 
     // Get review with related data
-    const { data: review, error: reviewError } = await adminSupabase
-      .from("reviews")
-      .select(
-        `
-        *,
-        helpful_count,
-        user:profiles!user_id (
-          full_name,
-          avatar_url
-        ),
-        listings:listing_id (
-          name,
-          slug
-        ),
-        review_images (
-          id,
-          image_url
-        )
-      `
-      )
-      .eq("id", reviewId)
-      .single();
+    const { rows } = await query(
+      `SELECT
+         r.*,
+         p.full_name  AS user_name,
+         p.avatar_url AS user_avatar,
+         l.name       AS listing_name,
+         l.slug       AS listing_slug,
+         COALESCE((SELECT json_agg(ri) FROM public.review_images ri WHERE ri.review_id = r.id), '[]') AS images
+       FROM public.reviews r
+       LEFT JOIN public.profiles p ON p.id = r.user_id
+       LEFT JOIN public.listings l ON l.id = r.listing_id
+       WHERE r.id = $1
+       LIMIT 1`,
+      [reviewId]
+    );
+    const review = rows[0];
 
-    if (reviewError) {
-      if (reviewError.code === "PGRST116") {
-        return NextResponse.json(
-          { success: false, error: "Review not found" },
-          { status: 404 }
-        );
-      }
-      throw reviewError;
+    if (!review) {
+      return NextResponse.json(
+        { success: false, error: "Review not found" },
+        { status: 404 }
+      );
     }
-
-    // Transform data
-    const transformedReview = {
-      ...review,
-      user_name: review.user?.full_name || null,
-      user_avatar: review.user?.avatar_url || null,
-      listing_name: review.listings?.name || null,
-      listing_slug: review.listings?.slug || null,
-      images: review.review_images || [],
-      helpful_count: review.helpful_count || 0,
-      status: review.status || "pending", // Use actual status from database
-    };
 
     return NextResponse.json({
       success: true,
-      data: transformedReview,
+      data: {
+        ...review,
+        helpful_count: review.helpful_count || 0,
+        status: review.status || "pending",
+      },
     });
   } catch (error) {
     console.error("GET /api/admin/reviews/[id] error:", error);
@@ -112,7 +95,7 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await params;    // Check admin authentication
+    const { id } = await params;    // Check admin authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -122,17 +105,9 @@ export async function PUT(
       );
     }
 
-    // Use service role client for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
+    const profile = await getAdminProfile(session.userId);
 
-    // Get user profile with role
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -156,25 +131,20 @@ export async function PUT(
     const { rating, comment } = body;
 
     // Update the review
-    const { data: review, error: reviewError } = await adminSupabase
-      .from("reviews")
-      .update({
-        rating,
-        comment,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", reviewId)
-      .select()
-      .single();
+    const { rows } = await query(
+      `UPDATE public.reviews
+       SET rating = $1, comment = $2, updated_at = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [rating, comment, reviewId]
+    );
+    const review = rows[0];
 
-    if (reviewError) {
-      if (reviewError.code === "PGRST116") {
-        return NextResponse.json(
-          { success: false, error: "Review not found" },
-          { status: 404 }
-        );
-      }
-      throw reviewError;
+    if (!review) {
+      return NextResponse.json(
+        { success: false, error: "Review not found" },
+        { status: 404 }
+      );
     }
 
     return NextResponse.json({
@@ -195,7 +165,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await params;    // Check admin authentication
+    const { id } = await params;    // Check admin authentication
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -205,17 +175,9 @@ export async function DELETE(
       );
     }
 
-    // Use service role client for admin operations
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
+    const profile = await getAdminProfile(session.userId);
 
-    // Get user profile with role
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 }
@@ -233,28 +195,23 @@ export async function DELETE(
     const reviewId = parseInt(id);
 
     // Get review metadata before deletion for XP cleanup
-    const { data: reviewData } = await adminSupabase
-      .from("reviews")
-      .select("listing_id, user_id")
-      .eq("id", reviewId)
-      .single();
+    const { rows: reviewRows } = await query(
+      "SELECT listing_id, user_id FROM public.reviews WHERE id = $1 LIMIT 1",
+      [reviewId]
+    );
+    const reviewData = reviewRows[0] as
+      | { listing_id: number; user_id: string }
+      | undefined;
 
     // Delete the review (cascade will handle related records)
-    const { error: deleteError } = await adminSupabase
-      .from("reviews")
-      .delete()
-      .eq("id", reviewId);
-
-    if (deleteError) {
-      throw deleteError;
-    }
+    await query("DELETE FROM public.reviews WHERE id = $1", [reviewId]);
 
     if (reviewData) {
       try {
         const { cleanupLeaveReviewXpOnDelete } = await import(
           "@/lib/reviews/moderation-xp"
         );
-        await cleanupLeaveReviewXpOnDelete(adminSupabase, {
+        await cleanupLeaveReviewXpOnDelete({
           reviewId,
           userId: reviewData.user_id,
           listingId: reviewData.listing_id,

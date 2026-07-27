@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import Link from "next/link";
 import { ThemeToggle } from "./theme-toggle";
 import { ThemeAwareLogo } from "./ThemeAwareLogo";
@@ -7,15 +7,36 @@ import { MegaMenu } from "./MegaMenu";
 import { MobileNav } from "./MobileNav";
 
 export async function Header() {
-  const supabase = await createServerSupabase({ publicAnon: true });
+  const { rows: parents } = await query(
+    `SELECT id, name, slug FROM categories
+     WHERE parent_id IS NULL AND show_in_nav = true AND is_enabled = true
+     ORDER BY id`,
+  );
 
-  const { data: navItems } = await supabase
-    .from("categories")
-    .select("id, name, slug, categories(id, name, slug)") // Fetch sub-categories for the full menu
-    .is("parent_id", null)
-    .eq("show_in_nav", true)
-    .eq("is_enabled", true)
-    .order("id");
+  const parentIds = parents.map((p) => p.id);
+  const subsByParent = new Map<number, { id: number; name: string; slug: string }[]>();
+  if (parentIds.length > 0) {
+    const { rows: subs } = await query(
+      `SELECT id, name, slug, parent_id FROM categories WHERE parent_id = ANY($1) ORDER BY id`,
+      [parentIds],
+    );
+    for (const sub of subs) {
+      const parentId = Number(sub.parent_id);
+      if (!subsByParent.has(parentId)) subsByParent.set(parentId, []);
+      subsByParent.get(parentId)!.push({
+        id: Number(sub.id),
+        name: sub.name,
+        slug: sub.slug,
+      });
+    }
+  }
+
+  const navItems = parents.map((p) => ({
+    id: Number(p.id),
+    name: p.name,
+    slug: p.slug,
+    categories: subsByParent.get(Number(p.id)) || [],
+  }));
 
   const parentCategoriesWithSub =
     navItems?.filter((item) => item.categories.length > 0) || [];

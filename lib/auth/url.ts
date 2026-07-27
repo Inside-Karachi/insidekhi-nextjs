@@ -32,7 +32,7 @@ function getConfiguredSiteOrigin(): string | null {
   return null;
 }
 
-export function getAuthCallbackUrl(requestUrl?: string): string {
+function resolveSiteOrigin(requestUrl?: string): string {
   const configuredOrigin = getConfiguredSiteOrigin();
   const fallbackOrigin =
     process.env.NODE_ENV === "development" && requestUrl
@@ -46,5 +46,23 @@ export function getAuthCallbackUrl(requestUrl?: string): string {
     );
   }
 
-  return new URL("/api/auth/callback", origin).toString();
+  return origin;
+}
+
+export function getAuthCallbackUrl(requestUrl?: string): string {
+  return new URL("/api/auth/callback", resolveSiteOrigin(requestUrl)).toString();
+}
+
+export function getGoogleCallbackUrl(requestUrl?: string): string {
+  return new URL(
+    "/api/auth/google/callback",
+    resolveSiteOrigin(requestUrl)
+  ).toString();
+}
+
+export function getAppleCallbackUrl(requestUrl?: string): string {
+  return new URL(
+    "/api/auth/apple/callback",
+    resolveSiteOrigin(requestUrl)
+  ).toString();
 }

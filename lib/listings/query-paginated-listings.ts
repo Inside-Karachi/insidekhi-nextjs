@@ -111,7 +111,13 @@ export async function queryPaginatedListings(filters: QueryListingsFilters) {
   const categoryNames = await resolveCategoryNames(filters.categorySlug);
   if (categoryNames.length > 0) {
     queryParams.push(categoryNames);
-    whereClauses.push(`category_name = ANY($${queryParams.length})`);
+    whereClauses.push(`EXISTS (
+      SELECT 1
+      FROM listing_categories lc
+      JOIN categories c ON c.id = lc.category_id
+      WHERE lc.listing_id = listings_with_details.id
+        AND c.name = ANY($${queryParams.length})
+    )`);
   }
 
   const searchTerm = filters.search?.trim()

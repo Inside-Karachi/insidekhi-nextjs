@@ -1,7 +1,6 @@
 import { redirect } from "next/navigation";
 import { PremiumDashboardLayout } from "@/components/dashboard/PremiumDashboardLayout";
 import { requireSessionUser } from "@/lib/auth/require-session";
-import type { User } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 
@@ -16,8 +15,7 @@ export default async function DashboardLayout({
     redirect("/login");
   }
 
-  // Layout components expect a Supabase User shape; JWT session only has id/email.
-  const layoutUser = { id: user.id, email: user.email } as User;
+  const layoutUser = { id: user.id, email: user.email };
 
   return (
     <PremiumDashboardLayout

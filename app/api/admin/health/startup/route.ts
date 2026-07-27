@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 
@@ -11,14 +11,9 @@ const REQUIRED_LISTINGS_COLUMNS = [
   "review_notes",
 ] as const;
 
-function extractMissingColumn(message: string): string | null {
-  const match = message.match(/'([^']+)' column of 'listings'/i);
-  return match?.[1] ?? null;
-}
-
 export async function GET() {
-    const supabase = await createServerSupabase();
-  try {    const session = await getSessionFromCookies();
+  try {
+    const session = await getSessionFromCookies();
 
     if (!session) {
       return NextResponse.json(
@@ -27,13 +22,13 @@ export async function GET() {
       );
     }
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
@@ -47,38 +42,41 @@ export async function GET() {
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
     const missingColumns: string[] = [];
     for (const column of REQUIRED_LISTINGS_COLUMNS) {
-      const { error } = await adminSupabase
-        .from("listings")
-        .select(`id, ${column}`)
-        .limit(1);
-
-      if (error?.code === "PGRST204") {
-        const parsedColumn = extractMissingColumn(error.message);
-        missingColumns.push(parsedColumn || column);
+      try {
+        await query(`SELECT id, ${column} FROM public.listings LIMIT 1`);
+      } catch (error) {
+        // Postgres "undefined_column" error code
+        const code = (error as { code?: string })?.code;
+        if (code === "42703") {
+          missingColumns.push(column);
+        }
       }
     }
 
-    const { count: generalCategoryCount, error: categoryError } =
-      await adminSupabase
-        .from("notification_categories")
-        .select("slug", { count: "exact", head: true })
-        .eq("slug", "general");
+    let generalCategoryCount = 0;
+    let categoryError: { message: string; details: string | null; hint: string | null; code: string | null } | null = null;
+    try {
+      const { rows } = await query(
+        `SELECT COUNT(*)::int AS count FROM public.notification_categories WHERE slug = $1`,
+        ["general"]
+      );
+      generalCategoryCount = (rows[0] as { count: number })?.count ?? 0;
+    } catch (error) {
+      const err = error as { message?: string; detail?: string; hint?: string; code?: string };
+      categoryError = {
+        message: err.message ?? "Unknown error",
+        details: err.detail ?? null,
+        hint: err.hint ?? null,
+        code: err.code ?? null,
+      };
+    }
 
     const categoryCheck = {
-      ok: !categoryError && (generalCategoryCount ?? 0) > 0,
-      count: generalCategoryCount ?? 0,
-      error: categoryError
-        ? {
-            message: categoryError.message,
-            details: categoryError.details,
-            hint: categoryError.hint,
-            code: categoryError.code,
-          }
-        : null,
+      ok: !categoryError && generalCategoryCount > 0,
+      count: generalCategoryCount,
+      error: categoryError,
     };
 
     const listingsColumnsCheck = {

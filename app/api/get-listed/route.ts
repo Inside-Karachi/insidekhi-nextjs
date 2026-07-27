@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSession } from "@/lib/auth/session";
 import {
   normalizeEmail,
   validateEmail,
@@ -11,8 +12,6 @@ import { verifyRecaptcha } from "@/lib/utils/recaptcha";
 
 export async function POST(request: NextRequest) {
   try {
-    // Use service role for safe server-side inserts and duplicate checks
-    const supabase = await createServerSupabase({ useServiceRole: true });
     const formData = await request.json();
 
     // Honeypot: if present and non-empty, silently accept
@@ -65,29 +64,41 @@ export async function POST(request: NextRequest) {
       request.headers.get("x-real-ip") ||
       "unknown";
     const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const { count, error: countErr } = await supabase
-      .from("form_submissions")
-      .select("id", { count: "exact" })
-      .eq("form_type", "get-listed")
-      .gt("submitted_at", cutoff)
-      .eq("additional_data->>ip", ip);
-    if (countErr) console.error("Rate count error (get-listed):", countErr);
-    const total = typeof count === "number" ? count : 0;
+    let total = 0;
+    try {
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*)::int AS count
+         FROM form_submissions
+         WHERE form_type = 'get-listed'
+           AND submitted_at > $1
+           AND additional_data->>'ip' = $2`,
+        [cutoff, ip]
+      );
+      total = countRows[0]?.count ?? 0;
+    } catch (countErr) {
+      console.error("Rate count error (get-listed):", countErr);
+    }
     if (total > 20) {
-      const { data: earliest, error: eErr } = await supabase
-        .from("form_submissions")
-        .select("submitted_at")
-        .eq("form_type", "get-listed")
-        .gt("submitted_at", cutoff)
-        .eq("additional_data->>ip", ip)
-        .order("submitted_at", { ascending: true })
-        .limit(1);
       let retryAfter = Math.ceil(60 * 60);
-      if (!eErr && earliest && earliest.length && earliest[0].submitted_at) {
-        const oldestTs = Date.parse(String(earliest[0].submitted_at));
-        const now = Date.now();
-        const retryAfterMs = Math.max(0, 60 * 60 * 1000 - (now - oldestTs));
-        retryAfter = Math.ceil(retryAfterMs / 1000);
+      try {
+        const { rows: earliest } = await query(
+          `SELECT submitted_at
+           FROM form_submissions
+           WHERE form_type = 'get-listed'
+             AND submitted_at > $1
+             AND additional_data->>'ip' = $2
+           ORDER BY submitted_at ASC
+           LIMIT 1`,
+          [cutoff, ip]
+        );
+        if (earliest.length && earliest[0].submitted_at) {
+          const oldestTs = Date.parse(String(earliest[0].submitted_at));
+          const now = Date.now();
+          const retryAfterMs = Math.max(0, 60 * 60 * 1000 - (now - oldestTs));
+          retryAfter = Math.ceil(retryAfterMs / 1000);
+        }
+      } catch (eErr) {
+        console.error("Rate earliest lookup error (get-listed):", eErr);
       }
       console.warn(
         `Rate limited get-listed - ip=${ip} retryAfter=${retryAfter}s`
@@ -120,6 +131,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const session = await getSession(request);
+
     // Map form data to our simple table structure
     const submissionData = {
       form_type: "get-listed",
@@ -141,19 +154,18 @@ export async function POST(request: NextRequest) {
         formVersion: "1.0",
         submittedFrom: "get-listed-page",
         ip,
-        user_id: (await createServerSupabase().then(c => c.auth.getUser())).data.user?.id || null,
+        user_id: session?.userId || null,
       },
     };
 
     // Duplicate check
-    const { data: dup } = await supabase
-      .from("form_submissions")
-      .select("id")
-      .eq("form_type", "get-listed")
-      .eq("email", email)
-      .limit(1)
-      .maybeSingle();
-    if (dup) {
+    const { rows: dupRows } = await query(
+      `SELECT id FROM form_submissions
+       WHERE form_type = 'get-listed' AND email = $1
+       LIMIT 1`,
+      [email]
+    );
+    if (dupRows.length > 0) {
       return NextResponse.json(
         { success: true, message: "You already submitted a listing" },
         { status: 200 }
@@ -161,13 +173,35 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert into form_submissions table
-    const { data, error } = await supabase
-      .from("form_submissions")
-      .insert([submissionData])
-      .select("id")
-      .single();
-
-    if (error) {
+    let insertedId: number;
+    try {
+      const { rows } = await query(
+        `INSERT INTO form_submissions
+           (form_type, name, email, phone, company_name, business_type, address, city, state,
+            zip_code, website, years_in_business, operating_hours, message, social_media, additional_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+         RETURNING id`,
+        [
+          submissionData.form_type,
+          submissionData.name,
+          submissionData.email,
+          submissionData.phone,
+          submissionData.company_name,
+          submissionData.business_type,
+          submissionData.address,
+          submissionData.city,
+          submissionData.state,
+          submissionData.zip_code,
+          submissionData.website,
+          submissionData.years_in_business,
+          submissionData.operating_hours,
+          submissionData.message,
+          submissionData.social_media,
+          submissionData.additional_data,
+        ]
+      );
+      insertedId = rows[0].id;
+    } catch (error) {
       console.error("Database error:", error);
       return NextResponse.json(
         { error: "Failed to submit listing application" },
@@ -177,7 +211,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      id: data.id,
+      id: insertedId,
       message: "Business listing submitted successfully!",
     });
   } catch (error) {
@@ -191,7 +225,6 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const { searchParams } = new URL(request.url);
     const email = searchParams.get("email");
 
@@ -203,24 +236,16 @@ export async function GET(request: NextRequest) {
     }
 
     // Get user's listing applications
-    const { data, error } = await supabase
-      .from("form_submissions")
-      .select("*")
-      .eq("form_type", "get-listed")
-      .eq("email", email)
-      .order("submitted_at", { ascending: false });
-
-    if (error) {
-      console.error("Database error:", error);
-      return NextResponse.json(
-        { error: "Failed to fetch applications" },
-        { status: 500 }
-      );
-    }
+    const { rows: applications } = await query(
+      `SELECT * FROM form_submissions
+       WHERE form_type = 'get-listed' AND email = $1
+       ORDER BY submitted_at DESC`,
+      [email]
+    );
 
     return NextResponse.json({
       success: true,
-      applications: data,
+      applications,
     });
   } catch (error) {
     console.error("API error:", error);

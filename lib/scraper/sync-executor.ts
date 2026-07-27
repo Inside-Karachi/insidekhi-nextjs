@@ -1,4 +1,4 @@
-/** Runs Peekaboo listing syncs against Supabase with Redis coordination. */
+/** Runs Peekaboo listing syncs against Postgres with Redis coordination. */
 
 import { randomUUID } from "crypto";
 import { createAPIClient } from "@/scrapers/peekaboo_listings/core/api-client";
@@ -9,7 +9,7 @@ import {
 import { createBatchProcessor } from "@/scrapers/peekaboo_listings/core/batch-processor";
 import { categoryMapper } from "@/scrapers/peekaboo_listings/transformers/category-mapper";
 import { syncStateManager } from "@/lib/scraper/redis-state-manager";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { getPeekabooToken } from "@/lib/utils/peekaboo-token-manager";
 import { sendScraperAlert } from "@/lib/scraper/alerts";
 import type { SyncReport } from "@/types/peekaboo-scraper.types";
@@ -217,12 +217,9 @@ export async function executeSyncOperation(
         const staleIds = new Set<number>();
         try {
           const staleDays = getPositiveEnvNumber("SCRAPER_STALE_DAYS", 7);
-          const supabase = await createServerSupabase({ useServiceRole: true });
-          const { data: staleRows } = await supabase.rpc(
-            "get_stale_peekaboo_ids",
-            {
-              stale_threshold: `${staleDays} days`,
-            },
+          const { rows: staleRows } = await query(
+            `SELECT * FROM get_stale_peekaboo_ids($1::interval)`,
+            [`${staleDays} days`],
           );
           if (staleRows) {
             for (const row of staleRows) {
@@ -455,38 +452,36 @@ async function createSyncHistoryRecord(
   totalEntities: number,
 ): Promise<void> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
+    const recordConfig = {
+      ...config,
+      total_entities: totalEntities, // Will be updated after fetch
+    } as unknown as Record<string, unknown>;
 
-    const record = {
-      id: syncId,
-      started_at: new Date().toISOString(),
-      config: {
-        ...config,
-        total_entities: totalEntities, // Will be updated after fetch
-      } as unknown as Record<string, unknown>,
-      entities_processed: 0,
-      entities_created: 0,
-      entities_updated: 0,
-      entities_skipped: 0,
-      images_synced: 0,
-      branches_synced: 0,
-      errors_count: 0,
-      status: "running" as const,
-      triggered_by: userId,
-    };
+    await query(
+      `INSERT INTO listing_sync_history (
+         id, started_at, config, entities_processed, entities_created,
+         entities_updated, entities_skipped, images_synced, branches_synced,
+         errors_count, status, triggered_by
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [
+        syncId,
+        new Date().toISOString(),
+        recordConfig,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        "running",
+        userId,
+      ],
+    );
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error } = await (supabase as any)
-      .from("listing_sync_history")
-      .insert(record);
-
-    if (error) {
-      console.error("Failed to create sync history:", error);
-    } else {
-      console.log(
-        `[SYNC ${syncId}] Created database record for realtime tracking`,
-      );
-    }
+    console.log(
+      `[SYNC ${syncId}] Created database record for realtime tracking`,
+    );
   } catch (error) {
     console.error("Error creating sync history:", error);
   }
@@ -501,14 +496,11 @@ async function updateSyncTotalEntities(
   entityListWarning?: EntityListFetchWarning | null,
 ): Promise<void> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: existingRecord } = await (supabase as any)
-      .from("listing_sync_history")
-      .select("config")
-      .eq("id", syncId)
-      .single();
+    const { rows } = await query(
+      `SELECT config FROM listing_sync_history WHERE id = $1 LIMIT 1`,
+      [syncId],
+    );
+    const existingRecord = rows[0];
 
     const existingConfig =
       existingRecord?.config && typeof existingRecord.config === "object"
@@ -524,20 +516,12 @@ async function updateSyncTotalEntities(
       updatedConfig.entity_fetch_warning = entityListWarning;
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error } = await (supabase as any)
-      .from("listing_sync_history")
-      .update({
-        config: updatedConfig,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", syncId);
+    await query(
+      `UPDATE listing_sync_history SET config = $1, updated_at = $2 WHERE id = $3`,
+      [updatedConfig, new Date().toISOString(), syncId],
+    );
 
-    if (error) {
-      console.error("Failed to update total entities:", error);
-    } else {
-      console.log(`[SYNC ${syncId}] Updated total entities: ${totalEntities}`);
-    }
+    console.log(`[SYNC ${syncId}] Updated total entities: ${totalEntities}`);
   } catch (error) {
     console.error("Error updating total entities:", error);
   }
@@ -559,24 +543,25 @@ async function updateSyncProgress(
   if (!progress) return;
 
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error } = await (supabase as any)
-      .from("listing_sync_history")
-      .update({
-        entities_processed: progress.current,
-        entities_created: progress.created,
-        entities_updated: progress.updated,
-        entities_skipped: progress.skipped,
-        errors_count: progress.errors,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", syncId);
-
-    if (error) {
-      console.error("Failed to update sync progress:", error);
-    }
+    await query(
+      `UPDATE listing_sync_history SET
+         entities_processed = $1,
+         entities_created = $2,
+         entities_updated = $3,
+         entities_skipped = $4,
+         errors_count = $5,
+         updated_at = $6
+       WHERE id = $7`,
+      [
+        progress.current,
+        progress.created,
+        progress.updated,
+        progress.skipped,
+        progress.errors,
+        new Date().toISOString(),
+        syncId,
+      ],
+    );
   } catch (error) {
     console.error("Error updating sync progress:", error);
   }
@@ -592,14 +577,11 @@ async function appendLiveSyncError(
   },
 ): Promise<void> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: existingRecord } = await (supabase as any)
-      .from("listing_sync_history")
-      .select("config")
-      .eq("id", syncId)
-      .single();
+    const { rows } = await query(
+      `SELECT config FROM listing_sync_history WHERE id = $1 LIMIT 1`,
+      [syncId],
+    );
+    const existingRecord = rows[0];
 
     const config =
       existingRecord?.config && typeof existingRecord.config === "object"
@@ -612,17 +594,14 @@ async function appendLiveSyncError(
 
     const nextErrors = [...currentErrors, errorEntry].slice(-200);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (supabase as any)
-      .from("listing_sync_history")
-      .update({
-        config: {
-          ...config,
-          live_errors: nextErrors,
-        },
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", syncId);
+    await query(
+      `UPDATE listing_sync_history SET config = $1, updated_at = $2 WHERE id = $3`,
+      [
+        { ...config, live_errors: nextErrors },
+        new Date().toISOString(),
+        syncId,
+      ],
+    );
   } catch (error) {
     console.error(`[SYNC ${syncId}] Failed to append live error log:`, error);
   }
@@ -633,16 +612,11 @@ async function markSyncStoppingIfRequested(syncId: string): Promise<void> {
     const stopRequested = await syncStateManager.isStopRequested(syncId);
     if (!stopRequested) return;
 
-    const supabase = await createServerSupabase({ useServiceRole: true });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (supabase as any)
-      .from("listing_sync_history")
-      .update({
-        status: "stopping",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", syncId)
-      .eq("status", "running");
+    await query(
+      `UPDATE listing_sync_history SET status = $1, updated_at = $2
+       WHERE id = $3 AND status = $4`,
+      ["stopping", new Date().toISOString(), syncId, "running"],
+    );
   } catch (error) {
     console.error(`[SYNC ${syncId}] Failed to mark stopping state:`, error);
   }
@@ -661,42 +635,47 @@ async function completeSyncHistory(
   errorStack?: string,
 ): Promise<void> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
+    const now = new Date().toISOString();
 
-    const updates = {
-      completed_at: new Date().toISOString(),
-      duration_ms: duration,
-      ...(report
-        ? {
-            entities_processed: report.summary.entitiesProcessed,
-            entities_created: report.summary.entitiesCreated,
-            entities_updated: report.summary.entitiesUpdated,
-            entities_skipped: report.summary.entitiesSkipped,
-            images_synced: report.summary.imagesSynced,
-            branches_synced: report.summary.branchesSynced,
-            errors_count: report.summary.errors,
-          }
-        : {}),
-      status,
-      report: report as unknown as Record<string, unknown> | null,
-      error_message: errorMessage || warningMessage || null,
-      error_stack: errorStack || null,
-      updated_at: new Date().toISOString(),
-    };
+    await query(
+      `UPDATE listing_sync_history SET
+         completed_at = $1,
+         duration_ms = $2,
+         entities_processed = COALESCE($3, entities_processed),
+         entities_created = COALESCE($4, entities_created),
+         entities_updated = COALESCE($5, entities_updated),
+         entities_skipped = COALESCE($6, entities_skipped),
+         images_synced = COALESCE($7, images_synced),
+         branches_synced = COALESCE($8, branches_synced),
+         errors_count = COALESCE($9, errors_count),
+         status = $10,
+         report = $11,
+         error_message = $12,
+         error_stack = $13,
+         updated_at = $14
+       WHERE id = $15`,
+      [
+        now,
+        duration,
+        report ? report.summary.entitiesProcessed : null,
+        report ? report.summary.entitiesCreated : null,
+        report ? report.summary.entitiesUpdated : null,
+        report ? report.summary.entitiesSkipped : null,
+        report ? report.summary.imagesSynced : null,
+        report ? report.summary.branchesSynced : null,
+        report ? report.summary.errors : null,
+        status,
+        report ? (report as unknown as Record<string, unknown>) : null,
+        errorMessage || warningMessage || null,
+        errorStack || null,
+        now,
+        syncId,
+      ],
+    );
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error } = await (supabase as any)
-      .from("listing_sync_history")
-      .update(updates)
-      .eq("id", syncId);
-
-    if (error) {
-      console.error("Failed to complete sync history:", error);
-    } else {
-      console.log(
-        `[SYNC ${syncId}] Updated database with final status: ${status}`,
-      );
-    }
+    console.log(
+      `[SYNC ${syncId}] Updated database with final status: ${status}`,
+    );
   } catch (error) {
     console.error("Error completing sync history:", error);
   }

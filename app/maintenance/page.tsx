@@ -1,21 +1,14 @@
 import { MaintenancePage } from "@/components/maintenance/MaintenancePage";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { redirect } from "next/navigation";
 
 export default async function Maintenance() {
-  // Use service role to bypass RLS on system_config table
-  // This is safe because maintenance page is public and we're only reading system configuration
-  const supabase = await createServerSupabase({ useServiceRole: true });
-
   // Fetch maintenance configuration
-  const { data: configs } = await supabase
-    .from("system_config")
-    .select("config_key, config_value")
-    .in("config_key", [
-      "maintenance.enabled",
-      "maintenance.message",
-      "maintenance.estimated_end",
-    ]);
+  const { rows: configs } = await query(
+    `SELECT config_key, config_value FROM system_config
+     WHERE config_key = ANY($1)`,
+    [["maintenance.enabled", "maintenance.message", "maintenance.estimated_end"]],
+  );
 
   // Check if maintenance mode is enabled
   const enabledConfig = configs?.find(

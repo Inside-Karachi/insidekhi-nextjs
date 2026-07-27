@@ -5,10 +5,7 @@ import { ok } from "@/lib/mobile/response";
 import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import {
-  createMobileServiceClient,
-  type MobileSupabase,
-} from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -36,19 +33,22 @@ function windowStart(limitType: string, ref: Date): string | null {
 }
 
 async function scanCountInWindow(
-  service: MobileSupabase,
   userId: string,
   qrCodeId: number,
   start: string | null,
 ): Promise<number> {
-  let q = service
-    .from("qr_scans")
-    .select("scanned_at", { count: "exact", head: true })
-    .eq("user_id", userId)
-    .eq("qr_code_id", qrCodeId);
-  if (start) q = q.gte("scanned_at", start);
-  const { count } = await q;
-  return count ?? 0;
+  const params: unknown[] = [userId, qrCodeId];
+  let sinceClause = "";
+  if (start) {
+    params.push(start);
+    sinceClause = "AND scanned_at >= $3";
+  }
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS count FROM qr_scans
+     WHERE user_id = $1 AND qr_code_id = $2 ${sinceClause}`,
+    params,
+  );
+  return rows[0]?.count ?? 0;
 }
 
 /**
@@ -57,8 +57,7 @@ async function scanCountInWindow(
  * Body `{ code, location?, deviceInfo? }`. Validates the QR code, enforces its
  * per-user scan limit (daily/weekly/once), records the scan with a deterministic
  * winner-selection to undo concurrent race losers, then awards XP via the shared
- * `awardXP("visit_location", ...)`. Writes use a service-role client after the
- * caller is authenticated. Mirrors `app/api/gamification/qr-codes/scan`.
+ * `awardXP("visit_location", ...)`. Mirrors `app/api/gamification/qr-codes/scan`.
  */
 export const POST = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request); // IP-keyed before auth (unauth-flood guard)
@@ -76,13 +75,12 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
   const { code, location, deviceInfo } = parsed.data;
 
-  const service = createMobileServiceClient();
-
-  const { data: qrCode } = await service
-    .from("qr_codes")
-    .select("id, is_active, expires_at, scan_limit_type, xp_reward, qr_type")
-    .eq("code", code)
-    .maybeSingle();
+  const { rows: qrCodeRows } = await query(
+    `SELECT id, is_active, expires_at, scan_limit_type, xp_reward, qr_type
+     FROM qr_codes WHERE code = $1 LIMIT 1`,
+    [code],
+  );
+  const qrCode = qrCodeRows[0];
   if (!qrCode) {
     throw new MobileApiError("not_found", "Invalid QR code.", 404);
   }
@@ -109,27 +107,27 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   // Fast pre-check (winner-selection below is the race-safe guard).
   if (limited) {
     const start = windowStart(limitType, new Date());
-    if ((await scanCountInWindow(service, user.id, qrCode.id, start)) > 0) {
+    if ((await scanCountInWindow(user.id, qrCode.id, start)) > 0) {
       throw new MobileApiError("already_scanned", limitMessage, 400);
     }
   }
 
-  const { data: scan, error: scanError } = await service
-    .from("qr_scans")
-    .insert({
-      user_id: user.id,
-      qr_code_id: qrCode.id,
-      xp_awarded: 0,
-      scan_location: location ?? null,
-      device_info: deviceInfo ?? null,
-    })
-    .select("id, scanned_at")
-    .single();
-  if (scanError || !scan) {
-    if (scanError?.code === "23505") {
+  let scan: { id: number; scanned_at: string } | undefined;
+  try {
+    const { rows } = await query(
+      `INSERT INTO qr_scans (user_id, qr_code_id, xp_awarded, scan_location, device_info)
+       VALUES ($1, $2, 0, $3, $4)
+       RETURNING id, scanned_at`,
+      [user.id, qrCode.id, location ?? null, deviceInfo ?? null],
+    );
+    scan = rows[0];
+  } catch (scanError) {
+    if ((scanError as { code?: string } | null)?.code === "23505") {
       throw new MobileApiError("already_scanned", limitMessage, 400);
     }
-    console.error("[mobile-api] qr scan insert failed:", scanError?.message);
+    console.error("[mobile-api] qr scan insert failed:", scanError);
+  }
+  if (!scan) {
     throw new MobileApiError("internal_error", "Failed to record scan.", 500);
   }
 
@@ -137,19 +135,22 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   // window, delete this one and reject.
   if (limited) {
     const start = windowStart(limitType, new Date(scan.scanned_at));
-    let wq = service
-      .from("qr_scans")
-      .select("id")
-      .eq("user_id", user.id)
-      .eq("qr_code_id", qrCode.id)
-      .order("scanned_at", { ascending: true })
-      .order("id", { ascending: true })
-      .limit(1);
-    if (start) wq = wq.gte("scanned_at", start);
-    const { data: winner } = await wq;
-    const winnerId = winner?.[0]?.id;
-    if (winnerId && winnerId !== scan.id) {
-      await service.from("qr_scans").delete().eq("id", scan.id);
+    const params: unknown[] = [user.id, qrCode.id];
+    let sinceClause = "";
+    if (start) {
+      params.push(start);
+      sinceClause = "AND scanned_at >= $3";
+    }
+    const { rows: winnerRows } = await query(
+      `SELECT id FROM qr_scans
+       WHERE user_id = $1 AND qr_code_id = $2 ${sinceClause}
+       ORDER BY scanned_at ASC, id ASC
+       LIMIT 1`,
+      params,
+    );
+    const winnerId = winnerRows?.[0]?.id;
+    if (winnerId && Number(winnerId) !== Number(scan.id)) {
+      await query(`DELETE FROM qr_scans WHERE id = $1`, [scan.id]);
       throw new MobileApiError("already_scanned", limitMessage, 400);
     }
   }
@@ -166,14 +167,15 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     );
     if ("success" in result && result.success) {
       xpAwarded = result.xp_awarded ?? 0;
-      const { error: xpUpdateError } = await service
-        .from("qr_scans")
-        .update({ xp_awarded: xpAwarded })
-        .eq("id", scan.id);
-      if (xpUpdateError) {
+      try {
+        await query(`UPDATE qr_scans SET xp_awarded = $1 WHERE id = $2`, [
+          xpAwarded,
+          scan.id,
+        ]);
+      } catch (xpUpdateError) {
         console.error(
           "[mobile-api] qr scan xp_awarded update failed:",
-          xpUpdateError.message,
+          xpUpdateError,
         );
       }
     } else if ("error" in result && result.status !== 403) {

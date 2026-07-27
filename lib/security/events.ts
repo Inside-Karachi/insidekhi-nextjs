@@ -5,7 +5,7 @@
  * and automatically block malicious IPs.
  */
 
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import type {
   SecurityEventType,
   SecuritySeverity,
@@ -23,26 +23,25 @@ export async function logSecurityEvent(
   data: CreateSecurityEventData
 ): Promise<void> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
-    const { error } = await supabase.from("security_events").insert({
-      event_type: data.eventType,
-      severity: data.severity,
-      user_id: data.userId || null,
-      ip_address: data.ipAddress || null,
-      user_agent: data.userAgent || null,
-      endpoint: data.endpoint || null,
-      method: data.method || null,
-      request_count: data.requestCount || 1,
-      details: data.details || {},
-      auto_blocked: data.autoBlock || false,
-      block_duration_minutes: data.blockDurationMinutes || null,
-    });
-
-    if (error) {
-      console.error("[SECURITY] Failed to log event:", error);
-      return;
-    }
+    await query(
+      `INSERT INTO public.security_events
+         (event_type, severity, user_id, ip_address, user_agent, endpoint, method,
+          request_count, details, auto_blocked, block_duration_minutes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        data.eventType,
+        data.severity,
+        data.userId || null,
+        data.ipAddress || null,
+        data.userAgent || null,
+        data.endpoint || null,
+        data.method || null,
+        data.requestCount || 1,
+        data.details || {},
+        data.autoBlock || false,
+        data.blockDurationMinutes || null,
+      ]
+    );
 
     // Auto-block if needed
     if (data.autoBlock && data.ipAddress) {
@@ -75,14 +74,12 @@ async function autoBlockIP(
   durationMinutes?: number
 ): Promise<void> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
     // Check if auto-blocking is enabled
-    const { data: config } = await supabase
-      .from("system_config")
-      .select("config_value")
-      .eq("config_key", "security.auto_block_enabled")
-      .single();
+    const { rows: configRows } = await query(
+      `SELECT config_value FROM public.system_config WHERE config_key = $1 LIMIT 1`,
+      ["security.auto_block_enabled"]
+    );
+    const config = configRows[0] as { config_value: unknown } | undefined;
 
     if (!config || config.config_value !== true) {
       console.log("[SECURITY] Auto-blocking is disabled, skipping IP block");
@@ -91,27 +88,21 @@ async function autoBlockIP(
 
     // Get default block duration if not provided
     if (!durationMinutes) {
-      const { data: durationConfig } = await supabase
-        .from("system_config")
-        .select("config_value")
-        .eq("config_key", "security.block_duration_minutes")
-        .single();
-
-      durationMinutes = (durationConfig?.config_value as number) || 60;
+      const { rows: durationRows } = await query(
+        `SELECT config_value FROM public.system_config WHERE config_key = $1 LIMIT 1`,
+        ["security.block_duration_minutes"]
+      );
+      durationMinutes = (durationRows[0]?.config_value as number) || 60;
     }
 
-    // Block the IP using RPC function
-    const { error } = await supabase.rpc("block_ip", {
-      p_ip_address: ipAddress,
-      p_reason: `Auto-blocked: ${reason}`,
-      p_severity: severity,
-      p_duration_minutes: durationMinutes ?? undefined,
-    });
-
-    if (error) {
-      console.error("[SECURITY] Failed to auto-block IP:", error);
-      return;
-    }
+    // Block the IP using the block_ip Postgres function
+    await query(`SELECT block_ip($1, $2, $3, $4, $5)`, [
+      ipAddress,
+      `Auto-blocked: ${reason}`,
+      severity,
+      durationMinutes ?? null,
+      null, // p_blocked_by - no user; system-initiated
+    ]);
 
     console.log(
       `[SECURITY] Auto-blocked IP ${ipAddress} for ${durationMinutes} minutes (reason: ${reason})`
@@ -145,23 +136,16 @@ async function checkSecurityThresholds(
 
     // For high severity, check if we should escalate
     if (data.severity === "high" && data.ipAddress) {
-      const supabase = await createServerSupabase({ useServiceRole: true });
-
       // Count recent high/critical events from this IP
-      const { data: recentEvents, error } = await supabase
-        .from("security_events")
-        .select("id")
-        .eq("ip_address", data.ipAddress)
-        .in("severity", ["high", "critical"])
-        .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString()) // Last hour
-        .order("created_at", { ascending: false });
+      const { rows: recentEvents } = await query(
+        `SELECT id FROM public.security_events
+         WHERE ip_address = $1 AND severity IN ('high', 'critical')
+           AND created_at >= $2
+         ORDER BY created_at DESC`,
+        [data.ipAddress, new Date(Date.now() - 60 * 60 * 1000).toISOString()]
+      );
 
-      if (error) {
-        console.error("[SECURITY] Failed to check event threshold:", error);
-        return;
-      }
-
-      const eventCount = (recentEvents?.length || 0) + 1;
+      const eventCount = recentEvents.length + 1;
 
       // If more than 3 high/critical events in an hour, escalate
       if (eventCount >= 3) {
@@ -192,27 +176,23 @@ export async function logFailedLogin(
   ipAddress: string,
   userAgent: string
 ): Promise<void> {
-  const supabase = await createServerSupabase({ useServiceRole: true });
-
   // Get brute force threshold
-  const { data: thresholdConfig } = await supabase
-    .from("system_config")
-    .select("config_value")
-    .eq("config_key", "security.brute_force_threshold")
-    .single();
-
-  const bruteForceThreshold = (thresholdConfig?.config_value as number) || 10;
+  const { rows: thresholdRows } = await query(
+    `SELECT config_value FROM public.system_config WHERE config_key = $1 LIMIT 1`,
+    ["security.brute_force_threshold"]
+  );
+  const bruteForceThreshold =
+    (thresholdRows[0]?.config_value as number) || 10;
 
   // Check for recent failures from this IP
-  const { data: recentFailures } = await supabase
-    .from("security_events")
-    .select("id")
-    .eq("event_type", "failed_login")
-    .eq("ip_address", ipAddress)
-    .gte("created_at", new Date(Date.now() - 15 * 60 * 1000).toISOString()) // Last 15 minutes
-    .order("created_at", { ascending: false });
+  const { rows: recentFailures } = await query(
+    `SELECT id FROM public.security_events
+     WHERE event_type = 'failed_login' AND ip_address = $1 AND created_at >= $2
+     ORDER BY created_at DESC`,
+    [ipAddress, new Date(Date.now() - 15 * 60 * 1000).toISOString()]
+  );
 
-  const failureCount = (recentFailures?.length || 0) + 1;
+  const failureCount = recentFailures.length + 1;
   const isBruteForce = failureCount >= bruteForceThreshold;
 
   await logSecurityEvent({
@@ -371,18 +351,11 @@ export async function logConfigChange(
  */
 export async function isIPBlocked(ipAddress: string): Promise<boolean> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
+    const { rows } = await query(`SELECT is_ip_blocked($1) AS blocked`, [
+      ipAddress,
+    ]);
 
-    const { data, error } = await supabase.rpc("is_ip_blocked", {
-      check_ip: ipAddress,
-    });
-
-    if (error) {
-      console.error("[SECURITY] Error checking IP block status:", error);
-      return false;
-    }
-
-    return data === true;
+    return rows[0]?.blocked === true;
   } catch (error) {
     console.error("[SECURITY] Error in isIPBlocked:", error);
     return false;
@@ -400,20 +373,13 @@ export async function blockIP(
   blockedBy?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
-    const { error } = await supabase.rpc("block_ip", {
-      p_ip_address: ipAddress,
-      p_reason: reason,
-      p_severity: severity,
-      p_duration_minutes: durationMinutes ?? undefined,
-      p_blocked_by: blockedBy ?? undefined,
-    });
-
-    if (error) {
-      console.error("[SECURITY] Failed to block IP:", error);
-      return { success: false, error: error.message };
-    }
+    await query(`SELECT block_ip($1, $2, $3, $4, $5)`, [
+      ipAddress,
+      reason,
+      severity,
+      durationMinutes ?? null,
+      blockedBy ?? null,
+    ]);
 
     // Log the manual block as a security event
     await logSecurityEvent({
@@ -446,17 +412,10 @@ export async function unblockIP(
   unblockedBy?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
-    const { error } = await supabase.rpc("unblock_ip", {
-      p_ip_address: ipAddress,
-      p_unblocked_by: unblockedBy ?? undefined,
-    });
-
-    if (error) {
-      console.error("[SECURITY] Failed to unblock IP:", error);
-      return { success: false, error: error.message };
-    }
+    await query(`SELECT unblock_ip($1, $2)`, [
+      ipAddress,
+      unblockedBy ?? null,
+    ]);
 
     // Log the manual unblock
     await logSecurityEvent({

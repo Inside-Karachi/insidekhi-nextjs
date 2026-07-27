@@ -397,6 +397,7 @@ export type NotificationDTO = {
   id: string;
   title: string;
   body: string;
+  category_slug: string;
   metadata: Json;
   channel: NotificationChannel;
   priority: NotificationPriority;
@@ -474,6 +475,7 @@ export function toNotification(
     id: item.id,
     title: item.title,
     body: item.body,
+    category_slug: item.categorySlug,
     metadata: pickSafeMetadata(item.metadata),
     channel,
     priority: item.priority,

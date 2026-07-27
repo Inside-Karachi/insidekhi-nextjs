@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
+import { syncListingCategories, normalizeCategoryIds } from "@/lib/listings/sync-listing-categories";
 import { deleteListingsBulk } from "@/lib/utils/listing-deletion";
 
 export async function GET(request: NextRequest) {
@@ -49,7 +50,12 @@ export async function GET(request: NextRequest) {
       const categoryIdNum = parseInt(categoryId);
       if (!isNaN(categoryIdNum)) {
         whereParams.push(categoryIdNum);
-        whereClauses.push(`category_id = $${whereParams.length}`);
+        whereClauses.push(
+          `EXISTS (
+             SELECT 1 FROM listing_categories lc
+             WHERE lc.listing_id = listings.id AND lc.category_id = $${whereParams.length}
+           )`,
+        );
       }
     }
 
@@ -184,6 +190,7 @@ export async function POST(request: NextRequest) {
       email,
       website,
       category_id,
+      category_ids,
       latitude,
       longitude,
       is_featured,
@@ -205,9 +212,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!category_id) {
+    const hasCategories =
+      (Array.isArray(category_ids) && category_ids.length > 0) ||
+      category_id != null;
+    if (!hasCategories) {
       return NextResponse.json(
-        { error: "Category is required" },
+        { error: "At least one category is required" },
+        { status: 400 },
+      );
+    }
+
+    const normalized = normalizeCategoryIds(
+      category_ids ?? (category_id != null ? [category_id] : []),
+      category_id,
+    );
+    if (!normalized.primaryCategoryId) {
+      return NextResponse.json(
+        { error: "At least one category is required" },
         { status: 400 },
       );
     }
@@ -241,7 +262,7 @@ export async function POST(request: NextRequest) {
           phone_number?.trim() || null,
           email?.trim() || null,
           website?.trim() || null,
-          parseInt(category_id),
+          normalized.primaryCategoryId,
           latitude ? parseFloat(latitude) : null,
           longitude ? parseFloat(longitude) : null,
           is_featured || false,
@@ -263,6 +284,20 @@ export async function POST(request: NextRequest) {
       console.error("Error creating listing:", error);
       return NextResponse.json(
         { error: "Failed to create listing" },
+        { status: 500 },
+      );
+    }
+
+    try {
+      await syncListingCategories(
+        listing.id,
+        normalized.categoryIds,
+        normalized.primaryCategoryId,
+      );
+    } catch (syncError) {
+      console.error("Failed to sync listing categories on create:", syncError);
+      return NextResponse.json(
+        { error: "Listing created but failed to save categories" },
         { status: 500 },
       );
     }

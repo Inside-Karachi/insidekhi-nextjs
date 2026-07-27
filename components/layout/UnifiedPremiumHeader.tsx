@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { PremiumHeader } from "@/components/dashboard/PremiumHeader";
 import { MobileNav } from "@/components/layout/MobileNav";
 import { getOptionalSessionUser } from "@/lib/auth/require-session";
@@ -55,6 +55,23 @@ export async function UnifiedPremiumHeader({
       // Expected during build - silently continue with null user
     } else {
       console.error("Auth error in header:", error);
+
+      // The profile lookup may be temporarily unavailable even though the
+      // signed session cookie is valid. Fall back to the JWT-only lookup so
+      // the header does not visually sign the user out on a database blip.
+      try {
+        const sessionOnly = await getOptionalSessionUser({
+          withProfile: false,
+        });
+        if (sessionOnly) {
+          user = {
+            id: sessionOnly.user.id,
+            email: sessionOnly.user.email,
+          } as User;
+        }
+      } catch (sessionError) {
+        console.error("JWT-only header auth fallback failed:", sessionError);
+      }
     }
   }
 
@@ -69,29 +86,64 @@ export async function UnifiedPremiumHeader({
 
   if (context === "public") {
     try {
-      const publicSupabase = await createServerSupabase({ publicAnon: true });
-      const [categoriesResult, navLinksResult] = await Promise.all([
-        publicSupabase
-          .from("categories")
-          .select("id, name, slug, categories!inner(id, name, slug)")
-          .is("parent_id", null)
-          .eq("is_enabled", true)
-          .order("name", { ascending: true }),
-        publicSupabase
-          .from("categories")
-          .select("id, name, slug")
-          .eq("is_enabled", true)
-          .in("slug", [
-            "events",
-            "things-to-do",
-            "eat-drink",
-            "where-to-stay",
-            "guides-reviews",
-          ]),
+      const [parentsResult, navLinksResult] = await Promise.all([
+        query(
+          `SELECT id, name, slug FROM categories
+           WHERE parent_id IS NULL AND is_enabled = true
+           ORDER BY name ASC`,
+        ),
+        query(
+          `SELECT id, name, slug FROM categories
+           WHERE is_enabled = true AND slug = ANY($1)`,
+          [
+            [
+              "events",
+              "things-to-do",
+              "eat-drink",
+              "where-to-stay",
+              "guides-reviews",
+            ],
+          ],
+        ),
       ]);
 
-      parentCategories = categoriesResult.data || [];
-      simpleNavLinks = navLinksResult.data || [];
+      const parentIds = parentsResult.rows.map((p) => p.id);
+      const subsByParent = new Map<
+        number,
+        { id: number; name: string; slug: string }[]
+      >();
+      if (parentIds.length > 0) {
+        const { rows: subs } = await query(
+          `SELECT id, name, slug, parent_id FROM categories WHERE parent_id = ANY($1)`,
+          [parentIds],
+        );
+        for (const sub of subs) {
+          const parentId = Number(sub.parent_id);
+          if (!subsByParent.has(parentId)) subsByParent.set(parentId, []);
+          subsByParent.get(parentId)!.push({
+            id: Number(sub.id),
+            name: sub.name,
+            slug: sub.slug,
+          });
+        }
+      }
+
+      // Mirrors the old `categories!inner(...)` embed: only keep parents
+      // that have at least one sub-category.
+      parentCategories = parentsResult.rows
+        .map((p) => ({
+          id: Number(p.id),
+          name: p.name,
+          slug: p.slug,
+          categories: subsByParent.get(Number(p.id)) || [],
+        }))
+        .filter((p) => p.categories.length > 0);
+
+      simpleNavLinks = navLinksResult.rows.map((row) => ({
+        id: Number(row.id),
+        name: row.name,
+        slug: row.slug,
+      }));
     } catch (error) {
       // During static rendering, this may fail - continue with empty nav
       if (

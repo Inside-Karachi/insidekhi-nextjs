@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
-import { Database } from "@/types/supabase";
-
-type ApiErrorInsert = Database["public"]["Tables"]["api_error_logs"]["Insert"];
 
 export async function POST(request: NextRequest) {
   try {
@@ -27,31 +24,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get user info if available
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
-    // Log API error with proper types
-    const errorLog: ApiErrorInsert = {
-      endpoint,
-      method,
-      status_code: statusCode,
-      error_message: errorMessage || null,
-      user_id: session?.userId || null,
-      ip_address:
-        request.headers.get("x-forwarded-for") ||
-        request.headers.get("x-real-ip") ||
-        null,
-      user_agent: request.headers.get("user-agent") || null,
-      request_body: requestBody || null,
-      response_body: responseBody || null,
-      request_duration_ms: requestDurationMs || null,
-    };
-
-    const { error: insertError } = await supabase
-      .from("api_error_logs")
-      .insert(errorLog);
-
-    if (insertError) {
+    // Log API error
+    try {
+      await query(
+        `INSERT INTO public.api_error_logs
+          (endpoint, method, status_code, error_message, user_id, ip_address,
+           user_agent, request_body, response_body, request_duration_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          endpoint,
+          method,
+          statusCode,
+          errorMessage || null,
+          session?.userId || null,
+          request.headers.get("x-forwarded-for") ||
+            request.headers.get("x-real-ip") ||
+            null,
+          request.headers.get("user-agent") || null,
+          requestBody || null,
+          responseBody || null,
+          requestDurationMs || null,
+        ]
+      );
+    } catch (insertError) {
       console.error("Failed to log API error:", insertError);
       return NextResponse.json({ success: false }, { status: 500 });
     }
@@ -69,7 +64,6 @@ export async function POST(request: NextRequest) {
 // Get API error logs for super admins
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const session = await getSessionFromCookies();
 
     if (!session) {
@@ -77,11 +71,11 @@ export async function GET(request: NextRequest) {
     }
 
     // Check if user is super admin
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (profile?.role !== "super_admin") {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
@@ -90,16 +84,15 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const hours = parseInt(searchParams.get("hours") || "24");
 
-    // Use service role to bypass RLS
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
-    // Get error summary using function with correct parameter name
-    const { data: summary, error: summaryError } = await adminSupabase.rpc(
-      "get_api_error_summary",
-      { hours_back: hours }
-    );
-
-    if (summaryError) {
+    // Get error summary using DB function
+    let summary;
+    try {
+      const { rows } = await query(
+        "SELECT * FROM get_api_error_summary($1)",
+        [hours]
+      );
+      summary = rows;
+    } catch (summaryError) {
       console.error("Failed to fetch API error summary:", summaryError);
       return NextResponse.json(
         { error: "Failed to fetch summary" },
@@ -108,13 +101,12 @@ export async function GET(request: NextRequest) {
     }
 
     // Get total error count
-    const { count: totalErrors } = await adminSupabase
-      .from("api_error_logs")
-      .select("*", { count: "exact", head: true })
-      .gt(
-        "created_at",
-        new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()
-      );
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*)::int AS count FROM public.api_error_logs
+       WHERE created_at > $1`,
+      [new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()]
+    );
+    const totalErrors = (countRows[0] as { count: number })?.count ?? 0;
 
     return NextResponse.json({
       success: true,

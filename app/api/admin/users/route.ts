@@ -1,5 +1,3 @@
-import { createServerSupabase } from "@/lib/supabase/server";
-import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth/admin";
@@ -9,23 +7,11 @@ import { v4 as uuidv4 } from "uuid";
 
 const ROUTE = "/api/admin/users";
 
-interface AuthUser {
-  id: string;
-  email?: string;
-  email_confirmed_at?: string;
-  last_sign_in_at?: string;
-  created_at: string;
-}
-
 // GET /api/admin/users - Get all users with pagination and filtering
 export async function GET(request: NextRequest) {
-  const session = await getSessionFromCookies();
   try {
     // Use existing admin authentication utility
     const adminAuth = await requireAdmin(request);
-
-    // After admin is verified, use service role client to bypass RLS
-    const supabase = await createServerSupabase({ useServiceRole: true });
 
     // Parse query parameters
     const { searchParams } = new URL(request.url);
@@ -50,7 +36,7 @@ export async function GET(request: NextRequest) {
       params.push(`%${search}%`);
       paramIdx++;
     }
-    const validRoles = ["public_user", "business_owner", "writer", "lister", "admin", "super_admin"];
+    const validRoles = ["public_user", "business_owner", "writer", "lister", "data_entry", "organizer", "admin", "super_admin"];
     if (role && validRoles.includes(role)) {
       conditions.push(`p.role = $${paramIdx}`);
       params.push(role);
@@ -137,7 +123,6 @@ export async function GET(request: NextRequest) {
 
 // POST /api/admin/users - Create a new user
 export async function POST(request: NextRequest) {
-  const session = await getSessionFromCookies();
   const startTime = Date.now();
 
   try {
@@ -195,7 +180,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const validCreateRoles = ["public_user", "business_owner", "writer", "lister", "organizer", "admin", "super_admin"];
+    const validCreateRoles = ["public_user", "business_owner", "writer", "lister", "data_entry", "organizer", "admin", "super_admin"];
     if (!validCreateRoles.includes(role)) {
       return NextResponse.json(
         { success: false, error: "Invalid role" },

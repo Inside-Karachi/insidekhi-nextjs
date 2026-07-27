@@ -34,7 +34,6 @@ import { useNotificationsFeed } from "@/hooks/useNotificationsFeed";
 import { useSupabaseUser } from "@/hooks/useSupabaseUser";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { createClient } from "@/lib/supabase/client";
 import type {
   NotificationFeedFilters,
   NotificationFeedItem,

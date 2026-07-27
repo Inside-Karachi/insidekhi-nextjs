@@ -10,26 +10,27 @@ import {
   profilePatchSchema,
   type ProfileRow,
 } from "@/lib/mobile/profile";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 /**
  * GET /api/mobile/v1/profile
  *
- * The authenticated caller's own profile (RLS scopes the read to the caller).
+ * The authenticated caller's own profile (explicit `id = <caller>` filter).
  * Returns only the allow-listed profile columns.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .select(PROFILE_COLUMNS)
-    .eq("id", user.id)
-    .single<ProfileRow>();
+  const { rows } = await query(
+    `SELECT ${PROFILE_COLUMNS} FROM profiles WHERE id = $1`,
+    [user.id],
+  );
+  const profile = rows[0] as ProfileRow | undefined;
 
-  if (error || !profile) {
+  if (!profile) {
     throw new MobileApiError("not_found", "Profile not found.", 404);
   }
 
@@ -39,17 +40,16 @@ export const GET = mobileRoute(async (request: NextRequest) => {
 /**
  * PATCH /api/mobile/v1/profile
  *
- * Partial self-update of the caller's profile. Writes go through the user's RLS
- * client AND a strict server-side column allow-list (`buildProfileUpdate`) -
- * privileged columns (role, points, verification flags) are never representable,
- * so they can't be written even though the `profiles` UPDATE policy is row-level
- * only. `membership_plan` is gated to business accounts; avatars change via
- * POST /profile/avatar (PATCH can only clear `avatar_url`). Mirrors
+ * Partial self-update of the caller's profile. Writes go through a strict
+ * server-side column allow-list (`buildProfileUpdate`) - privileged columns
+ * (role, points, verification flags) are never representable, so they can't
+ * be written. `membership_plan` is gated to business accounts; avatars change
+ * via POST /profile/avatar (PATCH can only clear `avatar_url`). Mirrors
  * `app/api/profile` (PUT).
  */
 export const PATCH = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
-  const { user, supabase } = await requireMobileUser(request);
+  const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
   const parsed = profilePatchSchema.safeParse(
@@ -65,34 +65,21 @@ export const PATCH = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const { data: current, error: roleError } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .maybeSingle();
-  if (roleError) {
-    console.error(
-      "[mobile-api] profile role lookup failed:",
-      roleError.message,
-    );
-    throw new MobileApiError(
-      "internal_error",
-      "Failed to update profile.",
-      500,
-    );
-  }
+  const { rows: roleRows } = await query(
+    `SELECT role FROM profiles WHERE id = $1`,
+    [user.id],
+  );
+  const currentRole = roleRows[0]?.role ?? null;
 
-  const update = buildProfileUpdate(parsed.data, current?.role ?? null);
+  const update = buildProfileUpdate(parsed.data, currentRole);
 
   // Username uniqueness (case-insensitive), excluding the caller's own row.
   if (typeof update.username === "string" && update.username) {
-    const { data: taken } = await supabase
-      .from("profiles")
-      .select("id")
-      .ilike("username", update.username)
-      .neq("id", user.id)
-      .maybeSingle();
-    if (taken) {
+    const { rows: takenRows } = await query(
+      `SELECT id FROM profiles WHERE LOWER(username) = LOWER($1) AND id != $2 LIMIT 1`,
+      [update.username, user.id],
+    );
+    if (takenRows.length > 0) {
       throw new MobileApiError(
         "validation_error",
         "Username is already taken.",
@@ -104,26 +91,31 @@ export const PATCH = mobileRoute(async (request: NextRequest) => {
 
   // Nothing valid to write (e.g. only a non-business membership_plan) -> no-op.
   if (Object.keys(update).length === 0) {
-    const { data: profile, error } = await supabase
-      .from("profiles")
-      .select(PROFILE_COLUMNS)
-      .eq("id", user.id)
-      .single<ProfileRow>();
-    if (error || !profile) {
+    const { rows } = await query(
+      `SELECT ${PROFILE_COLUMNS} FROM profiles WHERE id = $1`,
+      [user.id],
+    );
+    const profile = rows[0] as ProfileRow | undefined;
+    if (!profile) {
       throw new MobileApiError("not_found", "Profile not found.", 404);
     }
     return ok(profile);
   }
 
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .update(update)
-    .eq("id", user.id)
-    .select(PROFILE_COLUMNS)
-    .single<ProfileRow>();
+  const fields = Object.keys(update) as (keyof typeof update)[];
+  const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(", ");
+  const values = fields.map((f) => update[f]);
 
-  if (error || !profile) {
-    if (error?.code === "23505") {
+  let profile: ProfileRow | undefined;
+  try {
+    const { rows } = await query(
+      `UPDATE profiles SET ${setClauses} WHERE id = $1 RETURNING ${PROFILE_COLUMNS}`,
+      [user.id, ...values],
+    );
+    profile = rows[0] as ProfileRow | undefined;
+  } catch (error) {
+    const pgError = error as { code?: string };
+    if (pgError.code === "23505") {
       throw new MobileApiError(
         "validation_error",
         "Username is already taken.",
@@ -131,7 +123,18 @@ export const PATCH = mobileRoute(async (request: NextRequest) => {
         "username",
       );
     }
-    console.error("[mobile-api] profile update failed:", error?.message);
+    console.error(
+      "[mobile-api] profile update failed:",
+      error instanceof Error ? error.message : error,
+    );
+    throw new MobileApiError(
+      "internal_error",
+      "Failed to update profile.",
+      500,
+    );
+  }
+
+  if (!profile) {
     throw new MobileApiError(
       "internal_error",
       "Failed to update profile.",

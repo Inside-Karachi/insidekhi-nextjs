@@ -1,5 +1,5 @@
 import dynamicImport from "next/dynamic";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { requireSessionUser } from "@/lib/auth/require-session";
 
 const UnifiedScannerClient = dynamicImport(
@@ -24,7 +24,6 @@ export default async function ScanPage() {
   const { user, profile } = await requireSessionUser({
     loginPath: "/login?redirect=/dashboard/scan",
   });
-  const supabase = await createServerSupabase({ useServiceRole: true });
 
   // Respect role switching - use active_role if set
   const currentRole =
@@ -35,11 +34,10 @@ export default async function ScanPage() {
   const isOrganizerRole = currentRole === "organizer";
 
   // Check if user organizes any events (even without organizer role)
-  const { data: organizerEvents } = await supabase
-    .from("events")
-    .select("id")
-    .eq("organizer_id", user.id)
-    .limit(1);
+  const { rows: organizerEvents } = await query(
+    `SELECT id FROM public.events WHERE organizer_id = $1 LIMIT 1`,
+    [user.id],
+  );
 
   const hasEvents = organizerEvents && organizerEvents.length > 0;
   const isOrganizer = isOrganizerRole || hasEvents || isAdmin;

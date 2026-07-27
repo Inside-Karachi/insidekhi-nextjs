@@ -5,7 +5,7 @@ import { ok } from "@/lib/mobile/response";
 import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { createMobileServiceClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import {
   getClientIp,
   isHoneypotTripped,
@@ -79,8 +79,7 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     );
 
   const ip = getClientIp(request);
-  const service = createMobileServiceClient();
-  await enforceFormRateLimit(service, "contact-us", ip, 20);
+  await enforceFormRateLimit("contact-us", ip, 20);
   if (isDisposableEmail(email)) {
     throw new MobileApiError(
       "validation_error",
@@ -92,21 +91,22 @@ export const POST = mobileRoute(async (request: NextRequest) => {
 
   // Per-email 24h activity: cap at 5/day and dedupe an identical subject.
   const since = new Date(Date.now() - TWENTY_FOUR_HOURS_MS).toISOString();
-  const { data: recent, error: recentErr } = await service
-    .from("form_submissions")
-    .select("additional_data")
-    .eq("form_type", "contact-us")
-    .eq("email", email)
-    .gte("submitted_at", since)
-    .limit(50);
-  if (recentErr) {
+  let recentRows: { additional_data: unknown }[] = [];
+  try {
+    const { rows } = await query(
+      `SELECT additional_data FROM form_submissions
+       WHERE form_type = 'contact-us' AND email = $1 AND submitted_at >= $2
+       LIMIT 50`,
+      [email, since],
+    );
+    recentRows = rows;
+  } catch (recentErr) {
     // Fail open (don't block a legit message) but surface the silent bypass.
     console.error(
       "[mobile-api] contact recent-activity query failed:",
-      recentErr.message,
+      recentErr,
     );
   }
-  const recentRows = recent ?? [];
   if (recentRows.length >= 5) {
     throw new MobileApiError(
       "rate_limited",
@@ -129,23 +129,21 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
 
   const { user } = await getOptionalMobileUser(request);
-  const { error } = await service.from("form_submissions").insert({
-    form_type: "contact-us",
-    name,
-    email,
-    phone: normalizePakPhone(parsed.data.phone),
-    message,
-    status: "pending",
-    uploaded_by: user?.id ?? null,
-    additional_data: {
-      subject,
-      source: "mobile",
-      ip,
-      user_id: user?.id ?? null,
-    },
-  });
-  if (error) {
-    console.error("[mobile-api] contact insert failed:", error.message);
+  const phone = normalizePakPhone(parsed.data.phone);
+  const additionalData = {
+    subject,
+    source: "mobile",
+    ip,
+    user_id: user?.id ?? null,
+  };
+  try {
+    await query(
+      `INSERT INTO form_submissions (form_type, name, email, phone, message, status, uploaded_by, additional_data)
+       VALUES ('contact-us', $1, $2, $3, $4, 'pending', $5, $6)`,
+      [name, email, phone, message, user?.id ?? null, additionalData],
+    );
+  } catch (error) {
+    console.error("[mobile-api] contact insert failed:", error);
     throw new MobileApiError("internal_error", "Failed to send message.", 500);
   }
 

@@ -1,14 +1,12 @@
 /**
  * Shared helpers for the mobile form endpoints (contact / newsletter /
  * membership / get-listed). All four persist to the single `form_submissions`
- * table, discriminated by `form_type`. That table's INSERT/UPDATE/DELETE are
- * service_role-only in RLS, so writes MUST use a service-role client - callers
- * pass one in after doing their own validation. Bot protection for the mobile
- * surface is honeypot + per-IP rate limiting (no web reCAPTCHA - a native app
- * can't mint a v3 browser token; decided 2026-06-19).
+ * table, discriminated by `form_type`. Bot protection for the mobile surface is
+ * honeypot + per-IP rate limiting (no web reCAPTCHA - a native app can't mint a
+ * v3 browser token; decided 2026-06-19).
  */
 import type { Database } from "@/types/supabase";
-import type { MobileSupabase } from "./supabase";
+import { query } from "@/lib/db";
 import { MobileApiError } from "./errors";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -74,29 +72,28 @@ export function isHoneypotTripped(value: unknown): boolean {
 
 /**
  * Throws `rate_limited` (429) when `ip` has submitted >= `limit` rows of
- * `formType` within the last hour. IP lives in `additional_data.ip`; we filter
- * the window in SQL and count matching IPs in JS to keep the query fully typed.
+ * `formType` within the last hour. IP lives in `additional_data.ip`.
  */
 export async function enforceFormRateLimit(
-  service: MobileSupabase,
   formType: string,
   ip: string,
   limit: number,
 ): Promise<void> {
   const since = new Date(Date.now() - ONE_HOUR_MS).toISOString();
-  // Filter the IP server-side (JSON `additional_data->>ip`) with an exact count
-  // so it stays correct past any row cap, unlike fetch-then-filter-in-JS.
-  const { count, error } = await service
-    .from("form_submissions")
-    .select("id", { count: "exact", head: true })
-    .eq("form_type", formType)
-    .gte("submitted_at", since)
-    .filter("additional_data->>ip", "eq", ip);
-  if (error) {
-    console.error("[mobile-api] form rate-limit query failed:", error.message);
+  let count = 0;
+  try {
+    const { rows } = await query(
+      `SELECT COUNT(*)::int AS count
+       FROM form_submissions
+       WHERE form_type = $1 AND submitted_at >= $2 AND additional_data->>'ip' = $3`,
+      [formType, since, ip],
+    );
+    count = rows[0]?.count ?? 0;
+  } catch (error) {
+    console.error("[mobile-api] form rate-limit query failed:", error);
     return; // fail open on a counting error rather than block a legit user
   }
-  if ((count ?? 0) >= limit) {
+  if (count >= limit) {
     throw new MobileApiError(
       "rate_limited",
       "Too many submissions. Please try again later.",
@@ -107,18 +104,14 @@ export async function enforceFormRateLimit(
   }
 }
 
-/** True when a `formType` row already exists for `email` (case-insensitive). */
+/** True when a `formType` row already exists for `email`. */
 export async function hasExistingSubmission(
-  service: MobileSupabase,
   formType: string,
   email: string,
 ): Promise<boolean> {
-  const { data } = await service
-    .from("form_submissions")
-    .select("id")
-    .eq("form_type", formType)
-    .eq("email", email)
-    .limit(1)
-    .maybeSingle();
-  return data != null;
+  const { rows } = await query(
+    `SELECT id FROM form_submissions WHERE form_type = $1 AND email = $2 LIMIT 1`,
+    [formType, email],
+  );
+  return rows.length > 0;
 }

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { query } from "@/lib/db";
 import {
   assertListingRouteAccess,
   toListingAccessResponse,
@@ -20,11 +21,10 @@ export async function PATCH(
       return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     const body = await request.json();
     const {
@@ -61,15 +61,27 @@ export async function PATCH(
     }
 
     // Update menu item
-    const { data: item, error } = await supabase
-      .from("menu_items")
-      .update(updateData)
-      .eq("id", itemIdNum)
-      .eq("section_id", sectionIdNum)
-      .select()
-      .single();
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+    for (const [key, value] of Object.entries(updateData)) {
+      setClauses.push(`${key} = $${idx}`);
+      values.push(value);
+      idx++;
+    }
+    values.push(itemIdNum, sectionIdNum);
 
-    if (error) {
+    let item;
+    try {
+      const { rows } = await query(
+        `UPDATE menu_items
+         SET ${setClauses.join(", ")}
+         WHERE id = $${idx} AND section_id = $${idx + 1}
+         RETURNING *`,
+        values
+      );
+      item = rows[0];
+    } catch (error) {
       console.error("Error updating menu item:", error);
       return NextResponse.json(
         { error: "Failed to update menu item" },
@@ -109,20 +121,18 @@ export async function DELETE(
       return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
     }
 
-    const access = await assertListingRouteAccess({
+    await assertListingRouteAccess({
       listingId,
       allowBusinessOwner: true,
     });
-    const supabase = access.adminSupabase;
 
     // Delete menu item
-    const { error } = await supabase
-      .from("menu_items")
-      .delete()
-      .eq("id", itemIdNum)
-      .eq("section_id", sectionIdNum);
-
-    if (error) {
+    try {
+      await query(
+        `DELETE FROM menu_items WHERE id = $1 AND section_id = $2`,
+        [itemIdNum, sectionIdNum]
+      );
+    } catch (error) {
       console.error("Error deleting menu item:", error);
       return NextResponse.json(
         { error: "Failed to delete menu item" },

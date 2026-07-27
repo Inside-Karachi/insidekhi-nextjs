@@ -1,23 +1,14 @@
 import { NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 export async function GET() {
   try {
-    const supabase = await createServerSupabase();
-
     // Fetch public system settings
-    const { data: settings, error } = await supabase
-      .from("system_config")
-      .select("config_key, config_value, config_type")
-      .eq("is_public", true);
-
-    if (error) {
-      console.error("[SYSTEM CONFIG] Error fetching settings:", error);
-      return NextResponse.json(
-        { error: "Failed to fetch configuration" },
-        { status: 500 }
-      );
-    }
+    const { rows: settings } = await query(
+      `SELECT config_key, config_value, config_type
+       FROM system_config
+       WHERE is_public = true`,
+    );
 
     // Transform array to object for easier consumption
     const config = settings.reduce((acc, curr) => {

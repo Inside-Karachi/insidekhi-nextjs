@@ -1,46 +1,24 @@
 /**
  * IMAGE PROCESSOR
- * Downloads images from Peekaboo and uploads to Supabase Storage
+ * Downloads images from Peekaboo and uploads to DigitalOcean Spaces
  */
 
-import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
+import {
+  uploadFile,
+  deleteFile,
+  getPublicUrl as getSpacesPublicUrl,
+  listFiles,
+  getKeyFromPublicUrl,
+} from "@/lib/storage/spaces";
 import type {
   ImageDownloadResult,
   ImageProcessingOptions,
 } from "@/types/peekaboo-scraper.types";
-import { IMAGE_CONFIG, SCRAPER_CONFIG } from "../config";
+import { IMAGE_CONFIG } from "../config";
 
 export class ImageProcessor {
-  private supabase: ReturnType<typeof createClient> | null = null;
   private processedHashes = new Set<string>();
-
-  constructor() {
-    // Supabase client will be initialized lazily
-  }
-
-  /**
-   * Initialize Supabase client (lazy initialization)
-   */
-  private getSupabase() {
-    if (!this.supabase) {
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-      if (!supabaseUrl || !supabaseKey) {
-        throw new Error(
-          "Missing Supabase credentials. Check NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local",
-        );
-      }
-
-      this.supabase = createClient(supabaseUrl, supabaseKey, {
-        auth: {
-          persistSession: false,
-        },
-      });
-    }
-    return this.supabase;
-  }
 
   /**
    * Generate MD5 hash of image URL to detect duplicates
@@ -90,35 +68,22 @@ export class ImageProcessor {
     options?: ImageProcessingOptions,
   ): Promise<string | null> {
     try {
-      const supabase = this.getSupabase();
-
       // Determine search path: precise folder if listingId known, else root
-      // IMPORTANT: Supabase list() is NOT recursive by default.
-      // If we put files in `peekaboo/123/menu/...`, we must search `peekaboo/123/menu`.
       let searchFolder = listingId ? `peekaboo/${listingId}` : "peekaboo";
 
       if (listingId && options?.subFolder) {
         searchFolder = `peekaboo/${listingId}/${options.subFolder}`;
       }
 
-      const { data: files, error } = await supabase.storage
-        .from(SCRAPER_CONFIG.storage.bucket)
-        .list(searchFolder, {
-          limit: 1000, // Search larger batch to find existing files (100 was too low)
-          search: urlHash, // Relies on filename containing the hash
-        });
+      const files = await listFiles(searchFolder);
+      const match = files.find((key) => key.includes(urlHash));
 
-      if (error || !files || files.length === 0) {
+      if (!match) {
         return null;
       }
 
-      // Return first matching file's public URL
-      const file = files[0];
-      const { data } = supabase.storage
-        .from(SCRAPER_CONFIG.storage.bucket)
-        .getPublicUrl(`${searchFolder}/${file.name}`);
-
-      return data.publicUrl;
+      // Return matching file's public URL
+      return getSpacesPublicUrl(match);
     } catch {
       return null;
     }
@@ -128,30 +93,15 @@ export class ImageProcessor {
    * Check if a file actually exists in storage
    * Used to verify session cache entries are still valid
    */
-  private async fileExistsInStorage(supabaseUrl: string): Promise<boolean> {
+  private async fileExistsInStorage(storageUrl: string): Promise<boolean> {
     try {
-      const supabase = this.getSupabase();
-
-      // Extract path from URL
-      // URL format: https://xxx.supabase.co/storage/v1/object/public/listing-images/peekaboo/123/file.jpg
-      const pathMatch = supabaseUrl.match(
-        /\/storage\/v1\/object\/public\/[^/]+\/(.+)$/,
-      );
-      if (!pathMatch) {
+      const key = getKeyFromPublicUrl(storageUrl);
+      if (!key) {
         return false;
       }
 
-      const filePath = pathMatch[1];
-
-      // Try to get file metadata (this is cheaper than downloading)
-      const { data, error } = await supabase.storage
-        .from(SCRAPER_CONFIG.storage.bucket)
-        .list(filePath.split("/").slice(0, -1).join("/"), {
-          limit: 1,
-          search: filePath.split("/").pop(),
-        });
-
-      return !error && data && data.length > 0;
+      const files = await listFiles(key);
+      return files.includes(key);
     } catch {
       return false;
     }
@@ -212,52 +162,22 @@ export class ImageProcessor {
   }
 
   /**
-   * Upload image buffer to Supabase Storage
+   * Upload image buffer to DigitalOcean Spaces
    */
-  private async uploadToSupabase(
+  private async uploadToStorage(
     buffer: Buffer,
     filename: string,
     mimeType: string,
   ): Promise<string> {
-    const supabase = this.getSupabase();
-    const { data, error } = await supabase.storage
-      .from(SCRAPER_CONFIG.storage.bucket)
-      .upload(filename, buffer, {
-        contentType: mimeType,
-        cacheControl: "31536000", // 1 year
-        upsert: false, // Prefer idempotent path: same hash -> same object key
-      });
+    const { publicUrl } = await uploadFile(filename, buffer, {
+      contentType: mimeType,
+    });
 
-    if (error) {
-      const status =
-        (error as { statusCode?: string; status?: number }).statusCode ??
-        (error as { status?: number }).status;
-      const msg = (error.message || "").toLowerCase();
-      const isDuplicate =
-        status === 409 ||
-        status === "409" ||
-        msg.includes("already exists") ||
-        msg.includes("resource already");
-
-      if (isDuplicate) {
-        const { data: publicUrlData } = supabase.storage
-          .from(SCRAPER_CONFIG.storage.bucket)
-          .getPublicUrl(filename);
-        return publicUrlData.publicUrl;
-      }
-
-      throw new Error(`Supabase upload failed: ${error.message}`);
-    }
-
-    const { data: publicUrlData } = supabase.storage
-      .from(SCRAPER_CONFIG.storage.bucket)
-      .getPublicUrl(data.path);
-
-    return publicUrlData.publicUrl;
+    return publicUrl;
   }
 
   /**
-   * Process single image: download and upload to Supabase
+   * Process single image: download and upload to storage
    */
   async processImage(
     url: string,
@@ -328,12 +248,8 @@ export class ImageProcessor {
         options,
       );
 
-      // Upload to Supabase
-      const supabaseUrl = await this.uploadToSupabase(
-        buffer,
-        filename,
-        mimeType,
-      );
+      // Upload to storage
+      const storageUrl = await this.uploadToStorage(buffer, filename, mimeType);
 
       this.processedHashes.add(urlHash);
 
@@ -341,7 +257,7 @@ export class ImageProcessor {
 
       return {
         success: true,
-        supabaseUrl,
+        supabaseUrl: storageUrl,
         originalUrl: url,
         sizeBytes,
         mimeType,
@@ -392,28 +308,18 @@ export class ImageProcessor {
   }
 
   /**
-   * Get Supabase public URL for an existing file
+   * Get public URL for an existing file
    */
   getPublicUrl(path: string): string {
-    const supabase = this.getSupabase();
-    const { data } = supabase.storage
-      .from(SCRAPER_CONFIG.storage.bucket)
-      .getPublicUrl(path);
-
-    return data.publicUrl;
+    return getSpacesPublicUrl(path);
   }
 
   /**
-   * Delete image from Supabase Storage
+   * Delete image from storage
    */
   async deleteImage(path: string): Promise<boolean> {
     try {
-      const supabase = this.getSupabase();
-      const { error } = await supabase.storage
-        .from(SCRAPER_CONFIG.storage.bucket)
-        .remove([path]);
-
-      if (error) throw error;
+      await deleteFile(path);
 
       console.log(`[IMG] Deleted: ${path}`);
       return true;
@@ -425,7 +331,7 @@ export class ImageProcessor {
   }
 
   /**
-   * Delete multiple images from Supabase Storage (batch operation)
+   * Delete multiple images from storage (batch operation)
    */
   async deleteImages(
     paths: string[],
@@ -433,14 +339,11 @@ export class ImageProcessor {
     try {
       if (paths.length === 0) return { success: 0, failed: 0 };
 
-      const supabase = this.getSupabase();
-      const { data, error } = await supabase.storage
-        .from(SCRAPER_CONFIG.storage.bucket)
-        .remove(paths);
+      const results = await Promise.allSettled(
+        paths.map((path) => deleteFile(path)),
+      );
 
-      if (error) throw error;
-
-      const success = data?.length || 0;
+      const success = results.filter((r) => r.status === "fulfilled").length;
       const failed = paths.length - success;
 
       console.log(
@@ -455,17 +358,10 @@ export class ImageProcessor {
   }
 
   /**
-   * Extract storage path from Supabase public URL
+   * Extract storage path from a public URL
    */
   extractPathFromUrl(publicUrl: string): string | null {
-    try {
-      const url = new URL(publicUrl);
-      // Extract path after /storage/v1/object/public/{bucket}/
-      const parts = url.pathname.split(`/${SCRAPER_CONFIG.storage.bucket}/`);
-      return parts[1] || null;
-    } catch {
-      return null;
-    }
+    return getKeyFromPublicUrl(publicUrl);
   }
 
   /**

@@ -1,26 +1,21 @@
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import type { Json } from "@/types/supabase";
 
 export async function GET(request: NextRequest) {
   const session = await getSessionFromCookies();
   try {
     // Check admin authentication
-    const {
-      data: { user },
-      error: authError,
-    } = await (await createServerSupabase()).auth.getUser();
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
-    const { data: profile } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+      [session.userId]
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
     if (!["super_admin", "lister"].includes(profile?.role || "")) {
       return NextResponse.json(
@@ -40,7 +35,7 @@ export async function GET(request: NextRequest) {
     const entityType = searchParams.get("entityType"); // 'listing', 'event', 'user', etc.
     const entityId = searchParams.get("entityId"); // Specific entity ID to search for
 
-    // Properly format dates for Supabase queries (include full day range)
+    // Properly format dates (include full day range)
     // startDate: beginning of day in UTC
     // endDate: end of day in UTC
     const formattedStartDate = startDate ? `${startDate}T00:00:00.000Z` : null;
@@ -119,184 +114,164 @@ export async function GET(request: NextRequest) {
 
     // Fetch points logs (skip if entity filter is active - points_log has no entity_id)
     if ((logType === "all" || logType === "points") && !entityFilterActive) {
-      // First, get the total count without joins for accuracy
-      let pointsCountQuery = adminSupabase
-        .from("points_log")
-        .select("id", { count: "exact", head: true });
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      let idx = 1;
 
-      // Apply filters to count query
       if (userId) {
-        pointsCountQuery = pointsCountQuery.eq("user_id", userId);
+        conditions.push(`pl.user_id = $${idx}`);
+        params.push(userId);
+        idx++;
       }
       if (formattedStartDate) {
-        pointsCountQuery = pointsCountQuery.gte(
-          "created_at",
-          formattedStartDate,
+        conditions.push(`pl.created_at >= $${idx}`);
+        params.push(formattedStartDate);
+        idx++;
+      }
+      if (formattedEndDate) {
+        conditions.push(`pl.created_at <= $${idx}`);
+        params.push(formattedEndDate);
+        idx++;
+      }
+      if (search) {
+        conditions.push(`pl.reason ILIKE $${idx}`);
+        params.push(`%${search}%`);
+        idx++;
+      }
+
+      const whereClause =
+        conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+      // Count
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*)::int AS count FROM public.points_log pl ${whereClause}`,
+        params
+      );
+      totalPoints = (countRows[0] as { count: number })?.count ?? 0;
+
+      // Data with joined profile
+      try {
+        const { rows: pointsData } = await query(
+          `SELECT
+            pl.id, pl.user_id, pl.points, pl.reason, pl.related_id, pl.created_at,
+            p.full_name AS profile_full_name,
+            p.username AS profile_username,
+            p.avatar_url AS profile_avatar_url
+           FROM public.points_log pl
+           LEFT JOIN public.profiles p ON p.id = pl.user_id
+           ${whereClause}
+           ORDER BY pl.created_at DESC`,
+          params
         );
-      }
-      if (formattedEndDate) {
-        pointsCountQuery = pointsCountQuery.lte("created_at", formattedEndDate);
-      }
-      if (search) {
-        pointsCountQuery = pointsCountQuery.ilike("reason", `%${search}%`);
-      }
-
-      const { count: pointsCount } = await pointsCountQuery;
-      totalPoints = pointsCount || 0;
-
-      // Then fetch the actual data with joins
-      let pointsQuery = adminSupabase
-        .from("points_log")
-        .select(
-          `
-          id,
-          user_id,
-          points,
-          reason,
-          related_id,
-          created_at,
-          profiles:user_id (
-            full_name,
-            username,
-            avatar_url
-          )
-        `,
-        )
-        .order("created_at", { ascending: false });
-
-      // Apply filters
-      if (userId) {
-        pointsQuery = pointsQuery.eq("user_id", userId);
-      }
-      if (formattedStartDate) {
-        pointsQuery = pointsQuery.gte("created_at", formattedStartDate);
-      }
-      if (formattedEndDate) {
-        pointsQuery = pointsQuery.lte("created_at", formattedEndDate);
-      }
-      if (search) {
-        pointsQuery = pointsQuery.ilike("reason", `%${search}%`);
-      }
-
-      const { data: pointsData, error: pointsError } = await pointsQuery; // Remove .range() for now
-
-      if (pointsError) {
-        console.error("Points logs error:", pointsError);
-      } else {
-        pointsLogs = pointsData || [];
+        pointsLogs = pointsData.map((row) => ({
+          id: row.id,
+          user_id: row.user_id,
+          points: row.points,
+          reason: row.reason,
+          related_id: row.related_id,
+          created_at: row.created_at,
+          profiles: row.profile_full_name !== null || row.profile_username !== null || row.profile_avatar_url !== null
+            ? {
+                full_name: row.profile_full_name,
+                username: row.profile_username,
+                avatar_url: row.profile_avatar_url,
+              }
+            : null,
+        }));
         console.log(`[Points Logs] Retrieved ${pointsLogs.length} points logs`);
+      } catch (pointsError) {
+        console.error("Points logs error:", pointsError);
       }
     }
 
     // Fetch import logs (skip if entity filter is active - import_rollback_log has no entity_id)
     if ((logType === "all" || logType === "imports") && !entityFilterActive) {
-      // First, get the total count
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      let idx = 1;
+      let joinClause = "";
+
       if (userId) {
-        // For user_id filter, we need to use join
-        let userCountQuery = adminSupabase
-          .from("import_rollback_log")
-          .select(
-            `
-            *,
-            import_history!inner:user_id
-          `,
-            { count: "exact", head: true },
-          )
-          .eq("import_history.user_id", userId);
-
-        if (formattedStartDate) {
-          userCountQuery = userCountQuery.gte("created_at", formattedStartDate);
-        }
-        if (formattedEndDate) {
-          userCountQuery = userCountQuery.lte("created_at", formattedEndDate);
-        }
-        if (search) {
-          userCountQuery = userCountQuery.or(
-            `table_name.ilike.%${search}%,rollback_action.ilike.%${search}%`,
-          );
-        }
-
-        const { count } = await userCountQuery;
-        totalImports = count || 0;
-      } else {
-        // No user filter, simpler query
-        let importsCountQuery = adminSupabase
-          .from("import_rollback_log")
-          .select("*", { count: "exact", head: true });
-
-        if (formattedStartDate) {
-          importsCountQuery = importsCountQuery.gte(
-            "created_at",
-            formattedStartDate,
-          );
-        }
-        if (formattedEndDate) {
-          importsCountQuery = importsCountQuery.lte(
-            "created_at",
-            formattedEndDate,
-          );
-        }
-        if (search) {
-          importsCountQuery = importsCountQuery.or(
-            `table_name.ilike.%${search}%,rollback_action.ilike.%${search}%`,
-          );
-        }
-
-        const { count: countResult } = await importsCountQuery;
-        totalImports = countResult || 0;
-      }
-
-      // Then fetch the actual data with joins
-      let importsQuery = adminSupabase
-        .from("import_rollback_log")
-        .select(
-          `
-          id,
-          import_id,
-          table_name,
-          record_id,
-          record_data,
-          rollback_action,
-          created_at,
-          import_history:import_id (
-            filename,
-            status,
-            total_records,
-            successful_imports,
-            failed_imports,
-            import_type,
-            profiles:user_id (
-              full_name,
-              username
-            )
-          )
-        `,
-        )
-        .order("created_at", { ascending: false });
-
-      // Apply filters
-      if (userId) {
-        importsQuery = importsQuery.eq("import_history.user_id", userId);
+        joinClause = "JOIN public.import_history ih ON ih.id = irl.import_id";
+        conditions.push(`ih.user_id = $${idx}`);
+        params.push(userId);
+        idx++;
       }
       if (formattedStartDate) {
-        importsQuery = importsQuery.gte("created_at", formattedStartDate);
+        conditions.push(`irl.created_at >= $${idx}`);
+        params.push(formattedStartDate);
+        idx++;
       }
       if (formattedEndDate) {
-        importsQuery = importsQuery.lte("created_at", formattedEndDate);
+        conditions.push(`irl.created_at <= $${idx}`);
+        params.push(formattedEndDate);
+        idx++;
       }
       if (search) {
-        importsQuery = importsQuery.or(
-          `table_name.ilike.%${search}%,rollback_action.ilike.%${search}%`,
+        conditions.push(
+          `(irl.table_name ILIKE $${idx} OR irl.rollback_action ILIKE $${idx})`
         );
+        params.push(`%${search}%`);
+        idx++;
       }
 
-      const { data: importsData, error: importsError } = await importsQuery; // Remove .range() for now
+      const whereClause =
+        conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-      if (importsError) {
-        console.error("Import logs error:", importsError);
-      } else {
-        importLogs = importsData || [];
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*)::int AS count FROM public.import_rollback_log irl ${joinClause} ${whereClause}`,
+        params
+      );
+      totalImports = (countRows[0] as { count: number })?.count ?? 0;
+
+      try {
+        const { rows: importsData } = await query(
+          `SELECT
+            irl.id, irl.import_id, irl.table_name, irl.record_id, irl.record_data,
+            irl.rollback_action, irl.created_at,
+            ih.filename AS ih_filename,
+            ih.status AS ih_status,
+            ih.total_records AS ih_total_records,
+            ih.successful_imports AS ih_successful_imports,
+            ih.failed_imports AS ih_failed_imports,
+            ih.import_type AS ih_import_type,
+            p.full_name AS ih_profile_full_name,
+            p.username AS ih_profile_username
+           FROM public.import_rollback_log irl
+           LEFT JOIN public.import_history ih ON ih.id = irl.import_id
+           LEFT JOIN public.profiles p ON p.id = ih.user_id
+           ${whereClause}
+           ORDER BY irl.created_at DESC`,
+          params
+        );
+        importLogs = importsData.map((row) => ({
+          id: row.id,
+          import_id: row.import_id,
+          table_name: row.table_name,
+          record_id: row.record_id,
+          record_data: row.record_data,
+          rollback_action: row.rollback_action,
+          created_at: row.created_at,
+          import_history: row.ih_filename
+            ? {
+                filename: row.ih_filename,
+                status: row.ih_status,
+                total_records: row.ih_total_records,
+                successful_imports: row.ih_successful_imports,
+                failed_imports: row.ih_failed_imports,
+                import_type: row.ih_import_type,
+                profiles: row.ih_profile_full_name !== null || row.ih_profile_username !== null
+                  ? {
+                      full_name: row.ih_profile_full_name,
+                      username: row.ih_profile_username,
+                    }
+                  : null,
+              }
+            : null,
+        }));
         console.log(`[Import Logs] Retrieved ${importLogs.length} import logs`);
+      } catch (importsError) {
+        console.error("Import logs error:", importsError);
       }
     }
 
@@ -308,139 +283,69 @@ export async function GET(request: NextRequest) {
     ) {
       console.log("[Audit Logs] Using audit_logs_with_profiles view");
 
-      // Get total count from view
-      let auditCountQuery = adminSupabase
-        .from("audit_logs_with_profiles")
-        .select("id", { count: "exact", head: true });
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      let idx = 1;
 
-      // Filter for notification-specific logs if requested
       if (logType === "notifications") {
-        auditCountQuery = auditCountQuery.in("action", [
-          "notification_sent",
-          "notification_failed",
-        ]);
+        conditions.push(`action IN ($${idx}, $${idx + 1})`);
+        params.push("notification_sent", "notification_failed");
+        idx += 2;
       }
-
-      // Apply filters to count query
       if (userId) {
-        auditCountQuery = auditCountQuery.or(
-          `admin_id.eq.${userId},user_id.eq.${userId}`,
-        );
+        conditions.push(`(admin_id = $${idx} OR user_id = $${idx})`);
+        params.push(userId);
+        idx++;
       }
       if (formattedStartDate) {
-        auditCountQuery = auditCountQuery.gte("created_at", formattedStartDate);
+        conditions.push(`created_at >= $${idx}`);
+        params.push(formattedStartDate);
+        idx++;
       }
       if (formattedEndDate) {
-        auditCountQuery = auditCountQuery.lte("created_at", formattedEndDate);
+        conditions.push(`created_at <= $${idx}`);
+        params.push(formattedEndDate);
+        idx++;
       }
       if (search) {
-        auditCountQuery = auditCountQuery.ilike("action", `%${search}%`);
+        conditions.push(`action ILIKE $${idx}`);
+        params.push(`%${search}%`);
+        idx++;
       }
-      // Entity type filter (listing, event, user, etc.)
       if (entityType) {
-        auditCountQuery = auditCountQuery.eq("entity_type", entityType);
+        conditions.push(`entity_type = $${idx}`);
+        params.push(entityType);
+        idx++;
       }
-      // Entity ID filter (specific listing/event ID)
       if (entityId) {
-        auditCountQuery = auditCountQuery.eq("entity_id", entityId);
+        conditions.push(`entity_id = $${idx}`);
+        params.push(entityId);
+        idx++;
       }
 
-      const { count: auditCount, error: countError } = await auditCountQuery;
+      const whereClause =
+        conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-      if (countError) {
+      try {
+        const { rows: countRows } = await query(
+          `SELECT COUNT(*)::int AS count FROM public.audit_logs_with_profiles ${whereClause}`,
+          params
+        );
+        totalAudit = (countRows[0] as { count: number })?.count ?? 0;
+      } catch (countError) {
         console.error("[Audit Logs] Count query failed:", countError);
-        // Return error instead of falling back
         return NextResponse.json(
           {
             error: "Failed to fetch audit logs count",
-            details: countError.message,
+            details: countError instanceof Error ? countError.message : String(countError),
             dataSource: "audit_logs_with_profiles_view",
           },
           { status: 500 },
         );
       }
 
-      totalAudit = auditCount || 0;
       console.log(`[Audit Logs] Found ${totalAudit} total audit logs`);
 
-      // Query audit logs from view (single source of truth)
-      let auditQuery = adminSupabase
-        .from("audit_logs_with_profiles")
-        .select(
-          `
-          id,
-          admin_id,
-          user_id,
-          action,
-          entity_type,
-          entity_id,
-          old_values,
-          new_values,
-          metadata,
-          ip_address,
-          user_agent,
-          created_at,
-          admin_name,
-          admin_username,
-          user_name,
-          user_username
-        `,
-        )
-        .order("created_at", { ascending: false });
-
-      // Filter for notification-specific logs if requested
-      if (logType === "notifications") {
-        auditQuery = auditQuery.in("action", [
-          "notification_sent",
-          "notification_failed",
-        ]);
-      }
-
-      // Apply filters
-      if (userId) {
-        auditQuery = auditQuery.or(
-          `admin_id.eq.${userId},user_id.eq.${userId}`,
-        );
-      }
-      if (formattedStartDate) {
-        auditQuery = auditQuery.gte("created_at", formattedStartDate);
-      }
-      if (formattedEndDate) {
-        auditQuery = auditQuery.lte("created_at", formattedEndDate);
-      }
-      if (search) {
-        auditQuery = auditQuery.ilike("action", `%${search}%`);
-      }
-      // Entity type filter
-      if (entityType) {
-        auditQuery = auditQuery.eq("entity_type", entityType);
-      }
-      // Entity ID filter
-      if (entityId) {
-        auditQuery = auditQuery.eq("entity_id", entityId);
-      }
-
-      const { data: auditData, error: auditError } = await auditQuery; // Remove .range() for now
-
-      if (auditError) {
-        console.error("[Audit Logs] Data query failed:", auditError);
-        return NextResponse.json(
-          {
-            error: "Failed to fetch audit logs data",
-            details: auditError.message,
-            dataSource: "audit_logs_with_profiles_view",
-          },
-          { status: 500 },
-        );
-      }
-
-      console.log(
-        `[Audit Logs] Retrieved ${
-          auditData?.length || 0
-        } audit logs from view (before pagination)`,
-      );
-
-      // Transform view data (no fallback needed)
       type ViewAuditLog = {
         id: number;
         admin_id: string | null;
@@ -460,7 +365,38 @@ export async function GET(request: NextRequest) {
         user_username: string | null;
       };
 
-      auditLogs = ((auditData as ViewAuditLog[]) || []).map((log) => ({
+      let auditData: ViewAuditLog[];
+      try {
+        const { rows } = await query(
+          `SELECT
+            id, admin_id, user_id, action, entity_type, entity_id,
+            old_values, new_values, metadata, ip_address, user_agent, created_at,
+            admin_name, admin_username, user_name, user_username
+           FROM public.audit_logs_with_profiles
+           ${whereClause}
+           ORDER BY created_at DESC`,
+          params
+        );
+        auditData = rows as ViewAuditLog[];
+      } catch (auditError) {
+        console.error("[Audit Logs] Data query failed:", auditError);
+        return NextResponse.json(
+          {
+            error: "Failed to fetch audit logs data",
+            details: auditError instanceof Error ? auditError.message : String(auditError),
+            dataSource: "audit_logs_with_profiles_view",
+          },
+          { status: 500 },
+        );
+      }
+
+      console.log(
+        `[Audit Logs] Retrieved ${
+          auditData?.length || 0
+        } audit logs from view (before pagination)`,
+      );
+
+      auditLogs = (auditData || []).map((log) => ({
         id: log.id,
         admin_id: log.admin_id,
         user_id: log.user_id,
@@ -497,68 +433,44 @@ export async function GET(request: NextRequest) {
 
     // Fetch upload audit logs (skip if entity filter is active - upload_audit has no entity_id)
     if ((logType === "all" || logType === "uploads") && !entityFilterActive) {
-      // First, get the total count
-      let uploadsCountQuery = adminSupabase
-        .from("upload_audit")
-        .select("id", { count: "exact", head: true });
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      let idx = 1;
 
-      // Apply filters to count query
       if (formattedStartDate) {
-        uploadsCountQuery = uploadsCountQuery.gte(
-          "created_at",
-          formattedStartDate,
-        );
+        conditions.push(`created_at >= $${idx}`);
+        params.push(formattedStartDate);
+        idx++;
       }
       if (formattedEndDate) {
-        uploadsCountQuery = uploadsCountQuery.lte(
-          "created_at",
-          formattedEndDate,
-        );
+        conditions.push(`created_at <= $${idx}`);
+        params.push(formattedEndDate);
+        idx++;
       }
       if (search) {
-        uploadsCountQuery = uploadsCountQuery.or(
-          `event.ilike.%${search}%,status.ilike.%${search}%`,
+        conditions.push(`(event ILIKE $${idx} OR status ILIKE $${idx})`);
+        params.push(`%${search}%`);
+        idx++;
+      }
+
+      const whereClause =
+        conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+      const { rows: countRows } = await query(
+        `SELECT COUNT(*)::int AS count FROM public.upload_audit ${whereClause}`,
+        params
+      );
+      totalUploads = (countRows[0] as { count: number })?.count ?? 0;
+
+      try {
+        const { rows: uploadsData } = await query(
+          `SELECT id, submission_id, event, status, details, ip::text AS ip, created_at
+           FROM public.upload_audit
+           ${whereClause}
+           ORDER BY created_at DESC`,
+          params
         );
-      }
-
-      const { count: uploadsCount } = await uploadsCountQuery;
-      totalUploads = uploadsCount || 0;
-
-      // Then fetch the actual data
-      let uploadsQuery = adminSupabase
-        .from("upload_audit")
-        .select(
-          `
-          id,
-          submission_id,
-          event,
-          status,
-          details,
-          ip,
-          created_at
-        `,
-        )
-        .order("created_at", { ascending: false });
-
-      // Apply filters
-      if (formattedStartDate) {
-        uploadsQuery = uploadsQuery.gte("created_at", formattedStartDate);
-      }
-      if (formattedEndDate) {
-        uploadsQuery = uploadsQuery.lte("created_at", formattedEndDate);
-      }
-      if (search) {
-        uploadsQuery = uploadsQuery.or(
-          `event.ilike.%${search}%,status.ilike.%${search}%`,
-        );
-      }
-
-      const { data: uploadsData, error: uploadsError } = await uploadsQuery; // Remove .range() for now
-
-      if (uploadsError) {
-        console.error("Upload audit logs error:", uploadsError);
-      } else {
-        uploadAuditLogs = (uploadsData || []).map((log) => ({
+        uploadAuditLogs = uploadsData.map((log) => ({
           ...log,
           ip: log.ip as string | null,
           created_at: log.created_at as string,
@@ -566,6 +478,8 @@ export async function GET(request: NextRequest) {
         console.log(
           `[Upload Logs] Retrieved ${uploadAuditLogs.length} upload logs`,
         );
+      } catch (uploadsError) {
+        console.error("Upload audit logs error:", uploadsError);
       }
     }
 

@@ -1,4 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
@@ -22,7 +22,7 @@ function parseReviewIds(raw: unknown): number[] {
 }
 
 export async function POST(request: NextRequest) {
-  try {    const session = await getSessionFromCookies();
+  try {    const session = await getSessionFromCookies();
 
     if (!session) {
       return NextResponse.json(
@@ -31,15 +31,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const adminSupabase = await createServerSupabase({ useServiceRole: true });
+    const { rows: profileRows } = await query(
+      "SELECT role FROM public.profiles WHERE id = $1 LIMIT 1",
+      [session.userId],
+    );
+    const profile = profileRows[0] as { role: string } | undefined;
 
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
-
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json(
         { success: false, error: "Profile not found" },
         { status: 404 },
@@ -85,12 +83,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: reviews, error: fetchError } = await adminSupabase
-      .from("reviews")
-      .select("id, listing_id, user_id")
-      .in("id", parsedIds);
-
-    if (fetchError) {
+    let reviews: { id: number; listing_id: number; user_id: string }[];
+    try {
+      const { rows } = await query(
+        "SELECT id, listing_id, user_id FROM public.reviews WHERE id = ANY($1::bigint[])",
+        [parsedIds],
+      );
+      reviews = rows as { id: number; listing_id: number; user_id: string }[];
+    } catch (fetchError) {
       captureRouteError(fetchError, { route: ROUTE, method: "POST" });
       return NextResponse.json(
         { success: false, error: "Failed to load reviews" },
@@ -98,7 +98,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!reviews?.length) {
+    if (!reviews.length) {
       return NextResponse.json(
         { success: false, error: "No matching reviews found" },
         { status: 404 },
@@ -108,17 +108,17 @@ export async function POST(request: NextRequest) {
     const moderatedAt = new Date().toISOString();
     const idsToUpdate = reviews.map((r) => r.id);
 
-    const { data: updatedRows, error: reviewError } = await adminSupabase
-      .from("reviews")
-      .update({
-        status,
-        moderated_by: session.userId,
-        moderated_at: moderatedAt,
-      })
-      .in("id", idsToUpdate)
-      .select("id");
-
-    if (reviewError) {
+    let updatedCount = 0;
+    try {
+      const { rows: updatedRows } = await query(
+        `UPDATE public.reviews
+         SET status = $1, moderated_by = $2, moderated_at = $3
+         WHERE id = ANY($4::bigint[])
+         RETURNING id`,
+        [status, session.userId, moderatedAt, idsToUpdate],
+      );
+      updatedCount = updatedRows.length;
+    } catch (reviewError) {
       console.error("Bulk database update error:", reviewError);
       captureRouteError(reviewError, { route: ROUTE, method: "POST" });
       return NextResponse.json(
@@ -127,7 +127,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const updatedCount = updatedRows?.length ?? 0;
     const awardedListingKeys = new Set<string>();
 
     for (const review of reviews) {
@@ -140,7 +139,6 @@ export async function POST(request: NextRequest) {
       }
 
       await applyLeaveReviewXpForModeration(
-        adminSupabase,
         {
           reviewId: review.id,
           userId: review.user_id,

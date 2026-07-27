@@ -120,8 +120,11 @@ export function ListingsManagementPage() {
     if (!data.name?.trim()) {
       return "Please enter a name for the listing";
     }
-    if (!data.category_id) {
-      return "Please select a category for the listing";
+    if (
+      !data.category_id &&
+      !(Array.isArray(data.category_ids) && data.category_ids.length > 0)
+    ) {
+      return "Please select at least one category for the listing";
     }
     return null; // No validation errors
   };

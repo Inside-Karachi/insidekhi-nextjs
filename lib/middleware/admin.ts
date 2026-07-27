@@ -35,6 +35,17 @@ export function isStaffRoute(pathname: string): boolean {
 }
 
 /**
+ * Routes allowed for the limited data_entry role
+ */
+export function isDataEntryRoute(pathname: string): boolean {
+  return (
+    pathname === "/admin/listing-capacity" ||
+    pathname.startsWith("/admin/listing-capacity/") ||
+    pathname.startsWith("/api/admin/listing-capacity")
+  );
+}
+
+/**
  * Gets the admin dashboard URL
  */
 export function getAdminDashboardUrl(): string {

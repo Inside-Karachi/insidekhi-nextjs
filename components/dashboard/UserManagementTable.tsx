@@ -81,6 +81,8 @@ export function UserManagementTable({
         return <PenTool className="h-4 w-4" />;
       case "lister":
         return <MapPin className="h-4 w-4" />;
+      case "data_entry":
+        return <MapPin className="h-4 w-4" />;
       default:
         return <User className="h-4 w-4" />;
     }
@@ -98,6 +100,8 @@ export function UserManagementTable({
         return "bg-orange-500/10 text-orange-700 border-orange-500/20";
       case "lister":
         return "bg-pink-500/10 text-pink-700 border-pink-500/20";
+      case "data_entry":
+        return "bg-amber-500/10 text-amber-700 border-amber-500/20";
       default:
         return "bg-gray-500/10 text-gray-700 border-gray-500/20";
     }

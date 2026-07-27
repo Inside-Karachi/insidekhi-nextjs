@@ -15,6 +15,7 @@ export function createEmptyListingFormData(): ListingFormData {
     latitude: "",
     longitude: "",
     category_id: "",
+    category_ids: [],
     custom_category: "",
     is_featured: false,
     status: "draft",
@@ -44,6 +45,12 @@ export function listingRowToListingFormData(listing: Listing): ListingFormData {
     latitude: listing.latitude?.toString() || "",
     longitude: listing.longitude?.toString() || "",
     category_id: listing.category_id?.toString() || "",
+    category_ids:
+      listing.category_ids && listing.category_ids.length > 0
+        ? listing.category_ids.map(String)
+        : listing.category_id != null
+          ? [String(listing.category_id)]
+          : [],
     custom_category:
       (listing.custom_attributes as CustomAttributes)?.custom_category || "",
     is_featured: listing.is_featured || false,

@@ -5,7 +5,7 @@ import { ok } from "@/lib/mobile/response";
 import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import { createMobileServiceClient } from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
 import {
   getClientIp,
   isHoneypotTripped,
@@ -56,8 +56,7 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
 
   const ip = getClientIp(request);
-  const service = createMobileServiceClient();
-  await enforceFormRateLimit(service, "newsletter", ip, 50);
+  await enforceFormRateLimit("newsletter", ip, 50);
 
   if (isDisposableEmail(email)) {
     throw new MobileApiError(
@@ -69,25 +68,25 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   }
 
   // Idempotent: already subscribed -> success.
-  if (await hasExistingSubmission(service, "newsletter", email)) {
+  if (await hasExistingSubmission("newsletter", email)) {
     return ok({ subscribed: true });
   }
 
   const { user } = await getOptionalMobileUser(request);
-  const { error } = await service.from("form_submissions").insert({
-    form_type: "newsletter",
-    email,
-    status: "n/a",
-    uploaded_by: user?.id ?? null,
-    additional_data: {
-      interests: parsed.data.interests ?? [],
-      source: "mobile",
-      ip,
-      subscribedAt: new Date().toISOString(),
-    },
-  });
-  if (error) {
-    console.error("[mobile-api] newsletter insert failed:", error.message);
+  const additionalData = {
+    interests: parsed.data.interests ?? [],
+    source: "mobile",
+    ip,
+    subscribedAt: new Date().toISOString(),
+  };
+  try {
+    await query(
+      `INSERT INTO form_submissions (form_type, email, status, uploaded_by, additional_data)
+       VALUES ('newsletter', $1, 'n/a', $2, $3)`,
+      [email, user?.id ?? null, additionalData],
+    );
+  } catch (error) {
+    console.error("[mobile-api] newsletter insert failed:", error);
     throw new MobileApiError("internal_error", "Failed to subscribe.", 500);
   }
 

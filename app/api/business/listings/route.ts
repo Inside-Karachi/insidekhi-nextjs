@@ -336,6 +336,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    try {
+      const { syncListingCategories } = await import(
+        "@/lib/listings/sync-listing-categories"
+      );
+      await syncListingCategories(
+        newListing.id,
+        [validatedData.category_id],
+        validatedData.category_id,
+      );
+    } catch (syncError) {
+      console.error("Failed to sync listing categories:", syncError);
+    }
+
     return apiSuccess(
       {
         id: newListing.id,

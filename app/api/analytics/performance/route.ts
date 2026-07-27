@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import type { Database } from "@/types/supabase";
 
 // Performance metric types matching database enum
@@ -119,19 +119,35 @@ export async function POST(request: NextRequest) {
       captured_at: now,
     }));
 
-    // Use service role to bypass RLS (metrics can come from anonymous users)
-    const supabase = await createServerSupabase({ useServiceRole: true });
+    try {
+      const values: unknown[] = [];
+      const placeholders = inserts
+        .map((m, i) => {
+          const base = i * 7;
+          values.push(
+            m.metric_type,
+            m.value,
+            m.page,
+            m.device,
+            m.source,
+            m.metadata,
+            m.captured_at,
+          );
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`;
+        })
+        .join(", ");
 
-    const { error: insertError } = await supabase
-      .from("performance_metrics")
-      .insert(inserts);
-
-    if (insertError) {
+      await query(
+        `INSERT INTO performance_metrics
+           (metric_type, value, page, device, source, metadata, captured_at)
+         VALUES ${placeholders}`,
+        values,
+      );
+    } catch (insertError) {
       console.error("Failed to insert performance metrics:", insertError);
       return NextResponse.json(
         {
           error: "Failed to store performance metrics",
-          code: insertError.code,
         },
         { status: 500 }
       );

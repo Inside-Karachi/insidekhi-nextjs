@@ -5,28 +5,23 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import type { XPActivityUpsertRequest } from "@/types/gamification.types";
 import {
-  canManageGamificationSettings,
   isGamificationOperatorRole,
 } from "@/lib/auth/gamification-permissions";
+import type { UserRole } from "@/types/auth.types";
 
 /**
  * Verify user is super_admin
  */
-async function verifySuperAdmin(
-  userId: string,
-  supabase: Awaited<ReturnType<typeof createServerSupabase>>
-) {
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", userId)
-    .single();
-
-  return profile?.role === "super_admin";
+async function verifySuperAdmin(userId: string): Promise<boolean> {
+  const { rows } = await query(
+    `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+    [userId],
+  );
+  return rows[0]?.role === "super_admin";
 }
 
 /**
@@ -34,45 +29,37 @@ async function verifySuperAdmin(
  */
 export async function GET(_request: NextRequest) {
   try {
-    const supabase = await createServerSupabase();
     const session = await getSessionFromCookies();
 
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const adminSupabase = await createServerSupabase({
-      useServiceRole: true,
-    });
-    const { data: profile, error: profileError } = await adminSupabase
-      .from("profiles")
-      .select("role")
-      .eq("id", session.userId)
-      .single();
+    const { rows: profileRows } = await query(
+      `SELECT role FROM public.profiles WHERE id = $1 LIMIT 1`,
+      [session.userId],
+    );
+    const profile = profileRows[0] as { role: UserRole } | undefined;
 
-    if (profileError || !profile) {
+    if (!profile) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     const isAdmin = isGamificationOperatorRole(profile.role);
     if (!isAdmin) {
       // Return only basic info for public users
-      const { data: activities, error } = await supabase
-        .from("xp_activities")
-        .select("activity_slug, activity_name, description, xp_value")
-        .eq("is_active", true);
-
-      if (error) throw error;
+      const { rows: activities } = await query(
+        `SELECT activity_slug, activity_name, description, xp_value
+         FROM public.xp_activities
+         WHERE is_active = true`,
+      );
       return NextResponse.json({ success: true, activities });
     }
 
     // Return full details for admins
-    const { data: activities, error } = await adminSupabase
-      .from("xp_activities")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
+    const { rows: activities } = await query(
+      `SELECT * FROM public.xp_activities ORDER BY created_at DESC`,
+    );
     return NextResponse.json({ success: true, activities });
   } catch (error) {
     console.error("GET activities error:", error);
@@ -99,8 +86,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify super_admin role
-    const supabase = await createServerSupabase({ useServiceRole: true });
-    const isSuperAdmin = await verifySuperAdmin(session.userId, supabase);
+    const isSuperAdmin = await verifySuperAdmin(session.userId);
 
     if (!isSuperAdmin) {
       return NextResponse.json(
@@ -133,21 +119,22 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert activity
-    const { data: activity, error } = await supabase
-      .from("xp_activities")
-      .insert({
+    const { rows: insertedRows } = await query(
+      `INSERT INTO public.xp_activities
+         (activity_slug, activity_name, description, xp_value, cooldown_type, max_per_day, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
         activity_slug,
         activity_name,
-        description: description || null,
+        description || null,
         xp_value,
         cooldown_type,
-        max_per_day: max_per_day || null,
-        is_active: is_active !== false,
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
+        max_per_day || null,
+        is_active !== false,
+      ],
+    );
+    const activity = insertedRows[0];
 
     // Log audit event
     try {
@@ -187,8 +174,7 @@ export async function PUT(request: NextRequest) {
     }
 
     // Verify super_admin role
-    const supabase = await createServerSupabase({ useServiceRole: true });
-    const isSuperAdmin = await verifySuperAdmin(session.userId, supabase);
+    const isSuperAdmin = await verifySuperAdmin(session.userId);
 
     if (!isSuperAdmin) {
       return NextResponse.json(
@@ -217,11 +203,11 @@ export async function PUT(request: NextRequest) {
     }
 
     // Fetch old activity for audit log
-    const { data: oldActivity } = await supabase
-      .from("xp_activities")
-      .select("*")
-      .eq("activity_slug", activity_slug)
-      .single();
+    const { rows: oldActivityRows } = await query(
+      `SELECT * FROM public.xp_activities WHERE activity_slug = $1 LIMIT 1`,
+      [activity_slug],
+    );
+    const oldActivity = oldActivityRows[0];
 
     if (!oldActivity) {
       return NextResponse.json(
@@ -230,22 +216,46 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    // Update activity
-    const { data: activity, error } = await supabase
-      .from("xp_activities")
-      .update({
-        activity_name: activity_name || undefined,
-        description: description !== undefined ? description : undefined,
-        xp_value: xp_value !== undefined ? xp_value : undefined,
-        cooldown_type: cooldown_type || undefined,
-        max_per_day: max_per_day !== undefined ? max_per_day : undefined,
-        is_active: is_active !== undefined ? is_active : undefined,
-      })
-      .eq("activity_slug", activity_slug)
-      .select()
-      .single();
+    // Update activity - only set fields that were provided (matches the old
+    // Supabase `.update()` semantics of leaving `undefined` fields untouched).
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+    let paramIndex = 1;
 
-    if (error) throw error;
+    if (activity_name) {
+      setClauses.push(`activity_name = $${paramIndex++}`);
+      values.push(activity_name);
+    }
+    if (description !== undefined) {
+      setClauses.push(`description = $${paramIndex++}`);
+      values.push(description);
+    }
+    if (xp_value !== undefined) {
+      setClauses.push(`xp_value = $${paramIndex++}`);
+      values.push(xp_value);
+    }
+    if (cooldown_type) {
+      setClauses.push(`cooldown_type = $${paramIndex++}`);
+      values.push(cooldown_type);
+    }
+    if (max_per_day !== undefined) {
+      setClauses.push(`max_per_day = $${paramIndex++}`);
+      values.push(max_per_day);
+    }
+    if (is_active !== undefined) {
+      setClauses.push(`is_active = $${paramIndex++}`);
+      values.push(is_active);
+    }
+
+    let activity = oldActivity;
+    if (setClauses.length > 0) {
+      values.push(activity_slug);
+      const { rows } = await query(
+        `UPDATE public.xp_activities SET ${setClauses.join(", ")} WHERE activity_slug = $${paramIndex} RETURNING *`,
+        values,
+      );
+      activity = rows[0];
+    }
 
     // Log audit event
     try {

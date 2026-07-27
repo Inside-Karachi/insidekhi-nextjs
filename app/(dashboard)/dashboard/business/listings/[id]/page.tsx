@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 import BusinessListingEditor from "@/components/business-owner/BusinessListingEditor";
 import { requireSessionUser } from "@/lib/auth/require-session";
 
@@ -35,35 +35,45 @@ export default async function EditListingPage({ params }: PageProps) {
     redirect("/dashboard");
   }
 
-  const supabase = await createServerSupabase({ useServiceRole: true });
-
   // Fetch listing with full details
-  const { data: listing, error } = await supabase
-    .from("listings")
-    .select(
-      `
-      *,
-      category:categories(id, name),
-      branches:listing_branches(*),
-      images:listing_images!listing_id(*)
-    `,
-    )
-    .eq("id", listingId)
-    .single();
+  const { rows: listingRows } = await query(
+    `SELECT * FROM listings WHERE id = $1 LIMIT 1`,
+    [listingId],
+  );
+  const listingRow = listingRows[0];
 
-  if (error || !listing) {
+  if (!listingRow) {
     redirect("/dashboard/business/listings");
   }
 
   // Verify ownership
   if (
-    listing.owner_id !== user.id &&
-    listing.created_by !== user.id &&
+    listingRow.owner_id !== user.id &&
+    listingRow.created_by !== user.id &&
     effectiveRole !== "admin" &&
     effectiveRole !== "super_admin"
   ) {
     redirect("/dashboard/business/listings");
   }
+
+  const [categoryResult, branchesResult, imagesResult] = await Promise.all([
+    listingRow.category_id
+      ? query(`SELECT id, name FROM categories WHERE id = $1 LIMIT 1`, [
+          listingRow.category_id,
+        ])
+      : Promise.resolve({ rows: [] }),
+    query(`SELECT * FROM listing_branches WHERE listing_id = $1`, [
+      listingId,
+    ]),
+    query(`SELECT * FROM listing_images WHERE listing_id = $1`, [listingId]),
+  ]);
+
+  const listing = {
+    ...listingRow,
+    category: categoryResult.rows[0] ?? null,
+    branches: branchesResult.rows,
+    images: imagesResult.rows,
+  };
 
   return (
     <div className="w-full">

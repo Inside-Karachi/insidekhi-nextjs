@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { BankCardImage, BankCardFallback } from "./BankCardImage";
-import { createClient } from "@/lib/supabase/client";
 import { Database } from "@/types/supabase";
 
 // Use real Supabase types
@@ -31,104 +30,17 @@ export function BankCardShowcase({
   useEffect(() => {
     const fetchCardVariants = async () => {
       try {
-        const supabase = createClient();
+        const params = new URLSearchParams();
+        if (bankId) params.set("bankId", String(bankId));
+        if (bankName) params.set("bankName", bankName);
+        if (dealId) params.set("dealId", String(dealId));
+        params.set("maxCards", String(maxCards));
 
-        // 1. If we have a dealId, we must first fetch the deal's specific requirements
-        // We need both the ID list and the metadata for name-based fallback
-        let targetCardIds: number[] = [];
-        let targetCardNames: string[] = [];
+        const res = await fetch(`/api/bank-cards?${params.toString()}`);
+        const result = await res.json();
+        const cards = (result.cards || []) as CardVariant[];
 
-        if (dealId) {
-          const { data: dealData } = await supabase
-            .from("deals")
-            .select("valid_card_variants, metadata")
-            .eq("id", dealId)
-            .single();
-
-          if (dealData) {
-            // Strategy A: IDs
-            if (
-              dealData.valid_card_variants &&
-              dealData.valid_card_variants.length > 0
-            ) {
-              targetCardIds = dealData.valid_card_variants;
-            }
-
-            // Strategy B: Names from Metadata (Fallback for ID mismatch)
-            // The metadata often contains 'card_associations' with names that match our DB
-            const metadata = dealData.metadata as Record<string, unknown>;
-            if (
-              metadata &&
-              metadata.card_associations &&
-              Array.isArray(metadata.card_associations)
-            ) {
-              targetCardNames = metadata.card_associations.map(
-                (c: { name: string }) => c.name,
-              );
-            }
-          }
-        }
-
-        // 2. Build the query based on our findings
-        let query = supabase
-          .from("card_variants")
-          .select("*")
-          .eq("is_active", true)
-          .order("card_tier", { ascending: true })
-          .order("card_name", { ascending: true });
-
-        // Apply Bank Filter
-        if (bankId) {
-          query = query.eq("bank_id", bankId);
-        } else {
-          // If no bankId provided, try to find it via name
-          const { data: bankData } = await supabase
-            .from("banks")
-            .select("id")
-            .eq("name", bankName)
-            .single();
-
-          if (bankData) {
-            query = query.eq("bank_id", bankData.id);
-          }
-        }
-
-        // 3. Execute Fetch with Priority: IDs -> Names
-        let finalData: CardVariant[] = [];
-
-        // Attempt 1: Fetch by IDs (Most Precise)
-        if (targetCardIds.length > 0) {
-          const { data: idData } = await query
-            .in("id", targetCardIds)
-            .limit(maxCards);
-
-          if (idData && idData.length > 0) {
-            finalData = idData;
-          }
-        }
-
-        // Attempt 2: Fetch by Names (If IDs failed or returned nothing)
-        if (finalData.length === 0 && targetCardNames.length > 0 && bankId) {
-          // We create a new query instance to avoid the previous .in filter
-          const nameQuery = supabase
-            .from("card_variants")
-            .select("*")
-            .eq("is_active", true)
-            .eq("bank_id", bankId) // Start strict with bank_id
-            .in("card_name", targetCardNames);
-
-          const { data: nameData } = await nameQuery.limit(maxCards);
-
-          if (nameData && nameData.length > 0) {
-            finalData = nameData;
-          }
-        }
-
-        // Note: We deliberately removed the "Generic Bank Fallback" here.
-        // If we can't match specific cards for the deal, it's better to show nothing
-        // or a "See Terms" state than to show misleading random cards.
-
-        setCardVariants(finalData);
+        setCardVariants(cards);
       } catch (error) {
         console.error("Error in fetchCardVariants:", error);
         setCardVariants([]);

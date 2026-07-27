@@ -90,7 +90,12 @@ export function SystemSettingsPage() {
     useState("per_event");
 
   // Role Visibility states
-  const DEFAULT_ADMIN_VISIBLE_ROLES = ["writer", "lister", "organizer"];
+  const DEFAULT_ADMIN_VISIBLE_ROLES = [
+    "writer",
+    "lister",
+    "organizer",
+    "data_entry",
+  ];
   const TOGGLEABLE_ROLES = [
     {
       value: "business_owner",
@@ -106,6 +111,12 @@ export function SystemSettingsPage() {
       value: "lister",
       label: "Lister",
       description: "Users with listing management permissions",
+    },
+    {
+      value: "data_entry",
+      label: "Data Entry",
+      description:
+        "Limited accounts that only fill listing capacity and pricing fields",
     },
     {
       value: "organizer",
@@ -279,7 +290,7 @@ export function SystemSettingsPage() {
         const refreshedEstimatedEnd = getDefaultEstimatedEnd();
         const estimatedEndUpdated = await updateSetting(
           "maintenance.estimated_end",
-          JSON.stringify(refreshedEstimatedEnd),
+          refreshedEstimatedEnd,
         );
 
         if (estimatedEndUpdated) {
@@ -335,13 +346,13 @@ export function SystemSettingsPage() {
 
     const messageSuccess = await updateSetting(
       "maintenance.message",
-      JSON.stringify(maintenanceMessage),
+      maintenanceMessage,
     );
     const estimatedEndSuccess = await updateSetting(
       "maintenance.estimated_end",
       maintenanceEstimatedEnd && maintenanceEstimatedEnd.trim() !== ""
-        ? JSON.stringify(maintenanceEstimatedEnd)
-        : JSON.stringify(null),
+        ? maintenanceEstimatedEnd
+        : null,
     );
 
     if (messageSuccess && estimatedEndSuccess) {
@@ -375,7 +386,7 @@ export function SystemSettingsPage() {
         ),
         updateSetting(
           "ticketing.require_guest_details",
-          JSON.stringify(guestDetailsRequirement),
+          guestDetailsRequirement,
         ),
       ]);
       if (results.some((ok) => !ok)) {

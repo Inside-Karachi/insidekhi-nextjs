@@ -53,10 +53,18 @@ export default async function ListingPage({ params }: ListingPageProps) {
     notFound();
   }
 
-  // node-pg returns bigint id columns as strings; normalize here so every
+  // node-pg returns bigint/numeric columns as strings; normalize here so every
   // downstream consumer (props, API request bodies, zod validation) gets a
   // real number rather than a string that merely satisfies TS's `as number`.
   listing.id = Number(listing.id);
+  listing.avg_rating =
+    listing.avg_rating !== null && listing.avg_rating !== undefined
+      ? Number(listing.avg_rating)
+      : null;
+  listing.review_count =
+    listing.review_count !== null && listing.review_count !== undefined
+      ? Number(listing.review_count)
+      : 0;
 
   if (listing.status !== "published") {
     const sessionResult = await getOptionalSessionUser();
@@ -490,22 +498,6 @@ export default async function ListingPage({ params }: ListingPageProps) {
   );
 }
 
-export async function generateStaticParams() {
-  try {
-    const { rows: listings } = await query(
-      `SELECT slug FROM listings
-       WHERE status = 'published'
-       ORDER BY display_order DESC
-       LIMIT 20`,
-    );
-    return listings.map((listing) => ({
-      slug: String(listing.slug),
-    }));
-  } catch {
-    return [];
-  }
-}
-
 // Generate metadata for SEO
 export async function generateMetadata({ params }: ListingPageProps) {
   const { slug } = await params;
@@ -534,5 +526,8 @@ export async function generateMetadata({ params }: ListingPageProps) {
   }
 }
 
-// Enable ISR with 1 hour revalidation
-export const revalidate = 3600;
+// This page reads cookies (session/favorites via getFavoritedListingIdsForUser),
+// so it can never be statically cached — it bails to dynamic rendering at runtime
+// regardless. Render it on demand and skip the wasteful build-time prerender that
+// hammered the DB and crashed the build under connection exhaustion.
+export const dynamic = "force-dynamic";

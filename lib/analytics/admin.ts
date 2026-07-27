@@ -1,5 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
-import type { Database } from "@/types/supabase";
+import { query } from "@/lib/db";
 import type {
   AdminAnalyticsOverview,
   AdminViewerRole,
@@ -30,31 +29,27 @@ const MILLIS_PER_HOUR = 60 * 60 * 1000;
 const AUTO_REFRESH_INTERVAL_SECONDS = 60;
 const PERFORMANCE_LOOKBACK_HOURS = 24;
 
-type SupabaseServerClient = Awaited<ReturnType<typeof createServerSupabase>>;
-type AnalyticsEventRow = Pick<
-  Database["public"]["Tables"]["analytics_events"]["Row"],
-  "occurred_at" | "context"
->;
-type AuditLogRow = Pick<
-  Database["public"]["Tables"]["audit_logs"]["Row"],
-  "user_id" | "action" | "created_at"
->;
-type BookingRow = Pick<
-  Database["public"]["Tables"]["bookings"]["Row"],
-  "total_amount" | "status" | "payment_status" | "created_at" | "event_id"
->;
-type NotificationChannelRow = Pick<
-  Database["public"]["Tables"]["notification_channels"]["Row"],
-  "channel" | "status" | "attempt_count" | "created_at"
->;
-type PerformanceMetricRow = Pick<
-  Database["public"]["Tables"]["performance_metrics"]["Row"],
-  "metric_type" | "value" | "captured_at"
->;
-type EventRow = Pick<
-  Database["public"]["Tables"]["events"]["Row"],
-  "id" | "name"
->;
+type AnalyticsEventRow = { occurred_at: string; context: unknown };
+type AuditLogRow = { user_id: string | null; action: string; created_at: string };
+type BookingRow = {
+  total_amount: number | string | null;
+  status: string | null;
+  payment_status: string | null;
+  created_at: string | null;
+  event_id: number | null;
+};
+type NotificationChannelRow = {
+  channel: string;
+  status: string;
+  attempt_count: number | null;
+  created_at: string;
+};
+type PerformanceMetricRow = {
+  metric_type: string;
+  value: number | string;
+  captured_at: string;
+};
+type EventRow = { id: number; name: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -512,98 +507,88 @@ const summarizePerformanceMetrics = (
   };
 };
 
+const countQuery = async (sql: string, params: unknown[]): Promise<number> => {
+  const { rows } = await query(sql, params);
+  return parseInt(rows[0]?.count ?? "0", 10);
+};
+
 const fetchListingsSummary = async (
-  client: SupabaseServerClient,
   periodStartIso: string
 ): Promise<ListingsAnalyticsSummary> => {
   // All counts now filtered by the selected date range period
-  const [
-    { count: published = 0 },
-    { count: pendingApproval = 0 },
-    { count: drafts = 0 },
-    { count: rejected = 0 },
-    { count: archived = 0 },
-  ] = await Promise.all([
-    client
-      .from("listings")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "published")
-      .gte("created_at", periodStartIso),
-    client
-      .from("listings")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "pending_approval")
-      .gte("created_at", periodStartIso),
-    client
-      .from("listings")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "draft")
-      .gte("created_at", periodStartIso),
-    client
-      .from("listings")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "rejected")
-      .gte("created_at", periodStartIso),
-    client
-      .from("listings")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "archived")
-      .gte("created_at", periodStartIso),
-  ]);
+  const [published, pendingApproval, drafts, rejected, archived] =
+    await Promise.all([
+      countQuery(
+        `SELECT COUNT(*) FROM public.listings WHERE status = 'published' AND created_at >= $1`,
+        [periodStartIso]
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.listings WHERE status = 'pending_approval' AND created_at >= $1`,
+        [periodStartIso]
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.listings WHERE status = 'draft' AND created_at >= $1`,
+        [periodStartIso]
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.listings WHERE status = 'rejected' AND created_at >= $1`,
+        [periodStartIso]
+      ),
+      countQuery(
+        `SELECT COUNT(*) FROM public.listings WHERE status = 'archived' AND created_at >= $1`,
+        [periodStartIso]
+      ),
+    ]);
 
   return {
-    published: published ?? 0,
-    pendingApproval: pendingApproval ?? 0,
-    drafts: drafts ?? 0,
-    rejected: rejected ?? 0,
-    archived: archived ?? 0,
-    publishedInPeriod: published ?? 0,
+    published,
+    pendingApproval,
+    drafts,
+    rejected,
+    archived,
+    publishedInPeriod: published,
   };
 };
 
 const fetchFunnelSummary = async (
-  client: SupabaseServerClient,
   periodStartIso: string
 ): Promise<ConversionFunnelSummary> => {
   // All funnel counts filtered by the selected date range period
   const [
-    { count: getListedSubmissionsInPeriod = 0 },
-    { count: membershipSubmissionsInPeriod = 0 },
-    { count: bookingsStartedInPeriod = 0 },
-    { count: bookingsCompletedInPeriod = 0 },
+    getListedSubmissionsInPeriod,
+    membershipSubmissionsInPeriod,
+    bookingsStartedInPeriod,
+    bookingsCompletedInPeriod,
   ] = await Promise.all([
-    client
-      .from("form_submissions")
-      .select("id", { count: "exact", head: true })
-      .eq("form_type", "get-listed")
-      .gte("submitted_at", periodStartIso),
-    client
-      .from("form_submissions")
-      .select("id", { count: "exact", head: true })
-      .eq("form_type", "membership")
-      .gte("submitted_at", periodStartIso),
-    client
-      .from("bookings")
-      .select("id", { count: "exact", head: true })
-      .gte("created_at", periodStartIso),
-    client
-      .from("bookings")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "completed")
-      .gte("created_at", periodStartIso),
+    countQuery(
+      `SELECT COUNT(*) FROM public.form_submissions WHERE form_type = 'get-listed' AND submitted_at >= $1`,
+      [periodStartIso]
+    ),
+    countQuery(
+      `SELECT COUNT(*) FROM public.form_submissions WHERE form_type = 'membership' AND submitted_at >= $1`,
+      [periodStartIso]
+    ),
+    countQuery(
+      `SELECT COUNT(*) FROM public.bookings WHERE created_at >= $1`,
+      [periodStartIso]
+    ),
+    countQuery(
+      `SELECT COUNT(*) FROM public.bookings WHERE status = 'completed' AND created_at >= $1`,
+      [periodStartIso]
+    ),
   ]);
 
-  const conversionDenominator = Math.max(bookingsStartedInPeriod ?? 0, 1);
+  const conversionDenominator = Math.max(bookingsStartedInPeriod, 1);
   const bookingConversionRate =
     bookingsCompletedInPeriod && conversionDenominator > 0
-      ? (bookingsCompletedInPeriod ?? 0) / conversionDenominator
+      ? bookingsCompletedInPeriod / conversionDenominator
       : 0;
 
   return {
-    getListedSubmissionsInPeriod: getListedSubmissionsInPeriod ?? 0,
-    membershipSubmissionsInPeriod: membershipSubmissionsInPeriod ?? 0,
-    bookingsStartedInPeriod: bookingsStartedInPeriod ?? 0,
-    bookingsCompletedInPeriod: bookingsCompletedInPeriod ?? 0,
+    getListedSubmissionsInPeriod,
+    membershipSubmissionsInPeriod,
+    bookingsStartedInPeriod,
+    bookingsCompletedInPeriod,
     bookingConversionRate,
   };
 };
@@ -615,8 +600,6 @@ export async function getAdminAnalyticsOverview({
   viewerRole?: AdminViewerRole;
   dateRange?: import("@/types/analytics").DateRangeFilter;
 } = {}): Promise<AdminAnalyticsOverview> {
-  const adminSupabase = await createServerSupabase({ useServiceRole: true });
-
   const now = new Date();
 
   // Calculate lookback dates based on dateRange preset or use defaults
@@ -667,119 +650,90 @@ export async function getAdminAnalyticsOverview({
   ).toISOString();
 
   const [
-    { data: searchData, error: searchError },
+    searchRows,
     listings,
     funnels,
-    { data: auditRows, error: auditError },
-    { data: bookingRows, error: bookingError },
-    { data: notificationRows, error: notificationError },
-    { count: pendingOutboxCount = 0, error: outboxError },
-    performanceResponse,
+    auditRows,
+    bookingRows,
+    notificationRows,
+    pendingOutboxCount,
+    performanceRows,
   ] = await Promise.all([
-    adminSupabase
-      .from("analytics_events")
-      .select("occurred_at, context")
-      .eq("event_type", "search_performed")
-      .gte("occurred_at", periodStartIso)
-      .order("occurred_at", { ascending: true })
-      .limit(SEARCH_EVENT_LIMIT),
-    fetchListingsSummary(adminSupabase, periodStartIso),
-    fetchFunnelSummary(adminSupabase, periodStartIso),
-    adminSupabase
-      .from("audit_logs")
-      .select("user_id, action, created_at")
-      .in("action", ["user_login", "user_signup", "user_login_failed"])
-      .gte("created_at", periodStartIso)
-      .order("created_at", { ascending: true })
-      .limit(TRAFFIC_EVENT_LIMIT),
-    adminSupabase
-      .from("bookings")
-      .select("total_amount, status, payment_status, created_at, event_id")
-      .gte("created_at", periodStartIso)
-      .order("created_at", { ascending: true })
-      .limit(BOOKING_EVENT_LIMIT),
-    adminSupabase
-      .from("notification_channels")
-      .select("channel, status, attempt_count, created_at")
-      .gte("created_at", periodStartIso)
-      .order("created_at", { ascending: true })
-      .limit(NOTIFICATION_EVENT_LIMIT),
-    adminSupabase
-      .from("notification_outbox")
-      .select("id", { count: "exact", head: true })
-      .neq("status", "sent"),
+    query(
+      `SELECT occurred_at, context FROM public.analytics_events
+       WHERE event_type = 'search_performed' AND occurred_at >= $1
+       ORDER BY occurred_at ASC LIMIT $2`,
+      [periodStartIso, SEARCH_EVENT_LIMIT]
+    ).then((r) => r.rows as AnalyticsEventRow[]),
+    fetchListingsSummary(periodStartIso),
+    fetchFunnelSummary(periodStartIso),
+    query(
+      `SELECT user_id, action, created_at FROM public.audit_logs
+       WHERE action IN ('user_login', 'user_signup', 'user_login_failed') AND created_at >= $1
+       ORDER BY created_at ASC LIMIT $2`,
+      [periodStartIso, TRAFFIC_EVENT_LIMIT]
+    ).then((r) => r.rows as AuditLogRow[]),
+    query(
+      `SELECT total_amount, status, payment_status, created_at, event_id FROM public.bookings
+       WHERE created_at >= $1
+       ORDER BY created_at ASC LIMIT $2`,
+      [periodStartIso, BOOKING_EVENT_LIMIT]
+    ).then((r) => r.rows as BookingRow[]),
+    query(
+      `SELECT channel, status, attempt_count, created_at FROM public.notification_channels
+       WHERE created_at >= $1
+       ORDER BY created_at ASC LIMIT $2`,
+      [periodStartIso, NOTIFICATION_EVENT_LIMIT]
+    ).then((r) => r.rows as NotificationChannelRow[]),
+    countQuery(
+      `SELECT COUNT(*) FROM public.notification_outbox WHERE status != 'sent'`,
+      []
+    ),
     viewerRole === "super_admin"
-      ? adminSupabase
-          .from("performance_metrics")
-          .select("metric_type, value, captured_at")
-          .gte("captured_at", performanceLookback)
-          .in("metric_type", ["lcp", "ttfb", "api_latency", "api_error_rate"])
-          .order("captured_at", { ascending: true })
-          .limit(PERFORMANCE_EVENT_LIMIT)
-      : Promise.resolve({ data: null, error: null }),
+      ? query(
+          `SELECT metric_type, value, captured_at FROM public.performance_metrics
+           WHERE captured_at >= $1 AND metric_type::text = ANY($2::text[])
+           ORDER BY captured_at ASC LIMIT $3`,
+          [
+            performanceLookback,
+            ["lcp", "ttfb", "api_latency", "api_error_rate"],
+            PERFORMANCE_EVENT_LIMIT,
+          ]
+        ).then((r) => r.rows as PerformanceMetricRow[])
+      : Promise.resolve(null),
   ]);
 
-  if (searchError) {
-    console.error("Failed to fetch search analytics events", searchError);
-  }
-  if (auditError) {
-    console.error("Failed to fetch audit log analytics", auditError);
-  }
-  if (bookingError) {
-    console.error("Failed to fetch booking analytics", bookingError);
-  }
-  if (notificationError) {
-    console.error("Failed to fetch notification analytics", notificationError);
-  }
-  if (outboxError) {
-    console.error("Failed to fetch notification outbox status", outboxError);
-  }
-  if (performanceResponse?.error) {
-    console.error(
-      "Failed to fetch performance metrics",
-      performanceResponse.error
-    );
-  }
-
-  const searchRows = (searchData ?? []) as AnalyticsEventRow[];
   const searchSummary = normalizeSearchEvents(searchRows, now, lookbackDays);
 
   const trafficSummary = summarizeTrafficAnalytics(
-    (auditRows ?? []) as AuditLogRow[],
+    auditRows,
     now,
     lookbackDays
   );
 
   const { summary: revenueSummary, topEventIds } = summarizeRevenueAnalytics(
-    (bookingRows ?? []) as BookingRow[],
+    bookingRows,
     now,
     startDate,
     lookbackDays
   );
 
   const notificationsSummary = summarizeNotificationAnalytics(
-    (notificationRows ?? []) as NotificationChannelRow[],
-    pendingOutboxCount ?? 0
+    notificationRows,
+    pendingOutboxCount
   );
 
   let performanceSummary: PerformanceAnalyticsSummary | null = null;
-  if (viewerRole === "super_admin" && performanceResponse?.data) {
-    performanceSummary = summarizePerformanceMetrics(
-      performanceResponse.data as PerformanceMetricRow[]
-    );
+  if (viewerRole === "super_admin" && performanceRows) {
+    performanceSummary = summarizePerformanceMetrics(performanceRows);
   }
 
   if (topEventIds.length > 0) {
-    const { data: eventRows, error: eventsError } = await adminSupabase
-      .from("events")
-      .select("id, name")
-      .in("id", topEventIds);
-    if (eventsError) {
-      console.error(
-        "Failed to fetch event names for revenue analytics",
-        eventsError
+    try {
+      const { rows: eventRows } = await query(
+        `SELECT id, name FROM public.events WHERE id = ANY($1::bigint[])`,
+        [topEventIds]
       );
-    } else if (eventRows) {
       const nameMap = new Map<number, string>();
       (eventRows as EventRow[]).forEach((row) => {
         nameMap.set(row.id, row.name);
@@ -788,6 +742,11 @@ export async function getAdminAnalyticsOverview({
         ...event,
         eventName: nameMap.get(event.eventId) ?? event.eventName,
       }));
+    } catch (eventsError) {
+      console.error(
+        "Failed to fetch event names for revenue analytics",
+        eventsError
+      );
     }
   }
 

@@ -194,5 +194,5 @@ export function useCanSwitchRoles(): boolean {
 export function useIsStaff(): boolean {
   const { user } = useRole();
   if (!user) return false;
-  return ["lister", "admin", "super_admin"].includes(user.role);
+  return ["lister", "admin", "super_admin", "data_entry"].includes(user.role);
 }

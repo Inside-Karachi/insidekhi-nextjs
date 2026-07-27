@@ -3,7 +3,7 @@ import { PublicLeaderboard } from "@/components/gamification/PublicLeaderboard";
 export const dynamic = "force-dynamic";
 import { LeaderboardHero } from "@/components/gamification/LeaderboardHero";
 import { Metadata } from "next";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
 
 export const metadata: Metadata = {
   title: "XP Leaderboard | Inside Karachi",
@@ -13,37 +13,36 @@ export const metadata: Metadata = {
 
 async function getLeaderboardStats() {
   try {
-    const supabase = await createServerSupabase({ publicAnon: true });
-
-    // Get count of active users with XP using count query
-    const { count: activeUsersCount } = await supabase
-      .from("leaderboard_cache")
-      .select("*", { count: "exact", head: true })
-      .eq("period_type", "all_time");
+    // Get count of active users with XP
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) FROM public.leaderboard_cache WHERE period_type = 'all_time'`,
+    );
+    const activeUsersCount = Number(countRows[0]?.count ?? 0);
 
     // Get total XP awarded across all users
-    const { data: totalXpData } = await supabase
-      .from("leaderboard_cache")
-      .select("xp_total")
-      .eq("period_type", "all_time");
+    const { rows: totalXpRows } = await query(
+      `SELECT xp_total FROM public.leaderboard_cache WHERE period_type = 'all_time'`,
+    );
 
     // Calculate total XP awarded
-    const totalXpAwarded =
-      totalXpData?.reduce((sum: number, row) => sum + (row.xp_total || 0), 0) ||
-      0;
+    const totalXpAwarded = totalXpRows.reduce(
+      (sum: number, row) => sum + (row.xp_total || 0),
+      0
+    );
 
     // Get top ranker XP
-    const { data: topRankerData } = await supabase
-      .from("leaderboard_cache")
-      .select("xp_total")
-      .eq("period_type", "all_time")
-      .order("rank_position", { ascending: true })
-      .limit(1);
+    const { rows: topRankerRows } = await query(
+      `SELECT xp_total
+       FROM public.leaderboard_cache
+       WHERE period_type = 'all_time'
+       ORDER BY rank_position ASC
+       LIMIT 1`,
+    );
 
     const stats = {
       activeRankers: activeUsersCount || 0,
       totalXpAwarded: totalXpAwarded,
-      topRankXp: topRankerData?.[0]?.xp_total || 0,
+      topRankXp: topRankerRows?.[0]?.xp_total || 0,
     };
 
     return stats;

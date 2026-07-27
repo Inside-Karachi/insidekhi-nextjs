@@ -9,6 +9,10 @@ import { AnimatedCounter } from "@/components/ui/animated-counter";
 import { Trophy, Zap, Star, Calendar, MapPin } from "lucide-react";
 import { DailyLoginButton } from "@/components/dashboard/DailyLoginButton";
 import { WeeklyChallenges } from "@/components/dashboard/WeeklyChallenges";
+import {
+  LocationSwitcher,
+  type SavedLocation,
+} from "@/components/dashboard/LocationSwitcher";
 
 interface PremiumDashboardHeroProps {
   user: {
@@ -38,6 +42,7 @@ interface PremiumDashboardHeroProps {
     reviewsWritten: number;
     eventsBooked: number;
   };
+  savedLocations?: SavedLocation[];
   className?: string;
 }
 
@@ -50,6 +55,7 @@ export function PremiumDashboardHero({
   weeklyPointsEarned,
   previousWeekPointsEarned = 0,
   weeklyStats,
+  savedLocations = [],
   className,
 }: PremiumDashboardHeroProps) {
   // Use the avatar URL with fallback
@@ -100,6 +106,11 @@ export function PremiumDashboardHero({
                 transition={{ duration: 0.8, delay: 0.2 }}
                 className="space-y-4 md:space-y-6"
               >
+                {/* Location Switcher - Top Left, above Welcome back */}
+                <div className="flex justify-center md:justify-start">
+                  <LocationSwitcher initialLocations={savedLocations} />
+                </div>
+
                 {/* Bold Typography - Reference Design Style */}
                 <div className="space-y-3 md:space-y-4">
                   <div className="flex flex-col items-center text-center md:flex-row md:items-center md:text-left space-y-2 md:space-y-0 md:space-x-4">

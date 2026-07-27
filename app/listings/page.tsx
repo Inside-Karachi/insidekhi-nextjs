@@ -77,7 +77,7 @@ export default async function ListingsPage({
     lng: Number.isNaN(lng) ? undefined : lng,
   });
 
-  let mainListings = mainResult.listings as Listing[];
+  let mainListings = mainResult.listings as unknown as Listing[];
 
   let featuredListings: Listing[] = [];
   if (showFeaturedCarousel) {
@@ -94,7 +94,7 @@ export default async function ListingsPage({
     }));
     featuredListings = (await attachListingImages(
       normalizedFeaturedRows as Array<Record<string, unknown> & { id?: number | null }>,
-    )) as Listing[];
+    )) as unknown as Listing[];
   }
 
   const { rows: categoriesData } = await query(

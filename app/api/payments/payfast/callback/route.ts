@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
 import { query } from "@/lib/db";
 import {
   validatePayFastCallback,
@@ -14,9 +13,6 @@ import crypto from "crypto";
 // creates ticket passes, and notifies the user.
 export async function POST(request: NextRequest) {
   try {
-    // Only used for the createNotification() calls further down (shared lib still requires it).
-    const supabase = await createServerSupabase({ useServiceRole: true });
-
     // Collect callback parameters from BOTH the query string and the request
     // body. PayFast's server-to-server IPN posts result fields as a
     // form-urlencoded (or multipart) body, while the browser return URL carries
@@ -369,33 +365,30 @@ export async function POST(request: NextRequest) {
 
         const eventName = eventData?.name || "your event";
 
-        const notificationResult = await createNotification(
-          {
-            recipientId: booking.user_id,
-            roleScope: "public_user",
-            categorySlug: "public_booking_confirmation",
-            title: "🎉 Payment Confirmed!",
-            body: `Your tickets for ${eventName} are ready. ${passesCreated} pass${
-              passesCreated !== 1 ? "es" : ""
-            } issued.`,
-            priority: "high",
-            ctaLabel: "View My Tickets",
-            ctaUrl: `/dashboard/bookings`,
-            metadata: {
-              booking_id: booking.id,
-              booking_reference: booking.booking_reference,
-              event_name: eventName,
-              passes_count: passesCreated,
-              transaction_id: validation.transactionId,
-            },
-            channelOverrides: {
-              bell: true,
-              email: true,
-              push: false,
-            },
+        const notificationResult = await createNotification({
+          recipientId: booking.user_id,
+          roleScope: "public_user",
+          categorySlug: "public_booking_confirmation",
+          title: "🎉 Payment Confirmed!",
+          body: `Your tickets for ${eventName} are ready. ${passesCreated} pass${
+            passesCreated !== 1 ? "es" : ""
+          } issued.`,
+          priority: "high",
+          ctaLabel: "View My Tickets",
+          ctaUrl: `/dashboard/bookings`,
+          metadata: {
+            booking_id: booking.id,
+            booking_reference: booking.booking_reference,
+            event_name: eventName,
+            passes_count: passesCreated,
+            transaction_id: validation.transactionId,
           },
-          { supabase },
-        );
+          channelOverrides: {
+            bell: true,
+            email: true,
+            push: false,
+          },
+        });
 
         console.log(
           `[PayFast Webhook] Notification sent to user ${booking.user_id}`,
@@ -407,7 +400,6 @@ export async function POST(request: NextRequest) {
             const dispatchModule =
               await import("@/lib/notifications/dispatcher");
             await dispatchModule.dispatchEmailOutboxBatch({
-              supabase,
               limit: 10,
             });
             console.log("[PayFast Webhook] Emails dispatched");
@@ -441,33 +433,30 @@ export async function POST(request: NextRequest) {
 
         const eventName = eventData?.name || "your event";
 
-        const notificationResult = await createNotification(
-          {
-            recipientId: booking.user_id,
-            roleScope: "public_user",
-            categorySlug: "public_booking_status",
-            title: "❌ Payment Failed",
-            body: `Your payment for ${eventName} could not be completed. ${
-              validation.errorMessage || "Please try again."
-            }`,
-            priority: "high",
-            ctaLabel: "Retry Payment",
-            ctaUrl: `/checkout/payment?bookingId=${booking.id}`,
-            metadata: {
-              booking_id: booking.id,
-              booking_reference: booking.booking_reference,
-              event_name: eventName,
-              error_code: validation.errorCode,
-              error_message: validation.errorMessage,
-            },
-            channelOverrides: {
-              bell: true,
-              email: true,
-              push: false,
-            },
+        const notificationResult = await createNotification({
+          recipientId: booking.user_id,
+          roleScope: "public_user",
+          categorySlug: "public_booking_status",
+          title: "❌ Payment Failed",
+          body: `Your payment for ${eventName} could not be completed. ${
+            validation.errorMessage || "Please try again."
+          }`,
+          priority: "high",
+          ctaLabel: "Retry Payment",
+          ctaUrl: `/checkout/payment?bookingId=${booking.id}`,
+          metadata: {
+            booking_id: booking.id,
+            booking_reference: booking.booking_reference,
+            event_name: eventName,
+            error_code: validation.errorCode,
+            error_message: validation.errorMessage,
           },
-          { supabase },
-        );
+          channelOverrides: {
+            bell: true,
+            email: true,
+            push: false,
+          },
+        });
 
         console.log(
           `[PayFast Webhook] Failure notification sent to user ${booking.user_id}`,
@@ -479,7 +468,6 @@ export async function POST(request: NextRequest) {
             const dispatchModule =
               await import("@/lib/notifications/dispatcher");
             await dispatchModule.dispatchEmailOutboxBatch({
-              supabase,
               limit: 10,
             });
             console.log("[PayFast Webhook] Failure emails dispatched");

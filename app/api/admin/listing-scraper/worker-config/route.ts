@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { query } from "@/lib/db";
+import { getSessionFromCookies } from "@/lib/auth/session";
 import { z } from "zod";
 
 const CONFIG_KEY = "scraper.worker_automation";
@@ -39,24 +40,26 @@ const DEFAULT_CONFIG: WorkerAutomationConfig = {
 };
 
 async function assertSuperAdmin() {
-  const supabase = await createServerSupabase();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) return { ok: false as const, status: 401, supabase, user: null };
-
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-
-  if (profile?.role !== "super_admin") {
-    return { ok: false as const, status: 403, supabase, user };
+  const session = await getSessionFromCookies();
+  if (!session) {
+    return { ok: false as const, status: 401, userId: null };
   }
 
-  return { ok: true as const, status: 200, supabase, user };
+  const { rows } = await query(
+    "SELECT role FROM profiles WHERE id = $1 LIMIT 1",
+    [session.userId],
+  );
+  const profile = rows[0];
+
+  if (!profile) {
+    return { ok: false as const, status: 401, userId: session.userId };
+  }
+
+  if (profile.role !== "super_admin") {
+    return { ok: false as const, status: 403, userId: session.userId };
+  }
+
+  return { ok: true as const, status: 200, userId: session.userId };
 }
 
 export async function GET() {
@@ -69,13 +72,14 @@ export async function GET() {
       );
     }
 
-    const { data, error } = await auth.supabase
-      .from("system_config")
-      .select("config_value")
-      .eq("config_key", CONFIG_KEY)
-      .maybeSingle();
-
-    if (error) {
+    let data: { config_value: unknown } | undefined;
+    try {
+      const { rows } = await query(
+        "SELECT config_value FROM system_config WHERE config_key = $1 LIMIT 1",
+        [CONFIG_KEY],
+      );
+      data = rows[0];
+    } catch {
       return NextResponse.json(
         { error: "Failed to load worker config" },
         { status: 500 },
@@ -118,20 +122,30 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const { error } = await auth.supabase.from("system_config").upsert(
-      {
-        config_key: CONFIG_KEY,
-        config_value: parsed.data,
-        config_type: "setting",
-        description: "Listing scraper worker automation config",
-        requires_restart: false,
-        is_public: false,
-        updated_by: auth.user.id,
-      },
-      { onConflict: "config_key" },
-    );
-
-    if (error) {
+    try {
+      await query(
+        `INSERT INTO system_config (
+           config_key, config_value, config_type, description,
+           requires_restart, is_public, updated_by
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (config_key) DO UPDATE SET
+           config_value = EXCLUDED.config_value,
+           config_type = EXCLUDED.config_type,
+           description = EXCLUDED.description,
+           requires_restart = EXCLUDED.requires_restart,
+           is_public = EXCLUDED.is_public,
+           updated_by = EXCLUDED.updated_by`,
+        [
+          CONFIG_KEY,
+          parsed.data,
+          "setting",
+          "Listing scraper worker automation config",
+          false,
+          false,
+          auth.userId,
+        ],
+      );
+    } catch {
       return NextResponse.json(
         { error: "Failed to save config" },
         { status: 500 },

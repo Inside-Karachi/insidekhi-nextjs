@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { listFiles, deleteFile } from "@/lib/storage/spaces";
 
 const ADMIN_ROLES = ["admin", "super_admin", "lister"];
 
@@ -360,33 +360,17 @@ export async function DELETE(
       );
     }
 
-    // Clean up event images from storage. Storage access is still
-    // Supabase-based here (deferred to the file-storage migration phase,
-    // which moves this to lib/storage/spaces.ts) - unrelated to the DB
-    // queries above, which are now fully direct Postgres.
+    // Clean up event images from storage.
     try {
       console.log(`[EventDelete] Cleaning up images for event ${eventId}`);
-      const supabase = await createServerSupabase();
 
-      const { data: files, error: listError } = await supabase.storage
-        .from("event-images")
-        .list(`${eventId}/`);
+      const filePaths = await listFiles(`event-images/${eventId}/`);
 
-      if (listError) {
-        console.error("Error listing event images:", listError);
-      } else if (files && files.length > 0) {
-        const filePaths = files.map((file) => `${eventId}/${file.name}`);
-        const { error: deleteError } = await supabase.storage
-          .from("event-images")
-          .remove(filePaths);
-
-        if (deleteError) {
-          console.error("Error deleting event images:", deleteError);
-        } else {
-          console.log(
-            `[EventDelete] Successfully deleted ${filePaths.length} image files for event ${eventId}`,
-          );
-        }
+      if (filePaths.length > 0) {
+        await Promise.all(filePaths.map((filePath) => deleteFile(filePath)));
+        console.log(
+          `[EventDelete] Successfully deleted ${filePaths.length} image files for event ${eventId}`,
+        );
       }
     } catch (cleanupError) {
       console.error("Error during image cleanup:", cleanupError);

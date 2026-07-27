@@ -111,13 +111,25 @@ function LoginForm() {
         description: "You have been successfully logged in.",
       });
 
+      const data = await response.json().catch(() => ({}));
+      const role =
+        data && typeof data === "object" && "role" in data
+          ? String(data.role)
+          : null;
+
       // Prefer next, then returnUrl (middleware uses returnUrl for admin intercepts).
       const nextUrl =
         searchParams.get("next") || searchParams.get("returnUrl");
-      const destination =
+      let destination =
         nextUrl && nextUrl.startsWith("/") && !nextUrl.startsWith("//")
           ? nextUrl
           : "/dashboard";
+
+      // data_entry accounts may only use listing capacity
+      if (role === "data_entry") {
+        destination = "/admin/listing-capacity";
+      }
+
       window.location.href = destination;
     } catch (err) {
       const message =

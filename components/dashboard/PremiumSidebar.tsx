@@ -88,7 +88,6 @@ const listerNavigation = [
 
 // Limited data-entry navigation — capacity fields only
 const dataEntryNavigation = [
-  { name: "Home", href: "/", icon: Home },
   {
     name: "Listing Capacity",
     href: "/admin/listing-capacity",
@@ -202,10 +201,11 @@ const listerSecondaryNavigation = [
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
 
-const dataEntrySecondaryNavigation = [
-  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
-  { name: "Settings", href: "/dashboard/settings", icon: Settings },
-];
+const dataEntrySecondaryNavigation: {
+  name: string;
+  href: string;
+  icon: typeof UserIcon;
+}[] = [];
 
 interface ProfileShape {
   id: string;

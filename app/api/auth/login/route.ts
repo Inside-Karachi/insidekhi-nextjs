@@ -140,7 +140,10 @@ export async function POST(request: NextRequest) {
     }
 
     // 5. Successful login: set session cookie and build response
-    const response = NextResponse.json({ message: "Login successful" });
+    const response = NextResponse.json({
+      message: "Login successful",
+      role: dbUser.role,
+    });
     await setSession(response, {
       userId: dbUser.id,
       email,

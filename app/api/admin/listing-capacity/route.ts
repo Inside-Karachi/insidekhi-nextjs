@@ -13,7 +13,7 @@ const CAPACITY_SELECT = `
   l.status,
   l.category_id,
   COALESCE((
-    SELECT json_agg(lc.category_id)
+    SELECT json_agg(lc.category_id ORDER BY lc.is_primary DESC, lc.category_id ASC)
     FROM listing_categories lc
     WHERE lc.listing_id = l.id
   ), CASE WHEN l.category_id IS NOT NULL THEN json_build_array(l.category_id) ELSE '[]'::json END) AS category_ids,

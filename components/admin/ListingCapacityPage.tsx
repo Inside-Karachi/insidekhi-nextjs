@@ -334,7 +334,9 @@ export function ListingCapacityPage() {
     const maxPrice = parseDraftField(draft.max_price_per_person, false);
     const minCapacity = parseDraftField(draft.min_guest_capacity, true);
     const maxCapacity = parseDraftField(draft.max_guest_capacity, true);
-    const categoryIdsNums = draft.category_ids.map((id) => parseInt(id, 10));
+    const categoryIdsNums = draft.category_ids
+      .map((id) => parseInt(id, 10))
+      .filter((n) => Number.isInteger(n) && n > 0);
 
     for (const parsed of [minPrice, maxPrice, minCapacity, maxCapacity]) {
       if (parsed && typeof parsed === "object" && "error" in parsed) {
@@ -428,13 +430,37 @@ export function ListingCapacityPage() {
 
     setSavingIds((prev) => new Set(prev).add(row.id));
     try {
-      const response = await fetch(`/api/admin/listing-capacity/${row.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json();
-      if (!response.ok) {
+      const maxAttempts = 3;
+      let response: Response | null = null;
+      let data: { listing?: ListingCapacityRow; error?: string } = {};
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          response = await fetch(`/api/admin/listing-capacity/${row.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          data = await response.json().catch(() => ({}));
+
+          // Don't retry client/validation errors
+          if (response.ok || (response.status >= 400 && response.status < 500)) {
+            break;
+          }
+        } catch (networkError) {
+          if (attempt === maxAttempts) {
+            throw networkError instanceof Error
+              ? networkError
+              : new Error("Network error while saving");
+          }
+        }
+
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 400 * attempt));
+        }
+      }
+
+      if (!response || !response.ok) {
         throw new Error(data.error || "Failed to save");
       }
 

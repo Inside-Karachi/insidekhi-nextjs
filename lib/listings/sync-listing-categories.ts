@@ -51,7 +51,7 @@ export function normalizeCategoryIds(
 
 /**
  * Replace listing_categories rows and sync listings.category_id (primary).
- * Call inside the same request as listing create/update (after listing exists).
+ * Uses a single transaction so concurrent saves don't leave partial state.
  */
 export async function syncListingCategories(
   listingId: number,
@@ -63,30 +63,47 @@ export async function syncListingCategories(
     primaryCategoryIdInput,
   );
 
-  await query(`DELETE FROM listing_categories WHERE listing_id = $1`, [
-    listingId,
-  ]);
+  const { pool } = await import("@/lib/db");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-  if (categoryIds.length > 0) {
-    const values: unknown[] = [];
-    const placeholders: string[] = [];
-    categoryIds.forEach((categoryId, i) => {
-      const base = i * 3;
-      placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3})`);
-      values.push(listingId, categoryId, categoryId === primaryCategoryId);
-    });
+    await client.query(`DELETE FROM listing_categories WHERE listing_id = $1`, [
+      listingId,
+    ]);
 
-    await query(
-      `INSERT INTO listing_categories (listing_id, category_id, is_primary)
-       VALUES ${placeholders.join(", ")}`,
-      values,
-    );
+    if (categoryIds.length > 0) {
+      const values: unknown[] = [];
+      const placeholders: string[] = [];
+      categoryIds.forEach((categoryId, i) => {
+        const base = i * 3;
+        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3})`);
+        values.push(listingId, categoryId, categoryId === primaryCategoryId);
+      });
+
+      await client.query(
+        `INSERT INTO listing_categories (listing_id, category_id, is_primary)
+         VALUES ${placeholders.join(", ")}`,
+        values,
+      );
+    }
+
+    await client.query(`UPDATE listings SET category_id = $1 WHERE id = $2`, [
+      primaryCategoryId,
+      listingId,
+    ]);
+
+    await client.query("COMMIT");
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // ignore
+    }
+    throw error;
+  } finally {
+    client.release();
   }
-
-  await query(`UPDATE listings SET category_id = $1 WHERE id = $2`, [
-    primaryCategoryId,
-    listingId,
-  ]);
 
   return { categoryIds, primaryCategoryId };
 }

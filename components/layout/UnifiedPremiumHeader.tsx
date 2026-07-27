@@ -55,6 +55,23 @@ export async function UnifiedPremiumHeader({
       // Expected during build - silently continue with null user
     } else {
       console.error("Auth error in header:", error);
+
+      // The profile lookup may be temporarily unavailable even though the
+      // signed session cookie is valid. Fall back to the JWT-only lookup so
+      // the header does not visually sign the user out on a database blip.
+      try {
+        const sessionOnly = await getOptionalSessionUser({
+          withProfile: false,
+        });
+        if (sessionOnly) {
+          user = {
+            id: sessionOnly.user.id,
+            email: sessionOnly.user.email,
+          } as User;
+        }
+      } catch (sessionError) {
+        console.error("JWT-only header auth fallback failed:", sessionError);
+      }
     }
   }
 

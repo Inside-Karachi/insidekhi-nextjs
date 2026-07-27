@@ -3,6 +3,11 @@ import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { deleteListing } from "@/lib/utils/listing-deletion";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
+import {
+  getListingCategoryIds,
+  normalizeCategoryIds,
+  syncListingCategories,
+} from "@/lib/listings/sync-listing-categories";
 
 const ROUTE = "/api/admin/listings/[id]";
 
@@ -92,6 +97,8 @@ export async function GET(
       return NextResponse.json({ error: "Listing not found" }, { status: 404 });
     }
 
+    const category_ids = await getListingCategoryIds(listingId);
+
     // Get listing images
     let images;
     try {
@@ -108,7 +115,7 @@ export async function GET(
     return NextResponse.json({
       success: true,
       data: {
-        listing,
+        listing: { ...listing, category_ids },
         images: images || [],
       },
     });
@@ -239,8 +246,15 @@ export async function PATCH(
           ? body.website?.trim() || null
           : existingListing.website,
       category_id:
-        body.category_id !== undefined
-          ? parseInt(body.category_id)
+        body.category_ids !== undefined || body.category_id !== undefined
+          ? normalizeCategoryIds(
+              body.category_ids !== undefined
+                ? body.category_ids
+                : body.category_id != null
+                  ? [body.category_id]
+                  : [],
+              body.category_id,
+            ).primaryCategoryId
           : existingListing.category_id,
       latitude:
         body.latitude !== undefined
@@ -380,6 +394,30 @@ export async function PATCH(
       );
     }
 
+    if (body.category_ids !== undefined || body.category_id !== undefined) {
+      try {
+        const synced = await syncListingCategories(
+          listingId,
+          body.category_ids !== undefined
+            ? body.category_ids
+            : body.category_id != null
+              ? [body.category_id]
+              : [],
+          body.category_id,
+        );
+        listing = { ...listing, category_id: synced.primaryCategoryId };
+      } catch (syncError) {
+        console.error("Failed to sync listing categories:", syncError);
+        captureRouteError(syncError, { route: ROUTE, method: "PATCH" });
+        return patchErrorResponse(
+          requestId,
+          400,
+          "VALIDATION_ERROR",
+          "Failed to update listing categories",
+        );
+      }
+    }
+
     // Log the admin action
     try {
       const { logListingUpdate } = await import("@/lib/audit");
@@ -398,7 +436,15 @@ export async function PATCH(
       // Don't fail the operation if logging fails
     }
 
-    return NextResponse.json({ success: true, data: { listing } });
+    return NextResponse.json({
+      success: true,
+      data: {
+        listing: {
+          ...listing,
+          category_ids: await getListingCategoryIds(listingId),
+        },
+      },
+    });
   } catch (error) {
     console.error("Unexpected error:", error);
     captureRouteError(error, { route: ROUTE, method: "PATCH" });

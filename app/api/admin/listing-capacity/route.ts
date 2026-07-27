@@ -12,6 +12,11 @@ const CAPACITY_SELECT = `
   l.slug,
   l.status,
   l.category_id,
+  COALESCE((
+    SELECT json_agg(lc.category_id)
+    FROM listing_categories lc
+    WHERE lc.listing_id = l.id
+  ), CASE WHEN l.category_id IS NOT NULL THEN json_build_array(l.category_id) ELSE '[]'::json END) AS category_ids,
   l.address,
   l.description,
   l.phone_number,
@@ -78,7 +83,9 @@ export async function GET(request: NextRequest) {
       const categoryIdNum = parseInt(categoryId, 10);
       if (!Number.isNaN(categoryIdNum)) {
         whereParams.push(categoryIdNum);
-        whereClauses.push(`l.category_id = $${whereParams.length}`);
+        whereClauses.push(
+          `(l.category_id = $${whereParams.length} OR EXISTS (SELECT 1 FROM listing_categories lc WHERE lc.listing_id = l.id AND lc.category_id = $${whereParams.length}))`,
+        );
       }
     }
 

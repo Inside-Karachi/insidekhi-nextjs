@@ -448,7 +448,12 @@ export class DatabaseSync {
            RETURNING id`,
           listingValues(listingData),
         );
-        return rows[0].id;
+        const newId = rows[0].id as number;
+        await this.syncListingCategoryJunction(
+          newId,
+          listing.category_id || null,
+        );
+        return newId;
       } catch (error) {
         const insertError = error as Error & { code?: string };
 
@@ -472,6 +477,10 @@ export class DatabaseSync {
               );
             }
 
+            await this.syncListingCategoryJunction(
+              existing.id,
+              listing.category_id || null,
+            );
             return existing.id;
           }
         }
@@ -490,7 +499,32 @@ export class DatabaseSync {
         throw new Error(`Failed to update listing: ${(error as Error).message}`);
       }
 
+      await this.syncListingCategoryJunction(
+        decision.listingId!,
+        listing.category_id || null,
+      );
       return decision.listingId!;
+    }
+  }
+
+  private async syncListingCategoryJunction(
+    listingId: number,
+    categoryId: number | null,
+  ): Promise<void> {
+    try {
+      const { syncListingCategories } = await import(
+        "@/lib/listings/sync-listing-categories"
+      );
+      await syncListingCategories(
+        listingId,
+        categoryId != null ? [categoryId] : [],
+        categoryId,
+      );
+    } catch (error) {
+      console.error(
+        `[SYNC] Failed to sync listing_categories for listing ${listingId}:`,
+        error,
+      );
     }
   }
 

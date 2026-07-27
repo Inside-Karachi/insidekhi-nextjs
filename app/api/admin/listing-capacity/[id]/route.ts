@@ -8,11 +8,12 @@ import type { ListingCapacityFields } from "@/types/listing.types";
 
 type CapacityFieldKey = keyof ListingCapacityFields;
 
-const ALLOWED_FIELDS: CapacityFieldKey[] = [
+const ALLOWED_FIELDS: Array<CapacityFieldKey | "category_id"> = [
   "min_price_per_person",
   "max_price_per_person",
   "min_guest_capacity",
   "max_guest_capacity",
+  "category_id",
 ];
 
 function parseNullableNumber(
@@ -38,12 +39,39 @@ function parseNullableNumber(
 }
 
 function validateCapacityPayload(body: Record<string, unknown>):
-  | { ok: true; updates: Partial<ListingCapacityFields> }
+  | { ok: true; updates: Partial<ListingCapacityFields & { category_id: number | null; category_ids?: number[] }> }
   | { ok: false; error: string } {
-  const updates: Partial<ListingCapacityFields> = {};
+  const updates: Partial<ListingCapacityFields & { category_id: number | null; category_ids?: number[] }> = {};
+
+  if ("category_ids" in body && Array.isArray(body.category_ids)) {
+    const ids = body.category_ids
+      .map((x) => Number(x))
+      .filter((num) => Number.isInteger(num) && num > 0);
+    const uniqueIds = Array.from(new Set(ids));
+    updates.category_ids = uniqueIds;
+    updates.category_id = uniqueIds.length > 0 ? uniqueIds[0] : null;
+  }
 
   for (const field of ALLOWED_FIELDS) {
     if (!(field in body)) continue;
+
+    if (field === "category_id") {
+      if (!("category_ids" in body)) {
+        const val = body[field];
+        if (val === null || val === undefined || val === "") {
+          updates.category_id = null;
+          updates.category_ids = [];
+        } else {
+          const num = Number(val);
+          if (!Number.isFinite(num) || !Number.isInteger(num) || num < 1) {
+            return { ok: false, error: "category_id must be a positive integer" };
+          }
+          updates.category_id = num;
+          updates.category_ids = [num];
+        }
+      }
+      continue;
+    }
 
     const isPrice = field.includes("price");
     const parsed = parseNullableNumber(body[field], field, {
@@ -61,7 +89,7 @@ function validateCapacityPayload(body: Record<string, unknown>):
   if (Object.keys(updates).length === 0) {
     return {
       ok: false,
-      error: "Provide at least one capacity field to update",
+      error: "Provide at least one field to update",
     };
   }
 
@@ -156,44 +184,73 @@ export async function PATCH(
       return NextResponse.json({ error: orderError }, { status: 400 });
     }
 
+    const { category_ids, ...capacityAndCategoryUpdates } = validated.updates;
+
     const setClauses: string[] = [];
     const values: unknown[] = [];
-    for (const [key, value] of Object.entries(validated.updates)) {
+    for (const [key, value] of Object.entries(capacityAndCategoryUpdates)) {
       values.push(value);
       setClauses.push(`${key} = $${values.length}`);
     }
-    values.push(listingId);
 
-    const { rows } = await query(
-      `UPDATE listings
-       SET ${setClauses.join(", ")}, updated_at = NOW()
-       WHERE id = $${values.length}
-       RETURNING
-         id,
-         name,
-         slug,
-         status,
-         category_id,
-         address,
-         min_price_per_person,
-         max_price_per_person,
-         min_guest_capacity,
-         max_guest_capacity`,
-      values,
-    );
+    let updatedListing: Record<string, unknown> = current as unknown as Record<string, unknown>;
 
-    const listing = rows[0];
+    if (setClauses.length > 0) {
+      values.push(listingId);
+      const { rows } = await query(
+        `UPDATE listings
+         SET ${setClauses.join(", ")}, updated_at = NOW()
+         WHERE id = $${values.length}
+         RETURNING
+           id,
+           name,
+           slug,
+           status,
+           category_id,
+           address,
+           min_price_per_person,
+           max_price_per_person,
+           min_guest_capacity,
+           max_guest_capacity`,
+        values,
+      );
+      updatedListing = rows[0];
+    }
+
+    // Sync listing_categories join table if category_ids provided
+    let finalCategoryIds: number[] = [];
+    if (category_ids !== undefined) {
+      await query(`DELETE FROM listing_categories WHERE listing_id = $1`, [listingId]);
+      for (let i = 0; i < category_ids.length; i++) {
+        const catId = category_ids[i];
+        const isPrimary = i === 0;
+        await query(
+          `INSERT INTO listing_categories (listing_id, category_id, is_primary)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (listing_id, category_id) DO UPDATE SET is_primary = EXCLUDED.is_primary`,
+          [listingId, catId, isPrimary]
+        );
+      }
+      finalCategoryIds = category_ids;
+    } else {
+      const { rows: lcRows } = await query(
+        `SELECT category_id FROM listing_categories WHERE listing_id = $1`,
+        [listingId]
+      );
+      finalCategoryIds = lcRows.map((r) => r.category_id as number);
+    }
+
     let category_name: string | null = null;
-    if (listing.category_id != null) {
+    if (updatedListing.category_id != null) {
       const { rows: categoryRows } = await query(
         `SELECT name FROM categories WHERE id = $1 LIMIT 1`,
-        [listing.category_id],
+        [updatedListing.category_id],
       );
       category_name = categoryRows[0]?.name ?? null;
     }
 
     return NextResponse.json({
-      listing: { ...listing, category_name },
+      listing: { ...updatedListing, category_ids: finalCategoryIds, category_name },
     });
   } catch (error) {
     const status = getAdminAuthErrorStatus(error);

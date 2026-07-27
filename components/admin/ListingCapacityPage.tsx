@@ -34,6 +34,9 @@ import {
   Phone,
   Globe,
   ImageIcon,
+  FolderTree,
+  Folder,
+  Check,
 } from "lucide-react";
 import type {
   ListingCapacityCompleteness,
@@ -42,10 +45,29 @@ import type {
 } from "@/types/listing.types";
 
 type DraftFields = {
-  [K in keyof ListingCapacityFields]: string;
+  min_price_per_person: string;
+  max_price_per_person: string;
+  min_guest_capacity: string;
+  max_guest_capacity: string;
+  category_ids: string[];
+};
+
+type CategoryOption = {
+  value: string;
+  label: string;
+  slug?: string;
+  parentId?: string | null;
+  iconName?: string | null;
 };
 
 function toDraft(row: ListingCapacityRow): DraftFields {
+  const ids =
+    row.category_ids && row.category_ids.length > 0
+      ? row.category_ids.map(String)
+      : row.category_id == null
+      ? []
+      : [String(row.category_id)];
+
   return {
     min_price_per_person:
       row.min_price_per_person == null ? "" : String(row.min_price_per_person),
@@ -55,16 +77,21 @@ function toDraft(row: ListingCapacityRow): DraftFields {
       row.min_guest_capacity == null ? "" : String(row.min_guest_capacity),
     max_guest_capacity:
       row.max_guest_capacity == null ? "" : String(row.max_guest_capacity),
+    category_ids: ids,
   };
 }
 
 function draftEqualsRow(draft: DraftFields, row: ListingCapacityRow): boolean {
   const original = toDraft(row);
+  const draftIdsStr = [...draft.category_ids].sort().join(",");
+  const origIdsStr = [...original.category_ids].sort().join(",");
+
   return (
     draft.min_price_per_person === original.min_price_per_person &&
     draft.max_price_per_person === original.max_price_per_person &&
     draft.min_guest_capacity === original.min_guest_capacity &&
-    draft.max_guest_capacity === original.max_guest_capacity
+    draft.max_guest_capacity === original.max_guest_capacity &&
+    draftIdsStr === origIdsStr
   );
 }
 
@@ -127,11 +154,12 @@ export function ListingCapacityPage() {
   const [currentPage, setCurrentPage] = React.useState(1);
   const [totalPages, setTotalPages] = React.useState(1);
   const [stats, setStats] = React.useState({ total: 0, incomplete: 0 });
-  const [categories, setCategories] = React.useState<
-    Array<{ value: string; label: string }>
-  >([]);
+  const [categories, setCategories] = React.useState<CategoryOption[]>([]);
   const [categoriesLoading, setCategoriesLoading] = React.useState(false);
   const [expandedIds, setExpandedIds] = React.useState<Set<number>>(new Set());
+  const [expandedCategoryIds, setExpandedCategoryIds] = React.useState<Set<number>>(
+    new Set()
+  );
 
   const pageSize = 20;
 
@@ -141,6 +169,58 @@ export function ListingCapacityPage() {
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
+    });
+  };
+
+  const toggleCategoryExpanded = (id: number) => {
+    setExpandedCategoryIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const getCategoryPath = React.useCallback(
+    (catId: string | null | undefined): string => {
+      if (!catId) return "";
+      const cat = categories.find((c) => c.value === catId);
+      if (!cat) return "";
+      if (cat.parentId) {
+        const parent = categories.find((c) => c.value === cat.parentId);
+        return parent ? `${parent.label} > ${cat.label}` : cat.label;
+      }
+      return cat.label;
+    },
+    [categories]
+  );
+
+  const getCategorySummary = React.useCallback(
+    (catIds: string[]): string => {
+      if (!catIds || catIds.length === 0) return "";
+      if (catIds.length === 1) return getCategoryPath(catIds[0]);
+      const firstPath = getCategoryPath(catIds[0]);
+      return `${firstPath} (+${catIds.length - 1} more)`;
+    },
+    [getCategoryPath]
+  );
+
+  const toggleCategorySelection = (listingId: number, categoryIdStr: string) => {
+    setDrafts((prev) => {
+      const currentDraft =
+        prev[listingId] || toDraft(listings.find((l) => l.id === listingId)!);
+      const exists = currentDraft.category_ids.includes(categoryIdStr);
+      const nextIds = exists
+        ? currentDraft.category_ids.filter((id) => id !== categoryIdStr)
+        : [...currentDraft.category_ids, categoryIdStr];
+
+      return {
+        ...prev,
+        [listingId]: {
+          ...currentDraft,
+          category_ids: nextIds,
+        },
+      };
     });
   };
 
@@ -197,6 +277,7 @@ export function ListingCapacityPage() {
         Object.fromEntries(rows.map((row) => [row.id, toDraft(row)])),
       );
       setExpandedIds(new Set());
+      setExpandedCategoryIds(new Set());
       setTotalPages(data.pagination?.totalPages || 1);
       setStats({
         total: data.stats?.total ?? data.pagination?.total ?? 0,
@@ -253,6 +334,7 @@ export function ListingCapacityPage() {
     const maxPrice = parseDraftField(draft.max_price_per_person, false);
     const minCapacity = parseDraftField(draft.min_guest_capacity, true);
     const maxCapacity = parseDraftField(draft.max_guest_capacity, true);
+    const categoryIdsNums = draft.category_ids.map((id) => parseInt(id, 10));
 
     for (const parsed of [minPrice, maxPrice, minCapacity, maxCapacity]) {
       if (parsed && typeof parsed === "object" && "error" in parsed) {
@@ -265,11 +347,12 @@ export function ListingCapacityPage() {
       }
     }
 
-    const payload: ListingCapacityFields = {
+    const payload = {
       min_price_per_person: minPrice as number | null,
       max_price_per_person: maxPrice as number | null,
       min_guest_capacity: minCapacity as number | null,
       max_guest_capacity: maxCapacity as number | null,
+      category_ids: categoryIdsNums,
     };
 
     if (
@@ -365,7 +448,7 @@ export function ListingCapacityPage() {
       }));
       toast({
         title: "Saved",
-        description: `Updated capacity for ${updated.name || row.name}`,
+        description: `Updated listing details for ${updated.name || row.name}`,
       });
 
       const wasComplete =
@@ -513,9 +596,11 @@ export function ListingCapacityPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-10" />
+                <TableHead className="w-16 px-2">
+                  <span className="sr-only">Actions</span>
+                </TableHead>
                 <TableHead className="min-w-[180px]">Listing</TableHead>
-                <TableHead>Category</TableHead>
+                <TableHead>Categories</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="min-w-[120px]">
                   Min price / person (PKR)
@@ -553,30 +638,58 @@ export function ListingCapacityPage() {
                   const dirty = !draftEqualsRow(draft, row);
                   const saving = savingIds.has(row.id);
                   const expanded = expandedIds.has(row.id);
+                  const expandedCategory = expandedCategoryIds.has(row.id);
 
                   return (
                     <React.Fragment key={row.id}>
                       <TableRow>
-                        <TableCell className="pr-0">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            aria-expanded={expanded}
-                            aria-label={
-                              expanded
-                                ? `Collapse details for ${row.name}`
-                                : `Expand details for ${row.name}`
-                            }
-                            onClick={() => toggleExpanded(row.id)}
-                          >
-                            {expanded ? (
-                              <ChevronDown className="h-4 w-4" />
-                            ) : (
-                              <ChevronRight className="h-4 w-4" />
-                            )}
-                          </Button>
+                        <TableCell className="px-2 pr-0">
+                          <div className="flex items-center gap-0.5">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                              aria-expanded={expanded}
+                              aria-label={
+                                expanded
+                                  ? `Collapse details for ${row.name}`
+                                  : `Expand details for ${row.name}`
+                              }
+                              title="Toggle listing details preview"
+                              onClick={() => toggleExpanded(row.id)}
+                            >
+                              {expanded ? (
+                                <ChevronDown className="h-4 w-4" />
+                              ) : (
+                                <ChevronRight className="h-4 w-4" />
+                              )}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className={`h-8 w-8 transition-colors ${
+                                expandedCategory
+                                  ? "bg-primary/10 text-primary font-bold"
+                                  : "text-muted-foreground hover:text-primary"
+                              }`}
+                              aria-expanded={expandedCategory}
+                              aria-label={
+                                expandedCategory
+                                  ? `Collapse category selector for ${row.name}`
+                                  : `Expand category selector for ${row.name}`
+                              }
+                              title="Choose categories & subcategories"
+                              onClick={() => toggleCategoryExpanded(row.id)}
+                            >
+                              {expandedCategory ? (
+                                <ChevronDown className="h-4 w-4 text-primary" />
+                              ) : (
+                                <FolderTree className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </div>
                         </TableCell>
                         <TableCell>
                           <button
@@ -593,7 +706,19 @@ export function ListingCapacityPage() {
                           </button>
                         </TableCell>
                         <TableCell className="text-muted-foreground">
-                          {row.category_name || "—"}
+                          <button
+                            type="button"
+                            onClick={() => toggleCategoryExpanded(row.id)}
+                            className="hover:underline hover:text-foreground text-left font-medium inline-flex items-center gap-1.5 group"
+                            title="Click to open categories selector"
+                          >
+                            <span>
+                              {getCategorySummary(draft.category_ids) ||
+                                row.category_name ||
+                                "—"}
+                            </span>
+                            <FolderTree className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 text-primary transition-opacity" />
+                          </button>
                         </TableCell>
                         <TableCell>
                           <Badge
@@ -682,6 +807,147 @@ export function ListingCapacityPage() {
                           </Button>
                         </TableCell>
                       </TableRow>
+
+                      {expandedCategory ? (
+                        <TableRow className="hover:bg-transparent">
+                          <TableCell
+                            colSpan={9}
+                            className="bg-muted/40 p-4 border-y border-border/60"
+                          >
+                            <div className="space-y-4">
+                              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border/40">
+                                <div className="flex items-center gap-2">
+                                  <div className="p-1.5 rounded-lg bg-primary/10 text-primary">
+                                    <FolderTree className="h-4 w-4" />
+                                  </div>
+                                  <div>
+                                    <h4 className="font-semibold text-sm leading-none">
+                                      Assign Categories & Subcategories
+                                    </h4>
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                      Click categories to select/deselect multiple for{" "}
+                                      <span className="font-medium text-foreground">
+                                        {row.name}
+                                      </span>
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-xs text-muted-foreground">
+                                    Selected ({draft.category_ids.length}):
+                                  </span>
+                                  {draft.category_ids.length === 0 ? (
+                                    <Badge
+                                      variant="outline"
+                                      className="bg-background font-medium py-1 px-2.5"
+                                    >
+                                      Unassigned
+                                    </Badge>
+                                  ) : (
+                                    draft.category_ids.map((id) => (
+                                      <Badge
+                                        key={id}
+                                        variant="secondary"
+                                        className="bg-primary/10 text-primary border-primary/20 py-0.5 px-2 text-xs flex items-center gap-1 cursor-pointer hover:bg-destructive/10 hover:text-destructive hover:border-destructive/20 transition-colors"
+                                        onClick={() =>
+                                          toggleCategorySelection(row.id, id)
+                                        }
+                                        title="Click to remove category"
+                                      >
+                                        <span>{getCategoryPath(id)}</span>
+                                        <span className="text-xs font-bold">×</span>
+                                      </Badge>
+                                    ))
+                                  )}
+                                  {draftEqualsRow(draft, row) ? null : (
+                                    <Badge className="bg-amber-500/10 text-amber-700 border-amber-500/20 py-1">
+                                      Unsaved changes
+                                    </Badge>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+                                {categories
+                                  .filter((c) => !c.parentId)
+                                  .map((parent) => {
+                                    const subcats = categories.filter(
+                                      (c) => c.parentId === parent.value
+                                    );
+                                    const isParentSelected =
+                                      draft.category_ids.includes(parent.value);
+
+                                    return (
+                                      <div
+                                        key={parent.value}
+                                        className={`rounded-xl border p-3 transition-all ${
+                                          isParentSelected
+                                            ? "border-primary bg-primary/5 shadow-xs"
+                                            : "border-border/60 bg-card hover:border-border"
+                                        }`}
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            toggleCategorySelection(
+                                              row.id,
+                                              parent.value
+                                            )
+                                          }
+                                          className="w-full flex items-center justify-between font-semibold text-xs text-foreground text-left py-1 group"
+                                        >
+                                          <div className="flex items-center gap-1.5 min-w-0">
+                                            <Folder className="h-3.5 w-3.5 text-primary shrink-0 group-hover:scale-110 transition-transform" />
+                                            <span className="truncate group-hover:text-primary transition-colors">
+                                              {parent.label}
+                                            </span>
+                                          </div>
+                                          {isParentSelected ? (
+                                            <Check className="h-3.5 w-3.5 text-primary shrink-0 font-bold" />
+                                          ) : null}
+                                        </button>
+
+                                        {subcats.length > 0 ? (
+                                          <div className="mt-2 space-y-1 pl-2 border-l-2 border-primary/20">
+                                            {subcats.map((sub) => {
+                                              const isSubSelected =
+                                                draft.category_ids.includes(sub.value);
+                                              return (
+                                                <button
+                                                  key={sub.value}
+                                                  type="button"
+                                                  onClick={() =>
+                                                    toggleCategorySelection(
+                                                      row.id,
+                                                      sub.value
+                                                    )
+                                                  }
+                                                  className={`w-full text-left px-2.5 py-1.5 rounded-md text-xs transition-all flex items-center justify-between ${
+                                                    isSubSelected
+                                                      ? "bg-primary text-primary-foreground font-medium shadow-xs"
+                                                      : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                                                  }`}
+                                                >
+                                                  <span className="truncate">
+                                                    {sub.label}
+                                                  </span>
+                                                  {isSubSelected ? (
+                                                    <Check className="h-3 w-3 shrink-0 ml-1" />
+                                                  ) : null}
+                                                </button>
+                                              );
+                                            })}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  })}
+                              </div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ) : null}
+
                       {expanded ? (
                         <TableRow className="hover:bg-transparent">
                           <TableCell colSpan={9} className="bg-muted/30 p-4">

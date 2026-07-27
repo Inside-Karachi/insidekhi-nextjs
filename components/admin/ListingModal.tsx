@@ -95,6 +95,7 @@ export function ListingModal({
     latitude: "",
     longitude: "",
     category_id: "",
+    category_ids: [],
     custom_category: "",
     is_featured: false,
     status: "draft",
@@ -480,6 +481,12 @@ export function ListingModal({
         }
 
         const baseForm = listingRowToListingFormData(row);
+        if (pack.categoryIds.length > 0) {
+          baseForm.category_ids = pack.categoryIds.map(String);
+          if (!baseForm.category_id) {
+            baseForm.category_id = String(pack.categoryIds[0]);
+          }
+        }
         const primaryMerge = mergePrimaryBranchIntoEditor({
           baseFormAddress: baseForm.address,
           baseFormLatitude: baseForm.latitude,
@@ -1146,6 +1153,14 @@ export function ListingModal({
         category_id: formData.category_id
           ? parseInt(formData.category_id)
           : null,
+        category_ids: (formData.category_ids?.length
+          ? formData.category_ids
+          : formData.category_id
+            ? [formData.category_id]
+            : []
+        )
+          .map((id) => parseInt(id, 10))
+          .filter((n) => Number.isFinite(n)),
         latitude: resolvedLatitude ? parseFloat(resolvedLatitude) : null,
         longitude: resolvedLongitude ? parseFloat(resolvedLongitude) : null,
         is_featured: formData.is_featured,

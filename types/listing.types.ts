@@ -2,6 +2,8 @@ import { Database } from "./supabase";
 
 export type Listing = Database["public"]["Tables"]["listings"]["Row"] & {
   category_name?: string | null;
+  /** All category IDs for this listing (primary first). category_id remains primary. */
+  category_ids?: number[];
   // Social Links
   facebook_url?: string | null;
   instagram_url?: string | null;
@@ -170,7 +172,10 @@ export interface ListingFormData {
   latitude: string;
   longitude: string;
   place_id?: string;
+  /** Primary category (also first entry in category_ids). */
   category_id: string;
+  /** All selected category IDs as strings (multi-subcategory). */
+  category_ids: string[];
   custom_category: string;
   is_featured: boolean;
   status: Database["public"]["Enums"]["listing_status"];
@@ -272,6 +277,7 @@ export interface ListingCapacityRow extends ListingCapacityFields {
   slug: string;
   status: Database["public"]["Enums"]["listing_status"];
   category_id: number | null;
+  category_ids?: number[];
   category_name?: string | null;
   address?: string | null;
   description?: string | null;

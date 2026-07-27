@@ -41,6 +41,7 @@ export type ListingEditModalHydrationPack = {
   branchesWithHours: BranchWithHours[];
   deals: DealRow[];
   banks: BankOption[];
+  categoryIds: number[];
 };
 
 const DEFAULT_OPENING_TEMPLATE: Omit<OpeningHour, "branch_id"> & {
@@ -192,6 +193,7 @@ export async function loadListingEditModalHydration(
     branchesWithHours,
     dealsRaw,
     banksRaw,
+    listingJson,
   ] = await Promise.all([
     fetch(`/api/admin/listings/${listingId}/menu`, fetchOpts).then((r) =>
       r.json(),
@@ -207,12 +209,14 @@ export async function loadListingEditModalHydration(
       r.json(),
     ),
     fetch("/api/banks", fetchOpts).then((r) => r.json()),
+    fetch(`/api/admin/listings/${listingId}`, fetchOpts).then((r) => r.json()),
   ]) as [
     Record<string, unknown>,
     Record<string, unknown>,
     Record<string, unknown>,
     BranchWithHours[],
     { deals?: DealRow[]; error?: string },
+    Record<string, unknown>,
     Record<string, unknown>,
   ];
 
@@ -255,6 +259,25 @@ export async function loadListingEditModalHydration(
     }));
   }
 
+  let categoryIds: number[] = [];
+  if (
+    listingJson.success === true &&
+    listingJson.data &&
+    typeof listingJson.data === "object" &&
+    "listing" in (listingJson.data as object)
+  ) {
+    const listing = (listingJson.data as { listing?: { category_ids?: unknown; category_id?: unknown } })
+      .listing;
+    if (Array.isArray(listing?.category_ids)) {
+      categoryIds = listing.category_ids
+        .map((id) => Number(id))
+        .filter((n) => Number.isFinite(n) && n > 0);
+    } else if (listing?.category_id != null) {
+      const n = Number(listing.category_id);
+      if (Number.isFinite(n) && n > 0) categoryIds = [n];
+    }
+  }
+
   return {
     menuSections,
     images,
@@ -262,5 +285,6 @@ export async function loadListingEditModalHydration(
     branchesWithHours,
     deals,
     banks,
+    categoryIds,
   };
 }

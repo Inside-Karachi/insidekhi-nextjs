@@ -74,7 +74,7 @@ async function getUsageCount(
   categoryId: number
 ): Promise<{ listingsCount: number; eventsCount: number }> {
   const { rows: listingRows } = await query(
-    "SELECT COUNT(*)::int AS count FROM public.listings WHERE category_id = $1",
+    "SELECT COUNT(DISTINCT listing_id)::int AS count FROM public.listing_categories WHERE category_id = $1",
     [categoryId]
   );
   const { rows: eventRows } = await query(

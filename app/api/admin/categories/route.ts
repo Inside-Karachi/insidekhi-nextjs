@@ -150,9 +150,12 @@ export async function GET(request: NextRequest) {
       categoryMap.set(cat.id, { name: cat.name, slug: cat.slug });
     });
 
-    // Fetch all listings to count them (manual aggregation for accuracy)
+    // Count published listings per category via junction (supports multi-category)
     const { rows: allListings } = await query(
-      `SELECT category_id FROM public.listings WHERE status = 'published'`
+      `SELECT lc.category_id
+       FROM public.listing_categories lc
+       INNER JOIN public.listings l ON l.id = lc.listing_id
+       WHERE l.status = 'published'`
     );
 
     const listingCountMap = new Map<number, number>();

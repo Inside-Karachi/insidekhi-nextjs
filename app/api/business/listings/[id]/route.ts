@@ -582,6 +582,23 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       updateError = error as Error & { code?: string };
     }
 
+    if (!updateError && updateKeys.includes("category_id") && updatedListing) {
+      try {
+        const { syncListingCategories } = await import(
+          "@/lib/listings/sync-listing-categories"
+        );
+        const catId = (updatedListing as { category_id?: number | null })
+          .category_id;
+        await syncListingCategories(
+          listingId,
+          catId != null ? [catId] : [],
+          catId,
+        );
+      } catch (syncError) {
+        console.error("Failed to sync listing categories:", syncError);
+      }
+    }
+
     if (updateError) {
       logDbError(
         "[PATCH /api/business/listings/[id]] Direct listing update failed",

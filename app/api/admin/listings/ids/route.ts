@@ -58,7 +58,12 @@ export async function GET(request: NextRequest) {
       const categoryIdNum = parseInt(categoryId);
       if (!isNaN(categoryIdNum)) {
         params.push(categoryIdNum);
-        whereClauses.push(`category_id = $${params.length}`);
+        whereClauses.push(
+          `EXISTS (
+             SELECT 1 FROM listing_categories lc
+             WHERE lc.listing_id = listings.id AND lc.category_id = $${params.length}
+           )`,
+        );
       }
     }
 

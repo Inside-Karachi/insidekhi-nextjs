@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { v4 as uuidv4 } from "uuid";
+import { sendPasswordResetEmail } from "@/lib/emails/send-password-reset";
 
 export async function POST(request: NextRequest) {
   try {
@@ -32,10 +33,11 @@ export async function POST(request: NextRequest) {
 
     // Verify email exists in DB
     const { rows: users } = await query(
-      "SELECT id FROM auth.users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+      "SELECT id, email FROM auth.users WHERE LOWER(email) = LOWER($1) LIMIT 1",
       [email]
     );
 
+    let emailSent = false;
     if (users.length > 0) {
       const user = users[0];
       const recoveryToken = uuidv4();
@@ -50,9 +52,38 @@ export async function POST(request: NextRequest) {
         [recoveryToken, tokenSentAt, user.id]
       );
 
-      // In real prod this would send an email with the link:
-      // `${process.env.NEXT_PUBLIC_SITE_URL}/auth/reset-password?code=${recoveryToken}`
-      console.log(`[PASSWORD RESET LINK]: ${process.env.NEXT_PUBLIC_SITE_URL}/auth/reset-password?code=${recoveryToken}`);
+      // Build reset link
+      const resetLink = `${process.env.NEXT_PUBLIC_SITE_URL}/reset-password?code=${recoveryToken}`;
+
+      // Get user profile for full name
+      const { rows: profiles } = await query(
+        "SELECT full_name FROM public.profiles WHERE id = $1 LIMIT 1",
+        [user.id]
+      );
+      const fullName = profiles[0]?.full_name || undefined;
+
+      // Send password reset email
+      const emailResult = await sendPasswordResetEmail({
+        email: user.email,
+        fullName,
+        resetLink,
+        expiryHours: 24,
+      });
+
+      if (emailResult.success) {
+        console.log(`[PASSWORD RESET EMAIL SENT]: ${user.email}`, {
+          messageId: emailResult.messageId,
+        });
+        emailSent = true;
+      } else {
+        console.error(`[PASSWORD RESET EMAIL FAILED]: ${user.email}`, {
+          error: emailResult.error,
+        });
+        // Still log the reset token link for debugging in case email fails
+        console.log(
+          `[PASSWORD RESET LINK (BACKUP)]: ${resetLink}`
+        );
+      }
     }
 
     // Log successful password reset request
@@ -71,8 +102,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message:
-        "Password reset instructions have been sent to your email address.",
+      emailSent,
+      message: emailSent
+        ? "Password reset instructions have been sent to your email address."
+        : "Password reset request processed. Please check your email for further instructions.",
     });
   } catch (error) {
     console.error("Password reset error:", error);

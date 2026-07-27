@@ -1,5 +1,4 @@
-import { createServerSupabase } from "@/lib/supabase/server";
-import type { Json } from "@/types/supabase";
+import { query } from "@/lib/db";
 
 export type AuditAction =
   // User Management
@@ -58,37 +57,34 @@ export interface AuditLogData {
   user_agent?: string;
 }
 
+// Callers commonly fall back to the literal string "unknown" when no IP
+// header is present; `inet` rejects anything that isn't a valid address.
+const IP_REGEX = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-fA-F:]+:[0-9a-fA-F:]*$/;
+
 export async function logAuditEvent(data: AuditLogData) {
   try {
-    const supabase = await createServerSupabase({ useServiceRole: true });
+    const ipAddress =
+      data.ip_address && IP_REGEX.test(data.ip_address)
+        ? data.ip_address
+        : null;
 
-    // Get client IP if in server environment
-    let ip_address: string | null = data.ip_address || null;
-    if (!ip_address && typeof window === "undefined") {
-      // In server environment, use null instead of "server" string
-      // to avoid inet type error
-      ip_address = null;
-    }
-
-    const auditData = {
-      admin_id: data.admin_id,
-      user_id: data.user_id,
-      action: data.action,
-      entity_type: data.entity_type,
-      entity_id: data.entity_id,
-      old_values: (data.old_values || null) as Json | null,
-      new_values: (data.new_values || null) as Json | null,
-      metadata: (data.metadata || null) as Json | null,
-      ip_address: ip_address || null,
-      user_agent: data.user_agent || null,
-    };
-
-    const { error } = await supabase.from("audit_logs").insert(auditData);
-
-    if (error) {
-      console.error("Failed to log audit event:", error);
-      // Don't throw error to avoid breaking the main operation
-    }
+    await query(
+      `INSERT INTO audit_logs
+         (admin_id, user_id, action, entity_type, entity_id, old_values, new_values, metadata, ip_address, user_agent, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+      [
+        data.admin_id || null,
+        data.user_id || null,
+        data.action,
+        data.entity_type || null,
+        data.entity_id || null,
+        data.old_values ? JSON.stringify(data.old_values) : null,
+        data.new_values ? JSON.stringify(data.new_values) : null,
+        data.metadata ? JSON.stringify(data.metadata) : null,
+        ipAddress,
+        data.user_agent || null,
+      ],
+    );
   } catch (error) {
     console.error("Audit logging error:", error);
     // Don't throw error to avoid breaking the main operation

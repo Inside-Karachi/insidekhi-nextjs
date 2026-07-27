@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { v4 as uuidv4 } from "uuid";
+import { sendEmailVerification } from "@/lib/emails/send-email-verification";
 
 // Rate limiting configuration
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
@@ -104,15 +105,43 @@ export async function POST(request: Request) {
           [confirmationToken, now, user.id],
         );
 
+        // Get user's full name for personalized email
+        const { rows: profiles } = await query(
+          "SELECT full_name FROM public.profiles WHERE id = $1 LIMIT 1",
+          [user.id]
+        );
+        const fullName = profiles[0]?.full_name || undefined;
+
+        // Build verification link
         const baseUrl = (
           process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"
         ).replace(/\/+$/, "");
-        console.log(
-          `[VERIFICATION EMAIL LINK]: ${baseUrl}/api/auth/callback?token=${confirmationToken}`,
-        );
+        const verificationLink = `${baseUrl}/api/auth/callback?token=${confirmationToken}`;
+
+        // Send verification email
+        const emailResult = await sendEmailVerification({
+          email: normalizedEmail,
+          fullName,
+          verificationLink,
+          expiryHours: 7,
+        });
+
+        if (emailResult.success) {
+          console.log(`[VERIFICATION EMAIL SENT]: ${normalizedEmail}`, {
+            messageId: emailResult.messageId,
+          });
+        } else {
+          console.error(`[VERIFICATION EMAIL FAILED]: ${normalizedEmail}`, {
+            error: emailResult.error,
+          });
+          // Still log the verification link for debugging
+          console.log(
+            `[VERIFICATION EMAIL LINK (BACKUP)]: ${verificationLink}`
+          );
+        }
       }
     } catch (dbError) {
-      console.error("RESEND VERIFICATION: Failed to resend email:", dbError);
+      console.error("RESEND VERIFICATION: Failed to send email:", dbError);
 
       return NextResponse.json(
         {

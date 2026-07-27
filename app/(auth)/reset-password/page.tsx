@@ -19,13 +19,11 @@ import {
 import { AuthBackground } from "@/components/auth/AuthBackground";
 import { AuthFormPanel, WelcomePanel } from "@/components/auth/GlassPanel";
 import { useToast } from "@/hooks/use-toast";
-import { createClient } from "@/lib/supabase/client";
 
 function ResetPasswordForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { toast } = useToast();
-  const supabase = createClient();
 
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -35,20 +33,12 @@ function ResetPasswordForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isValidToken, setIsValidToken] = useState<boolean | null>(null);
+  const [code, setCode] = useState<string | null>(null);
 
   useEffect(() => {
-    // Supabase may deliver tokens as query params OR hash fragment
-    let accessToken = searchParams.get("access_token");
-    let refreshToken = searchParams.get("refresh_token");
+    const resetCode = searchParams.get("code") || searchParams.get("token");
 
-    if ((!accessToken || !refreshToken) && typeof window !== "undefined") {
-      const hash = window.location.hash.substring(1);
-      const hashParams = new URLSearchParams(hash);
-      accessToken = accessToken || hashParams.get("access_token");
-      refreshToken = refreshToken || hashParams.get("refresh_token");
-    }
-
-    if (!accessToken || !refreshToken) {
+    if (!resetCode) {
       setError(
         "Invalid or expired reset link. Please request a new password reset.",
       );
@@ -56,34 +46,9 @@ function ResetPasswordForm() {
       return;
     }
 
-    const setSession = async () => {
-      try {
-        const { error } = await supabase.auth.setSession({
-          access_token: accessToken!,
-          refresh_token: refreshToken!,
-        });
-
-        if (error) {
-          setError(
-            "Invalid or expired reset link. Please request a new password reset.",
-          );
-          setIsValidToken(false);
-        } else {
-          setIsValidToken(true);
-          if (typeof window !== "undefined") {
-            window.history.replaceState(null, "", window.location.pathname);
-          }
-        }
-      } catch {
-        setError(
-          "Invalid or expired reset link. Please request a new password reset.",
-        );
-        setIsValidToken(false);
-      }
-    };
-
-    setSession();
-  }, [searchParams, supabase.auth]);
+    setCode(resetCode);
+    setIsValidToken(true);
+  }, [searchParams]);
 
   const validatePassword = (password: string): string | null => {
     if (password.length < 8) {
@@ -122,19 +87,20 @@ function ResetPasswordForm() {
     }
 
     try {
-      const { error } = await supabase.auth.updateUser({
-        password: password,
+      const response = await fetch("/api/auth/update-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, password }),
       });
 
-      if (error) {
-        console.error("Password update error:", error);
-        setError(
-          error.message || "Failed to update password. Please try again.",
-        );
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.error || "Failed to update password. Please try again.");
         toast({
           variant: "destructive",
           title: "Error",
-          description: error.message || "Failed to update password.",
+          description: data.error || "Failed to update password.",
         });
       } else {
         setIsSuccess(true);

@@ -31,6 +31,12 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("Fetch current user API error:", error);
-    return NextResponse.json({ user: null }, { status: 500 });
+    // A profile/database failure does not invalidate the signed session cookie.
+    // Return an explicit service error so clients can distinguish this from a
+    // valid unauthenticated `{ user: null }` response.
+    return NextResponse.json(
+      { error: "Unable to verify the current user" },
+      { status: 503 },
+    );
   }
 }

@@ -10,6 +10,10 @@ import {
   stableReorderBySearchRank,
 } from "@/lib/listings/search-relevance";
 import { OPEN_NOW_EXISTS_CLAUSE } from "@/lib/listings/query-paginated-listings";
+import {
+  resolveCategoryIdScope,
+  listingCategoriesExistsClause,
+} from "@/lib/listings/category-scope";
 import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
 
@@ -63,28 +67,23 @@ export default async function CategoryListingsPage({
     notFound();
   }
 
-  // Pre-compute category names array for filtering
-  let categoryNamesForFilter: string[] = [category.name];
-
-  if (category.parent_id === null) {
-    // Parent category - get all subcategories
-    const { rows: subcategories } = await query(
-      "SELECT name FROM categories WHERE parent_id = $1",
-      [category.id]
-    );
-    categoryNamesForFilter = [
-      category.name,
-      ...subcategories.map((sub) => sub.name),
-    ];
-  }
+  // Pre-compute category ids in scope (self + subcategories if a parent) for
+  // filtering via the listing_categories junction table - a listing tagged
+  // with this category only as a secondary category must still match.
+  const categoryIdsForFilter = await resolveCategoryIdScope(category.id);
 
   // Build the WHERE clause dynamically
   const whereClauses: string[] = ["status = 'published'", "is_featured = false"];
   const queryParams: unknown[] = [];
 
-  // Filter by category names
-  queryParams.push(categoryNamesForFilter);
-  whereClauses.push(`category_name = ANY($${queryParams.length})`);
+  // Filter by category ids via the junction table
+  queryParams.push(categoryIdsForFilter);
+  whereClauses.push(
+    listingCategoriesExistsClause(
+      "listings_with_details.id",
+      queryParams.length,
+    ),
+  );
 
   // Apply search filter
   if (resolvedSearchParams.search && searchTermResolved) {
@@ -298,10 +297,10 @@ export default async function CategoryListingsPage({
 
   // Fetch featured listings separately
   const { rows: featuredListingsRaw } = await query(
-    `SELECT * FROM listings_with_details 
-     WHERE status = 'published' AND is_featured = true AND category_name = ANY($1) 
+    `SELECT * FROM listings_with_details
+     WHERE status = 'published' AND is_featured = true AND ${listingCategoriesExistsClause("listings_with_details.id", 1)}
      ORDER BY avg_rating DESC LIMIT 20`,
-    [categoryNamesForFilter]
+    [categoryIdsForFilter]
   );
 
   // Fetch images for all listed items

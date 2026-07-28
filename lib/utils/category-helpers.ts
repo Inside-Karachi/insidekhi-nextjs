@@ -15,72 +15,72 @@ const categoryCache = new Map<
   }
 >();
 
+const FOOD_RELATED_SLUGS = [
+  "eat-drink",
+  "eat-and-drink",
+  "food",
+  "restaurants",
+  "dining",
+];
+
 /**
- * Check if a listing category is restaurant/food-related
- * Handles both direct categories and subcategories via parent lookup
+ * Check if any of a listing's categories are restaurant/food-related.
+ * Handles both direct categories and subcategories via parent lookup. A
+ * listing tagged as food-related only via a secondary category (not its
+ * legacy primary one) should still match, so this takes the full set of
+ * category ids for the listing rather than a single id.
  *
- * @param categoryId - The category ID from the listing
- * @returns Promise<boolean> - True if category or parent is food-related
+ * @param categoryIds - All category IDs for the listing (see getListingCategoryIds)
+ * @returns Promise<boolean> - True if any category or its parent is food-related
  */
 export async function isRestaurantCategory(
-  categoryId: number | null | undefined,
+  categoryIds: Array<number | null | undefined> | null | undefined,
 ): Promise<boolean> {
-  if (!categoryId) return false;
+  const ids = [
+    ...new Set(
+      (categoryIds ?? []).filter(
+        (id): id is number => typeof id === "number" && id > 0,
+      ),
+    ),
+  ];
+  if (ids.length === 0) return false;
 
-  // Check cache first
-  const cached = categoryCache.get(categoryId);
-  if (cached !== undefined) {
-    return cached.isRestaurant;
-  }
+  const uncached = ids.filter((id) => !categoryCache.has(id));
 
-  try {
-    // Fetch category with optional parent in single query
-    const { rows } = await query(
-      `SELECT c.id, c.slug, p.slug AS parent_slug
-       FROM categories c
-       LEFT JOIN categories p ON p.id = c.parent_id
-       WHERE c.id = $1
-       LIMIT 1`,
-      [categoryId],
-    );
-    const category = rows[0];
+  if (uncached.length > 0) {
+    try {
+      const { rows } = await query(
+        `SELECT c.id, c.slug, p.slug AS parent_slug
+         FROM categories c
+         LEFT JOIN categories p ON p.id = c.parent_id
+         WHERE c.id = ANY($1::int[])`,
+        [uncached],
+      );
 
-    if (!category) {
+      for (const category of rows) {
+        const categorySlug = String(category.slug).toLowerCase();
+        const parentSlug = category.parent_slug
+          ? String(category.parent_slug).toLowerCase()
+          : null;
+
+        const isRestaurant =
+          FOOD_RELATED_SLUGS.some((slug) => categorySlug.includes(slug)) ||
+          (parentSlug !== null &&
+            FOOD_RELATED_SLUGS.some((slug) => parentSlug.includes(slug)));
+
+        categoryCache.set(Number(category.id), {
+          slug: categorySlug,
+          parentSlug,
+          isRestaurant,
+        });
+      }
+    } catch (error) {
+      console.error("[CATEGORY] Error checking restaurant category:", error);
       return false;
     }
-
-    // Extract slugs
-    const categorySlug = String(category.slug).toLowerCase();
-    const parentSlug = category.parent_slug
-      ? String(category.parent_slug).toLowerCase()
-      : null;
-
-    // Check if current category or parent is food-related
-    const foodRelatedSlugs = [
-      "eat-drink",
-      "eat-and-drink",
-      "food",
-      "restaurants",
-      "dining",
-    ];
-
-    const isRestaurant =
-      foodRelatedSlugs.some((slug) => categorySlug.includes(slug)) ||
-      (parentSlug !== null &&
-        foodRelatedSlugs.some((slug) => parentSlug.includes(slug)));
-
-    // Cache the result
-    categoryCache.set(categoryId, {
-      slug: categorySlug,
-      parentSlug,
-      isRestaurant,
-    });
-
-    return isRestaurant;
-  } catch (error) {
-    console.error("[CATEGORY] Error checking restaurant category:", error);
-    return false;
   }
+
+  return ids.some((id) => categoryCache.get(id)?.isRestaurant === true);
 }
 
 /**

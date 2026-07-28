@@ -34,7 +34,14 @@ export async function GET(request: NextRequest) {
               is_featured, avg_rating, review_count
        FROM listings_with_details
        WHERE status = 'published'
-         AND (name ILIKE $1 OR description ILIKE $1 OR address ILIKE $1 OR category_name ILIKE $1)
+         AND (
+           name ILIKE $1 OR description ILIKE $1 OR address ILIKE $1
+           OR EXISTS (
+             SELECT 1 FROM listing_categories lc
+             JOIN categories c ON c.id = lc.category_id
+             WHERE lc.listing_id = listings_with_details.id AND c.name ILIKE $1
+           )
+         )
        LIMIT $2`,
       [searchTerm, Math.min(50, limit * 3)],
     );

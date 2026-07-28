@@ -13,6 +13,7 @@ import { MenuImagesViewer } from "@/components/listing/MenuImagesViewer";
 import { getListingHeroImages } from "@/lib/utils/listing-images";
 import { getFavoritedListingIdsForUser } from "@/lib/utils/favorites-server";
 import { isRestaurantCategory } from "@/lib/utils/category-helpers";
+import { getListingCategoryIds } from "@/lib/listings/sync-listing-categories";
 import { MessageSquare } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { PremiumHeading } from "@/components/brand/Typography";
@@ -89,6 +90,7 @@ export default async function ListingPage({ params }: ListingPageProps) {
     branchesResult,
     _openingHoursResult,
     featuresResult,
+    listingCategoryIds,
   ] = await Promise.all([
     query(
       `SELECT * FROM listing_images
@@ -131,6 +133,7 @@ export default async function ListingPage({ params }: ListingPageProps) {
        WHERE lf.listing_id = $1 AND m.is_active = true`,
       [listingId],
     ),
+    getListingCategoryIds(listingId),
   ]);
 
   const images = imagesResult.rows;
@@ -170,7 +173,11 @@ export default async function ListingPage({ params }: ListingPageProps) {
     listingId,
   );
 
-  const isRestaurant = await isRestaurantCategory(listing.category_id as number | null);
+  const isRestaurant = await isRestaurantCategory(
+    listingCategoryIds.length > 0
+      ? listingCategoryIds
+      : [listing.category_id as number | null],
+  );
 
   // Calculate section availability flags based on actual data
   const hasMenu = isRestaurant && (menuCount ?? 0) > 0;
@@ -462,7 +469,13 @@ export default async function ListingPage({ params }: ListingPageProps) {
               <Suspense fallback={<SimilarListingsSkeleton count={4} />}>
                 <SimilarListingsContainer
                   listingId={listing.id}
-                  categoryId={listing.category_id}
+                  categoryIds={
+                    listingCategoryIds.length > 0
+                      ? listingCategoryIds
+                      : listing.category_id
+                        ? [listing.category_id as number]
+                        : []
+                  }
                 />
               </Suspense>
             </div>

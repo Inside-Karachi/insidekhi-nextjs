@@ -10,6 +10,7 @@ import {
   isValidListingRow,
   sanitizeListingField,
 } from "@/lib/utils/export-import-utils";
+import { syncListingCategories } from "@/lib/listings/sync-listing-categories";
 
 import type {
   SimulatedImportResult,
@@ -40,6 +41,8 @@ type ListingRecordMeta = {
   branchesJson?: string | null;
   branchOpeningHoursJson?: string | null;
   sourceFormat: "client" | "export";
+  /** All category ids resolved from the CSV's (possibly comma-separated) Categories cell, primary first. */
+  categoryIds: number[];
 };
 
 interface ListingTransformResult {
@@ -1013,8 +1016,12 @@ async function transformRecordToListing(
     }
   }
 
-  // Handle multiple categories properly with caching
+  // Handle multiple categories: resolve every name in the (possibly
+  // comma-separated) cell, not just the first match, so all of them get
+  // written to listing_categories. The first resolved id remains the
+  // primary/legacy listings.category_id, preserving prior behavior.
   let categoryId = null;
+  const resolvedCategoryIds: number[] = [];
   if (categories && categories.trim()) {
     const categoryNames = categories
       .split(",")
@@ -1034,11 +1041,14 @@ async function transformRecordToListing(
       );
 
       if (resolvedId) {
-        categoryId = resolvedId;
+        if (categoryId === null) categoryId = resolvedId;
+        if (!resolvedCategoryIds.includes(resolvedId)) {
+          resolvedCategoryIds.push(resolvedId);
+        }
         if (fieldStats) {
           fieldStats.details.categories.processed++;
         }
-        break;
+        continue;
       }
 
       if (fieldStats) {
@@ -1280,6 +1290,7 @@ async function transformRecordToListing(
           ? normalizeOptionalText(branchOpeningHours)
           : null,
       sourceFormat: isClientFormat ? "client" : "export",
+      categoryIds: resolvedCategoryIds,
     },
   };
 }
@@ -1732,6 +1743,25 @@ async function processBatchTransactionally(
           if (fieldStats) {
             fieldStats.details.openingHours.processed +=
               rpcResult.opening_hours_processed;
+          }
+        }
+
+        // Write every category resolved from the CSV cell to the
+        // listing_categories junction table (not just the primary that
+        // import_listing_transactionally already set on listings.category_id).
+        if (meta.categoryIds.length > 0) {
+          try {
+            await syncListingCategories(
+              rpcResult.listing_id,
+              meta.categoryIds,
+              listingData.category_id as number | null,
+            );
+          } catch (error) {
+            console.error(
+              `Failed to sync listing_categories for listing ${rpcResult.listing_id}:`,
+              error,
+            );
+            throw new Error("Failed to sync listing categories");
           }
         }
 

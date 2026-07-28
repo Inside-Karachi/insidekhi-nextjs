@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { createNotification } from "@/lib/notifications/service";
+import { getListingCategoryIdsMap } from "@/lib/listings/sync-listing-categories";
 import type { Database } from "@/types/supabase";
 
 export const dynamic = "force-dynamic";
@@ -77,18 +78,23 @@ export async function GET(request: NextRequest) {
     }
 
     const listingIds = listings.map((listing) => listing.id);
-    const categoryIds = [
-      ...new Set(listings.map((l) => l.category_id).filter((id) => id != null)),
-    ];
+    const categoryIdsByListing = await getListingCategoryIdsMap(listingIds);
+    const allCategoryIds = new Set<number>();
+    for (const ids of categoryIdsByListing.values()) {
+      ids.forEach((id) => allCategoryIds.add(id));
+    }
+    listings.forEach((l) => {
+      if (l.category_id != null) allCategoryIds.add(l.category_id);
+    });
     const ownerIds = [
       ...new Set(listings.map((l) => l.owner_id).filter((id) => id != null)),
     ];
 
     const [categoriesResult, ownersResult] = await Promise.all([
-      categoryIds.length > 0
+      allCategoryIds.size > 0
         ? query(
             `SELECT id, name, icon_name FROM categories WHERE id = ANY($1::int[])`,
-            [categoryIds],
+            [[...allCategoryIds]],
           )
         : { rows: [] },
       ownerIds.length > 0
@@ -152,12 +158,19 @@ export async function GET(request: NextRequest) {
         ]),
     );
 
-    const listingsWithRequestContext = listings.map((listing) => ({
-      ...listing,
-      categories: categoryById.get(listing.category_id) || null,
-      profiles: ownerById.get(listing.owner_id) || null,
-      deletion_request: deleteRequestByListingId.get(listing.id) || null,
-    }));
+    const listingsWithRequestContext = listings.map((listing) => {
+      const ids =
+        categoryIdsByListing.get(listing.id) ??
+        (listing.category_id != null ? [listing.category_id] : []);
+      return {
+        ...listing,
+        categories: ids
+          .map((id) => categoryById.get(id))
+          .filter((c): c is { id: number; name: string; icon_name: string | null } => !!c),
+        profiles: ownerById.get(listing.owner_id) || null,
+        deletion_request: deleteRequestByListingId.get(listing.id) || null,
+      };
+    });
 
     const [draftResult, pendingResult, publishedResult, rejectedResult] =
       await Promise.all([

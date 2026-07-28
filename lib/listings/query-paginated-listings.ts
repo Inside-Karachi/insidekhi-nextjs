@@ -5,6 +5,10 @@ import {
   compareSearchRankThenIds,
   sortFetchedListingsBySearchRelevance,
 } from "@/lib/listings/search-relevance";
+import {
+  resolveCategoryBySlugWithScope,
+  listingCategoriesExistsClause,
+} from "@/lib/listings/category-scope";
 
 export type QueryListingsFilters = {
   page?: number;
@@ -48,27 +52,6 @@ export const OPEN_NOW_EXISTS_CLAUSE = `EXISTS (
     )
 )`;
 
-async function resolveCategoryNames(categorySlug?: string | null) {
-  if (!categorySlug || categorySlug === "all") return [] as string[];
-
-  const { rows: catRows } = await query(
-    `SELECT id, name, parent_id FROM categories WHERE slug = $1 LIMIT 1`,
-    [categorySlug],
-  );
-  const cat = catRows[0];
-  if (!cat) return [] as string[];
-
-  if (cat.parent_id === null) {
-    const { rows: subs } = await query(
-      `SELECT name FROM categories WHERE parent_id = $1`,
-      [cat.id],
-    );
-    return [String(cat.name), ...subs.map((s) => String(s.name))];
-  }
-
-  return [String(cat.name)];
-}
-
 export async function attachListingImages(listings: ListingRow[]) {
   const listingIds = listings
     .map((l) => l.id)
@@ -108,16 +91,17 @@ export async function queryPaginatedListings(filters: QueryListingsFilters) {
     whereClauses.push("is_featured = false");
   }
 
-  const categoryNames = await resolveCategoryNames(filters.categorySlug);
-  if (categoryNames.length > 0) {
-    queryParams.push(categoryNames);
-    whereClauses.push(`EXISTS (
-      SELECT 1
-      FROM listing_categories lc
-      JOIN categories c ON c.id = lc.category_id
-      WHERE lc.listing_id = listings_with_details.id
-        AND c.name = ANY($${queryParams.length})
-    )`);
+  const resolvedCategory = await resolveCategoryBySlugWithScope(
+    filters.categorySlug,
+  );
+  if (resolvedCategory && resolvedCategory.categoryIds.length > 0) {
+    queryParams.push(resolvedCategory.categoryIds);
+    whereClauses.push(
+      listingCategoriesExistsClause(
+        "listings_with_details.id",
+        queryParams.length,
+      ),
+    );
   }
 
   const searchTerm = filters.search?.trim()

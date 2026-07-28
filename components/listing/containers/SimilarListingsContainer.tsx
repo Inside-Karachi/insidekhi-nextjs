@@ -1,4 +1,5 @@
 import { query } from "@/lib/db";
+import { listingCategoriesExistsClause } from "@/lib/listings/category-scope";
 import { SimilarListingsCarousel } from "@/components/listing/SimilarListingsCarousel";
 import { Badge } from "@/components/ui/badge";
 import { PremiumHeading } from "@/components/brand/Typography";
@@ -47,35 +48,37 @@ const categoryColorSchemes: Record<
 
 interface SimilarListingsContainerProps {
   listingId: number;
-  categoryId: number | null;
+  categoryIds: number[];
 }
 
 export async function SimilarListingsContainer({
   listingId,
-  categoryId,
+  categoryIds,
 }: SimilarListingsContainerProps) {
-  // Resolve the parent category so we can match siblings (e.g. all "Eat & Drink" subcategories)
+  // Resolve the parent(s) of the listing's own categories so we can match
+  // siblings (e.g. all "Eat & Drink" subcategories), covering every category
+  // the listing has - not just its legacy primary one.
   let relatedCategoryIds: number[] = [];
 
-  if (categoryId) {
+  if (categoryIds.length > 0) {
     const { rows: categoryRows } = await query(
-      `SELECT id, parent_id FROM categories WHERE id = $1 LIMIT 1`,
-      [categoryId],
+      `SELECT id, parent_id FROM categories WHERE id = ANY($1::int[])`,
+      [categoryIds],
     );
-    const category = categoryRows[0];
+    const parentIds = new Set<number>(
+      categoryRows.map((c) => Number(c.parent_id ?? c.id)),
+    );
 
-    if (category) {
-      const parentId = category.parent_id ?? category.id;
-
-      // Get all categories under the same parent (siblings + self)
+    if (parentIds.size > 0) {
+      // Get all categories under the same parent(s) (siblings + self)
       const { rows: siblingCategories } = await query(
-        `SELECT id FROM categories WHERE parent_id = $1`,
-        [parentId],
+        `SELECT id FROM categories WHERE parent_id = ANY($1::int[])`,
+        [[...parentIds]],
       );
 
       relatedCategoryIds = [
-        parentId,
-        ...siblingCategories.map((c) => c.id as number),
+        ...parentIds,
+        ...siblingCategories.map((c) => Number(c.id)),
       ];
     }
   }
@@ -85,7 +88,12 @@ export async function SimilarListingsContainer({
 
   if (relatedCategoryIds.length > 0) {
     queryParams.push(relatedCategoryIds);
-    whereClauses.push(`category_id = ANY($${queryParams.length})`);
+    whereClauses.push(
+      listingCategoriesExistsClause(
+        "listings_with_details.id",
+        queryParams.length,
+      ),
+    );
   }
 
   const { rows: similarListings } = await query(

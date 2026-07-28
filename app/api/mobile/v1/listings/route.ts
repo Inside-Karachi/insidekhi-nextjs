@@ -13,6 +13,10 @@ import {
 } from "@/lib/mobile/mappers";
 import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
 import { sortFetchedListingsBySearchRelevance } from "@/lib/listings/search-relevance";
+import {
+  resolveCategoryIdScope,
+  listingCategoriesExistsClause,
+} from "@/lib/listings/category-scope";
 
 /** Explicit column list for `listings_with_details` - never use `*`. */
 const LISTING_CARD_SQL_COLUMNS =
@@ -83,40 +87,23 @@ export const GET = mobileRoute(async (request: NextRequest) => {
 
   // Resolve a category id (per the mobile contract, `category` is the
   // stringified integer id returned by GET /categories, not a slug) to the
-  // set of category names covering it and its subcategories.
-  let categoryNames: string[] = [];
+  // set of category ids covering it and its subcategories.
+  let categoryIds: number[] = [];
   if (categoryParam && categoryParam !== "all") {
     const categoryId = Number(categoryParam);
     if (Number.isInteger(categoryId) && categoryId > 0) {
-      const { rows: categoryRows } = await query(
-        `SELECT id, name, parent_id FROM categories WHERE id = $1`,
-        [categoryId],
-      );
-      const category = categoryRows[0];
-
-      if (category) {
-        if (category.parent_id === null) {
-          const { rows: subcategories } = await query(
-            `SELECT name FROM categories WHERE parent_id = $1`,
-            [category.id],
-          );
-          categoryNames = [
-            category.name,
-            ...subcategories.map((s) => s.name),
-          ];
-        } else {
-          categoryNames = [category.name];
-        }
-      }
+      categoryIds = await resolveCategoryIdScope(categoryId);
     }
   }
 
   const whereClauses: string[] = [`status = 'published'`];
   const params: unknown[] = [];
 
-  if (categoryNames.length > 0) {
-    params.push(categoryNames);
-    whereClauses.push(`category_name = ANY($${params.length}::text[])`);
+  if (categoryIds.length > 0) {
+    params.push(categoryIds);
+    whereClauses.push(
+      listingCategoriesExistsClause("listings_with_details.id", params.length),
+    );
   }
 
   if (sanitizedSearch) {

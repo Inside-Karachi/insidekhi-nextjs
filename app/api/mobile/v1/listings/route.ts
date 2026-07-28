@@ -56,6 +56,10 @@ const SUPPORTED_SORTS = new Set([
  * `category` is the stringified integer id from GET /categories (contract
  * section 1, IDs) - not a slug. An id with no matching category (or a
  * non-numeric value) is treated as no filter, same as omitting it.
+ *
+ * `primary_only=true` restricts the category match to each listing's
+ * primary category, ignoring secondary tags - use for curated single-theme
+ * carousels where a listing's secondary tags shouldn't qualify it.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
@@ -84,6 +88,10 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   }
   const minRating = searchParams.get("rating");
   const excludeFeatured = searchParams.get("exclude_featured") === "true";
+  // Curated single-identity carousels (e.g. Home's "Retail Therapy") pass
+  // this so a listing's secondary category tags don't qualify it - only its
+  // primary category counts.
+  const primaryOnly = searchParams.get("primary_only") === "true";
 
   // Resolve a category id (per the mobile contract, `category` is the
   // stringified integer id returned by GET /categories, not a slug) to the
@@ -102,7 +110,9 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   if (categoryIds.length > 0) {
     params.push(categoryIds);
     whereClauses.push(
-      listingCategoriesExistsClause("listings_with_details.id", params.length),
+      listingCategoriesExistsClause("listings_with_details.id", params.length, {
+        primaryOnly,
+      }),
     );
   }
 

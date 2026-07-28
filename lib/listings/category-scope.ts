@@ -50,13 +50,26 @@ export async function resolveCategoryBySlugWithScope(
   return { category, categoryIds };
 }
 
-/** SQL EXISTS clause matching a listing (by `idColumn`) against any of the given category ids via the listing_categories junction table. */
+/**
+ * SQL EXISTS clause matching a listing (by `idColumn`) against any of the
+ * given category ids via the listing_categories junction table.
+ *
+ * By default this matches primary OR secondary category links, which is
+ * right for general browse/search (a mall's food court should surface under
+ * both "Food & Dining" and "Shopping & Fashion"). Pass `primaryOnly: true`
+ * for curated single-identity surfaces (e.g. themed home-feed carousels)
+ * where a listing's secondary tags shouldn't be enough to qualify it - a
+ * restaurant secondarily tagged "Shopping Malls & Outlets" belongs under
+ * "Late Night & Desi Vibes", not "Retail Therapy".
+ */
 export function listingCategoriesExistsClause(
   idColumn: string,
   paramIndex: number,
+  options?: { primaryOnly?: boolean },
 ): string {
+  const primaryClause = options?.primaryOnly ? " AND lc.is_primary = true" : "";
   return `EXISTS (
     SELECT 1 FROM listing_categories lc
-    WHERE lc.listing_id = ${idColumn} AND lc.category_id = ANY($${paramIndex}::int[])
+    WHERE lc.listing_id = ${idColumn} AND lc.category_id = ANY($${paramIndex}::int[])${primaryClause}
   )`;
 }

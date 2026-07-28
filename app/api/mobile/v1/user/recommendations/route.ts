@@ -10,6 +10,11 @@ import {
   type ListingImageDTO,
   type ListingRowLike,
 } from "@/lib/mobile/mappers";
+import {
+  resolveCategoryIdScope,
+  listingCategoriesExistsClause,
+} from "@/lib/listings/category-scope";
+import { getListingCategoryIdsMap } from "@/lib/listings/sync-listing-categories";
 
 export const dynamic = "force-dynamic";
 
@@ -27,33 +32,20 @@ function toNumericListingRow(row: Record<string, unknown>): ListingRowLike {
 }
 
 /**
- * Resolves a category id to the set of category names it covers: a top-level
- * category expands to itself plus its subcategories, a subcategory resolves to
- * just itself. Mirrors the expansion in GET /listings so filtering is
- * consistent across the API. Returns null for an unknown/invalid id.
+ * Resolves the `category` query param (a stringified integer id per the
+ * mobile contract) to the set of category ids it covers: a top-level
+ * category expands to itself plus its subcategories, a subcategory resolves
+ * to just itself. Returns null for an unknown/invalid/"all" id.
  */
-async function resolveCategoryNames(
+async function resolveCategoryIds(
   categoryParam: string | null,
-): Promise<string[] | null> {
+): Promise<number[] | null> {
   if (!categoryParam || categoryParam === "all") return null;
   const categoryId = Number(categoryParam);
   if (!Number.isInteger(categoryId) || categoryId <= 0) return null;
 
-  const { rows } = await query(
-    `SELECT id, name, parent_id FROM categories WHERE id = $1`,
-    [categoryId],
-  );
-  const category = rows[0];
-  if (!category) return null;
-
-  if (category.parent_id === null) {
-    const { rows: subs } = await query(
-      `SELECT name FROM categories WHERE parent_id = $1`,
-      [category.id],
-    );
-    return [category.name, ...subs.map((s) => s.name)];
-  }
-  return [category.name];
+  const ids = await resolveCategoryIdScope(categoryId);
+  return ids.length > 0 ? ids : null;
 }
 
 /**
@@ -77,12 +69,13 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     ? limitRaw
     : 6;
 
-  const categoryNames = await resolveCategoryNames(
+  const categoryIdsInScope = await resolveCategoryIds(
     searchParams.get("category"),
   );
-  const hasCategory = categoryNames !== null && categoryNames.length > 0;
+  const hasCategory = categoryIdsInScope !== null;
 
-  // Active saved location + favorite categories drive the ranking.
+  // Active saved location + favorite categories (across ALL of a favorited
+  // listing's categories, not just its primary) drive the ranking.
   const [{ rows: activeRows }, { rows: favRows }] = await Promise.all([
     query(
       `SELECT latitude, longitude FROM public.user_saved_locations
@@ -90,10 +83,10 @@ export const GET = mobileRoute(async (request: NextRequest) => {
       [user.id],
     ),
     query(
-      `SELECT DISTINCT l.category_id
+      `SELECT DISTINCT lc.category_id
        FROM favorite_listings fl
-       JOIN listings l ON fl.listing_id = l.id
-       WHERE fl.user_id = $1 AND l.category_id IS NOT NULL
+       JOIN listing_categories lc ON lc.listing_id = fl.listing_id
+       WHERE fl.user_id = $1
        LIMIT 10`,
       [user.id],
     ),
@@ -110,24 +103,35 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   if (active) {
     try {
       const { rows: nearby } = await query(
-        `SELECT id, category_id, category_name, status FROM get_nearby_listings($1, $2, $3, $4)`,
+        `SELECT id, status FROM get_nearby_listings($1, $2, $3, $4)`,
         [active.latitude, active.longitude, 15000, 60],
       );
-      let published = nearby.filter((l) => l.status === "published");
+      const published = nearby.filter((l) => l.status === "published");
+      const publishedIds = published.map((l) => Number(l.id));
+
+      // get_nearby_listings() only returns each listing's legacy primary
+      // category, so pull the full category set per listing from the
+      // junction table to match on secondary categories too.
+      const categoriesByListing =
+        await getListingCategoryIdsMap(publishedIds);
 
       if (hasCategory) {
         // Scope strictly to the requested category (already distance-ordered).
-        const nameSet = new Set(categoryNames);
-        published = published.filter((l) => nameSet.has(l.category_name));
-        orderedIds = published.map((l) => Number(l.id)).slice(0, limit);
+        const scopeSet = new Set(categoryIdsInScope);
+        const inScope = published.filter((l) =>
+          (categoriesByListing.get(Number(l.id)) ?? []).some((id) =>
+            scopeSet.has(id),
+          ),
+        );
+        orderedIds = inScope.map((l) => Number(l.id)).slice(0, limit);
       } else {
         // General recs: float favorite-category matches to the top.
-        const matched = published.filter((l) =>
-          favoriteCategories.includes(Number(l.category_id)),
-        );
-        const rest = published.filter(
-          (l) => !favoriteCategories.includes(Number(l.category_id)),
-        );
+        const isFavoriteMatch = (l: { id: number | string }) =>
+          (categoriesByListing.get(Number(l.id)) ?? []).some((id) =>
+            favoriteCategories.includes(id),
+          );
+        const matched = published.filter(isFavoriteMatch);
+        const rest = published.filter((l) => !isFavoriteMatch(l));
         orderedIds = [...matched, ...rest]
           .map((l) => Number(l.id))
           .slice(0, limit);
@@ -144,15 +148,15 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     if (hasCategory) {
       ({ rows } = await query(
         `SELECT id FROM listings_with_details
-         WHERE status = 'published' AND category_name = ANY($1::text[])
+         WHERE status = 'published' AND ${listingCategoriesExistsClause("listings_with_details.id", 1)}
          ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
          LIMIT $2`,
-        [categoryNames, limit],
+        [categoryIdsInScope, limit],
       ));
     } else if (favoriteCategories.length > 0) {
       ({ rows } = await query(
         `SELECT id FROM listings_with_details
-         WHERE status = 'published' AND category_id = ANY($1::int[])
+         WHERE status = 'published' AND ${listingCategoriesExistsClause("listings_with_details.id", 1)}
          ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
          LIMIT $2`,
         [favoriteCategories, limit],

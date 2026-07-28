@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { syncListingCategories, normalizeCategoryIds } from "@/lib/listings/sync-listing-categories";
+import { syncListingCategories, normalizeCategoryIds, getListingCategoryIdsMap } from "@/lib/listings/sync-listing-categories";
 import { deleteListingsBulk } from "@/lib/utils/listing-deletion";
 
 export async function GET(request: NextRequest) {
@@ -89,9 +89,15 @@ export async function GET(request: NextRequest) {
     const creatorIds = [
       ...new Set(listings.map((l) => l.created_by).filter((id) => id != null)),
     ];
-    const categoryIds = [
-      ...new Set(listings.map((l) => l.category_id).filter((id) => id != null)),
-    ];
+    const listingIds = listings.map((l) => l.id);
+    const categoryIdsByListing = await getListingCategoryIdsMap(listingIds);
+    const allCategoryIds = new Set<number>();
+    for (const ids of categoryIdsByListing.values()) {
+      ids.forEach((id) => allCategoryIds.add(id));
+    }
+    listings.forEach((l) => {
+      if (l.category_id != null) allCategoryIds.add(l.category_id);
+    });
 
     const [creatorsResult, categoriesResult] = await Promise.all([
       creatorIds.length > 0
@@ -99,9 +105,9 @@ export async function GET(request: NextRequest) {
             creatorIds,
           ])
         : { rows: [] },
-      categoryIds.length > 0
+      allCategoryIds.size > 0
         ? query(`SELECT id, name FROM categories WHERE id = ANY($1::int[])`, [
-            categoryIds,
+            [...allCategoryIds],
           ])
         : { rows: [] },
     ]);
@@ -132,12 +138,17 @@ export async function GET(request: NextRequest) {
       data: {
         listings: listings.map((l) => {
           const creator = creatorById.get(l.created_by);
-          const category = categoryById.get(l.category_id);
+          const ids =
+            categoryIdsByListing.get(l.id) ??
+            (l.category_id != null ? [l.category_id] : []);
+          const categoryNames = ids
+            .map((id) => categoryById.get(id)?.name)
+            .filter((name): name is string => !!name);
 
           return {
             ...l,
             creator_full_name: creator?.full_name || null,
-            category_name: category?.name || null,
+            category_name: categoryNames.join(", ") || null,
           };
         }),
         pagination: {

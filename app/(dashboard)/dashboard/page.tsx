@@ -12,6 +12,8 @@ import { DashboardTabs } from "@/components/dashboard/DashboardTabs";
 import type { SavedLocation } from "@/components/dashboard/LocationSwitcher";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { query } from "@/lib/db";
+import { listingCategoriesExistsClause } from "@/lib/listings/category-scope";
+import { getListingCategoryIdsMap } from "@/lib/listings/sync-listing-categories";
 
 // Force dynamic rendering to ensure fresh data on every request
 export const dynamic = "force-dynamic";
@@ -326,13 +328,14 @@ export default async function DashboardPage() {
       `SELECT json_build_object('id', badge_id) AS badge FROM user_badges WHERE user_id = $1`,
       [user.id]
     ),
-    // 10. User Favorites (For Recommendations)
+    // 10. User Favorites (For Recommendations) - all categories of a
+    // favorited listing, not just its legacy primary one.
     query(
-      `SELECT json_build_object('category_id', l.category_id) AS listing
+      `SELECT DISTINCT lc.category_id
        FROM favorite_listings fl
-       LEFT JOIN listings l ON fl.listing_id = l.id
+       JOIN listing_categories lc ON lc.listing_id = fl.listing_id
        WHERE fl.user_id = $1
-       LIMIT 5`,
+       LIMIT 10`,
       [user.id]
     ),
     // 11. Upcoming Events (General)
@@ -482,8 +485,9 @@ export default async function DashboardPage() {
     .slice(0, 6);
 
   // --- Retrieve Recommended Listings (Favorites + Active Location) ---
-  const favoriteCategories: number[] =
-    userFavorites?.map((f) => f.listing?.category_id).filter(Boolean) || [];
+  const favoriteCategories: number[] = (userFavorites || [])
+    .map((f) => Number(f.category_id))
+    .filter((n) => Number.isInteger(n));
 
   let recommendedListings: RecommendedListing[] = [];
 
@@ -499,12 +503,18 @@ export default async function DashboardPage() {
       const published = (nearby as NearbyListingRow[]).filter(
         (l) => l.status === "published",
       );
-      const matched = published.filter((l) =>
-        favoriteCategories.includes(l.category_id),
+      // get_nearby_listings() only returns each listing's legacy primary
+      // category, so pull the full category set per listing from the
+      // junction table to match on secondary categories too.
+      const categoriesByListing = await getListingCategoryIdsMap(
+        published.map((l) => l.id),
       );
-      const rest = published.filter(
-        (l) => !favoriteCategories.includes(l.category_id),
-      );
+      const isFavoriteMatch = (l: NearbyListingRow) =>
+        (categoriesByListing.get(l.id) ?? []).some((id) =>
+          favoriteCategories.includes(id),
+        );
+      const matched = published.filter(isFavoriteMatch);
+      const rest = published.filter((l) => !isFavoriteMatch(l));
 
       recommendedListings = [...matched, ...rest].slice(0, 6).map((l) => ({
         id: l.id,
@@ -514,7 +524,7 @@ export default async function DashboardPage() {
         rating: l.avg_rating ?? undefined,
         category: l.category_name ?? undefined,
         distanceKm: l.distance_meters != null ? l.distance_meters / 1000 : undefined,
-        reason: favoriteCategories.includes(l.category_id)
+        reason: isFavoriteMatch(l)
           ? `Because you like ${l.category_name || "similar places"}`
           : "Popular near your location",
       }));
@@ -532,7 +542,7 @@ export default async function DashboardPage() {
                     (SELECT json_agg(json_build_object('rating', r.rating)) FROM reviews r WHERE r.listing_id = l.id) AS reviews
              FROM listings l
              LEFT JOIN categories c ON l.category_id = c.id
-             WHERE l.category_id = ANY($1) AND l.status = 'published'
+             WHERE l.status = 'published' AND ${listingCategoriesExistsClause("l.id", 1)}
              LIMIT 6`,
             [favoriteCategories]
           )

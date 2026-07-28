@@ -14,6 +14,7 @@ import {
   type ReviewRowLike,
 } from "@/lib/mobile/mappers";
 import { isRestaurantCategory } from "@/lib/utils/category-helpers";
+import { getListingCategoryIds } from "@/lib/listings/sync-listing-categories";
 
 export const dynamic = "force-dynamic";
 
@@ -59,7 +60,10 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
   };
   const listingId = row.id;
 
-  const isRestaurant = await isRestaurantCategory(row.category_id);
+  const listingCategoryIds = await getListingCategoryIds(listingId);
+  const isRestaurant = await isRestaurantCategory(
+    listingCategoryIds.length > 0 ? listingCategoryIds : [row.category_id],
+  );
 
   const [
     imagesRes,

@@ -8,7 +8,16 @@ type ClassifiedRow = {
   name: string;
   primaryCategory: string;
   primarySubcategory: string;
+  primaryScore: number;
   secondaryPairs: string;
+  allPairScoresJson: string;
+};
+
+type CategoryLink = {
+  listingId: number;
+  categoryId: number;
+  isPrimary: boolean;
+  relevanceScore: number;
 };
 
 // Robust CSV parser handling multi-line quoted fields and commas inside quotes
@@ -56,7 +65,7 @@ function parseCsv(content: string): string[][] {
 }
 
 async function main() {
-  console.log("=== Pushing Classified CSV Data into PostgreSQL Database ===");
+  console.log("=== Pushing Classified CSV Data & Relevance Scores into PostgreSQL ===");
 
   // 1. Load category mappings from database
   const { rows: subcatRows } = await query(`
@@ -94,7 +103,6 @@ async function main() {
     .sort();
 
   console.log(`Found ${files.length} classified CSV files to process:`);
-  files.forEach((f) => console.log(` - ${f}`));
 
   const allClassifiedRows = new Map<number, ClassifiedRow>();
 
@@ -110,7 +118,9 @@ async function main() {
     const nameIdx = header.indexOf("name");
     const primCatIdx = header.indexOf("primary_category");
     const primSubcatIdx = header.indexOf("primary_subcategory");
+    const primScoreIdx = header.indexOf("primary_relevance_score");
     const secPairsIdx = header.indexOf("secondary_pairs");
+    const allScoresIdx = header.indexOf("all_pair_scores_json");
 
     if (idIdx === -1 || primSubcatIdx === -1) {
       console.warn(`Skipping ${file}: Missing id or primary_subcategory column`);
@@ -127,14 +137,22 @@ async function main() {
       const primaryCategory = primCatIdx !== -1 ? row[primCatIdx] || "" : "";
       const primarySubcategory =
         primSubcatIdx !== -1 ? row[primSubcatIdx] || "" : "";
+      const primaryScore =
+        primScoreIdx !== -1 && row[primScoreIdx]
+          ? parseFloat(row[primScoreIdx]) || 1.0
+          : 1.0;
       const secondaryPairs = secPairsIdx !== -1 ? row[secPairsIdx] || "" : "";
+      const allPairScoresJson =
+        allScoresIdx !== -1 ? row[allScoresIdx] || "{}" : "{}";
 
       allClassifiedRows.set(listingId, {
         id: listingId,
         name,
         primaryCategory,
         primarySubcategory,
+        primaryScore,
         secondaryPairs,
+        allPairScoresJson,
       });
       fileCount++;
     }
@@ -145,12 +163,9 @@ async function main() {
     `Total unique classified listings loaded from CSVs: ${allClassifiedRows.size}`
   );
 
-  // 3. Resolve category IDs for primary & secondary assignments
+  // 3. Resolve category IDs & relevance scores for primary & secondary assignments
   const primaryUpdates: [number, number][] = [];
-  const listingCategoryMap = new Map<
-    number,
-    { primaryId: number; secondaryIds: Set<number> }
-  >();
+  const listingCategoryMap = new Map<number, Map<number, { isPrimary: boolean; score: number }>>();
   let unmappedCount = 0;
 
   function lookupCategoryId(parentStr: string, subcatStr: string): number | null {
@@ -176,7 +191,23 @@ async function main() {
     if (primaryId != null) {
       primaryUpdates.push([listing.id, primaryId]);
 
-      const secIds = new Set<number>();
+      const categoryScores = new Map<number, { isPrimary: boolean; score: number }>();
+      categoryScores.set(primaryId, {
+        isPrimary: true,
+        score: listing.primaryScore || 1.0,
+      });
+
+      // Parse JSON scores if present
+      let parsedScores: Record<string, number> = {};
+      if (listing.allPairScoresJson) {
+        try {
+          parsedScores = JSON.parse(listing.allPairScoresJson);
+        } catch {
+          // ignore invalid json
+        }
+      }
+
+      // Check secondary pairs
       if (listing.secondaryPairs && listing.secondaryPairs.trim().length > 0) {
         const pairs = listing.secondaryPairs.split(/;|\||\n/);
         for (const pair of pairs) {
@@ -193,15 +224,24 @@ async function main() {
 
           const secId = lookupCategoryId(pName, sName);
           if (secId != null && secId !== primaryId) {
-            secIds.add(secId);
+            // Find score in parsed JSON or default to 0.80
+            let secScore = 0.80;
+            const fullKeyMatch = Object.keys(parsedScores).find(
+              (k) => k.toLowerCase() === trimmed.toLowerCase()
+            );
+            if (fullKeyMatch && typeof parsedScores[fullKeyMatch] === "number") {
+              secScore = parsedScores[fullKeyMatch];
+            }
+
+            categoryScores.set(secId, {
+              isPrimary: false,
+              score: secScore,
+            });
           }
         }
       }
 
-      listingCategoryMap.set(listing.id, {
-        primaryId,
-        secondaryIds: secIds,
-      });
+      listingCategoryMap.set(listing.id, categoryScores);
     } else {
       unmappedCount++;
     }
@@ -241,8 +281,8 @@ async function main() {
   }
   console.log(`Successfully updated ${totalListingsUpdated} rows in listings.category_id.`);
 
-  // 5. Execute Sync to listing_categories join table
-  console.log("\n2/2 Syncing listing_categories join table in batches...");
+  // 5. Execute Sync to listing_categories join table with relevance_score
+  console.log("\n2/2 Syncing listing_categories join table with relevance_scores...");
   const listingIdsArray = Array.from(listingCategoryMap.keys());
   let totalJunctionInserted = 0;
 
@@ -255,19 +295,15 @@ async function main() {
       [batchIds]
     );
 
-    const inserts: { listingId: number; categoryId: number; isPrimary: boolean }[] = [];
+    const inserts: CategoryLink[] = [];
     for (const lId of batchIds) {
-      const data = listingCategoryMap.get(lId)!;
-      inserts.push({
-        listingId: lId,
-        categoryId: data.primaryId,
-        isPrimary: true,
-      });
-      for (const secId of data.secondaryIds) {
+      const categoryScores = listingCategoryMap.get(lId)!;
+      for (const [catId, data] of categoryScores.entries()) {
         inserts.push({
           listingId: lId,
-          categoryId: secId,
-          isPrimary: false,
+          categoryId: catId,
+          isPrimary: data.isPrimary,
+          relevanceScore: data.score,
         });
       }
     }
@@ -276,30 +312,32 @@ async function main() {
       const placeholders = inserts
         .map(
           (_, idx) =>
-            `($${idx * 3 + 1}::int, $${idx * 3 + 2}::int, $${idx * 3 + 3}::boolean)`
+            `($${idx * 4 + 1}::int, $${idx * 4 + 2}::int, $${idx * 4 + 3}::boolean, $${idx * 4 + 4}::numeric)`
         )
         .join(", ");
       const params: unknown[] = [];
       inserts.forEach((item) =>
-        params.push(item.listingId, item.categoryId, item.isPrimary)
+        params.push(item.listingId, item.categoryId, item.isPrimary, item.relevanceScore)
       );
 
       const res = await query(
-        `INSERT INTO listing_categories (listing_id, category_id, is_primary)
+        `INSERT INTO listing_categories (listing_id, category_id, is_primary, relevance_score)
          VALUES ${placeholders}
-         ON CONFLICT (listing_id, category_id) DO UPDATE SET is_primary = EXCLUDED.is_primary`,
+         ON CONFLICT (listing_id, category_id) DO UPDATE SET
+           is_primary = EXCLUDED.is_primary,
+           relevance_score = EXCLUDED.relevance_score`,
         params
       );
       totalJunctionInserted += res.rowCount || 0;
     }
   }
 
-  console.log(`Successfully synced ${totalJunctionInserted} rows in listing_categories.`);
+  console.log(`Successfully synced ${totalJunctionInserted} rows with relevance scores in listing_categories.`);
 
   console.log("\n=======================================================");
-  console.log("DATABASE UPDATE COMPLETE!");
+  console.log("DATABASE UPDATE & RELEVANCE SCORES COMPLETE!");
   console.log(` - Listings updated: ${totalListingsUpdated}`);
-  console.log(` - Category links saved: ${totalJunctionInserted}`);
+  console.log(` - Category links saved with relevance scores: ${totalJunctionInserted}`);
   console.log("=======================================================\n");
 
   process.exit(0);

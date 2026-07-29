@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { query } from "@/lib/db";
 
-// Cache duration: 1 hour (3600 seconds)
-const CACHE_MAX_AGE = 3600;
-const STALE_WHILE_REVALIDATE = 60;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET() {
   try {
@@ -29,11 +28,7 @@ export async function GET() {
 
     response.headers.set(
       "Cache-Control",
-      `public, s-maxage=${CACHE_MAX_AGE}, stale-while-revalidate=${STALE_WHILE_REVALIDATE}`,
-    );
-    response.headers.set(
-      "CDN-Cache-Control",
-      `public, s-maxage=${CACHE_MAX_AGE}, stale-while-revalidate=${STALE_WHILE_REVALIDATE}`,
+      "no-cache, no-store, must-revalidate",
     );
 
     return response;

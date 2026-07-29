@@ -1,0 +1,642 @@
+{
+  "new-user-no-gps-weekday-lunch": [
+    {
+      "id": 9,
+      "categoryId": 81,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.9248,
+      "breakdown": {
+        "affinity": 1,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.4346
+      }
+    },
+    {
+      "id": 17,
+      "categoryId": 82,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.9222,
+      "breakdown": {
+        "affinity": 0.9,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.7086
+      }
+    },
+    {
+      "id": 33,
+      "categoryId": 105,
+      "distanceMeters": null,
+      "openState": null,
+      "score": 0.8371,
+      "breakdown": {
+        "affinity": 0.9,
+        "proximity": 0,
+        "openNow": 0,
+        "freshness": 0.6556
+      }
+    },
+    {
+      "id": 69,
+      "categoryId": 100,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.7423,
+      "breakdown": {
+        "affinity": 0.7,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.1353
+      }
+    },
+    {
+      "id": 72,
+      "categoryId": 103,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.7045,
+      "breakdown": {
+        "affinity": 0.6,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.1953
+      }
+    },
+    {
+      "id": 50,
+      "categoryId": 93,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.6776,
+      "breakdown": {
+        "affinity": 0.6,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.2231
+      }
+    }
+  ],
+  "new-user-clifton-weekday-lunch": [
+    {
+      "id": 13,
+      "categoryId": 82,
+      "distanceMeters": 754,
+      "openState": "open",
+      "score": 0.8028,
+      "breakdown": {
+        "affinity": 0.9,
+        "proximity": 0.7778,
+        "openNow": 1,
+        "freshness": 0.083
+      }
+    },
+    {
+      "id": 9,
+      "categoryId": 81,
+      "distanceMeters": 4151,
+      "openState": "open",
+      "score": 0.7269,
+      "breakdown": {
+        "affinity": 1,
+        "proximity": 0.2507,
+        "openNow": 1,
+        "freshness": 0.4346
+      }
+    },
+    {
+      "id": 21,
+      "categoryId": 83,
+      "distanceMeters": 1842,
+      "openState": "open",
+      "score": 0.706,
+      "breakdown": {
+        "affinity": 0.8,
+        "proximity": 0.5412,
+        "openNow": 1,
+        "freshness": 0.1997
+      }
+    },
+    {
+      "id": 46,
+      "categoryId": 132,
+      "distanceMeters": 631,
+      "openState": "open",
+      "score": 0.5973,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0.8103,
+        "openNow": 1,
+        "freshness": 0.012
+      }
+    },
+    {
+      "id": 56,
+      "categoryId": 95,
+      "distanceMeters": 2049,
+      "openState": "open",
+      "score": 0.5771,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0.5051,
+        "openNow": 1,
+        "freshness": 0.8187
+      }
+    },
+    {
+      "id": 69,
+      "categoryId": 100,
+      "distanceMeters": 9071,
+      "openState": "open",
+      "score": 0.5097,
+      "breakdown": {
+        "affinity": 0.7,
+        "proximity": 0.0486,
+        "openNow": 1,
+        "freshness": 0.1353
+      }
+    }
+  ],
+  "foodie-friday-late-night": [
+    {
+      "id": 13,
+      "categoryId": 82,
+      "distanceMeters": 754,
+      "openState": "open",
+      "score": 0.8346,
+      "breakdown": {
+        "affinity": 0.9667,
+        "proximity": 0.7778,
+        "openNow": 1,
+        "freshness": 0.083
+      }
+    },
+    {
+      "id": 21,
+      "categoryId": 83,
+      "distanceMeters": 1842,
+      "openState": "open",
+      "score": 0.8001,
+      "breakdown": {
+        "affinity": 1,
+        "proximity": 0.5412,
+        "openNow": 1,
+        "freshness": 0.1997
+      }
+    },
+    {
+      "id": 28,
+      "categoryId": 18,
+      "distanceMeters": 9024,
+      "openState": "open",
+      "score": 0.5846,
+      "breakdown": {
+        "affinity": 0.95,
+        "proximity": 0.0494,
+        "openNow": 1,
+        "freshness": 0.0386
+      }
+    },
+    {
+      "id": 46,
+      "categoryId": 132,
+      "distanceMeters": 631,
+      "openState": "open",
+      "score": 0.5704,
+      "breakdown": {
+        "affinity": 0.2333,
+        "proximity": 0.8103,
+        "openNow": 1,
+        "freshness": 0.012
+      }
+    },
+    {
+      "id": 56,
+      "categoryId": 95,
+      "distanceMeters": 2049,
+      "openState": "open",
+      "score": 0.5164,
+      "breakdown": {
+        "affinity": 0.0833,
+        "proximity": 0.5051,
+        "openNow": 1,
+        "freshness": 0.8187
+      }
+    },
+    {
+      "id": 53,
+      "categoryId": 92,
+      "distanceMeters": 3684,
+      "openState": "open",
+      "score": 0.4492,
+      "breakdown": {
+        "affinity": 0.2,
+        "proximity": 0.2929,
+        "openNow": 1,
+        "freshness": 0.2607
+      }
+    }
+  ],
+  "gym-goer-weekday-early-morning": [
+    {
+      "id": 41,
+      "categoryId": 131,
+      "distanceMeters": 341,
+      "openState": "closed",
+      "score": 0.6266,
+      "breakdown": {
+        "affinity": 0.9429,
+        "proximity": 0.8926,
+        "openNow": 0.15,
+        "freshness": 0.0588
+      }
+    },
+    {
+      "id": 46,
+      "categoryId": 132,
+      "distanceMeters": 631,
+      "openState": "open",
+      "score": 0.5583,
+      "breakdown": {
+        "affinity": 0.1429,
+        "proximity": 0.8103,
+        "openNow": 1,
+        "freshness": 0.012
+      }
+    },
+    {
+      "id": 13,
+      "categoryId": 82,
+      "distanceMeters": 754,
+      "openState": "open",
+      "score": 0.5397,
+      "breakdown": {
+        "affinity": 0.1429,
+        "proximity": 0.7778,
+        "openNow": 1,
+        "freshness": 0.083
+      }
+    },
+    {
+      "id": 56,
+      "categoryId": 95,
+      "distanceMeters": 2049,
+      "openState": "open",
+      "score": 0.5168,
+      "breakdown": {
+        "affinity": 0.1429,
+        "proximity": 0.5051,
+        "openNow": 1,
+        "freshness": 0.8187
+      }
+    },
+    {
+      "id": 21,
+      "categoryId": 83,
+      "distanceMeters": 1842,
+      "openState": "open",
+      "score": 0.4936,
+      "breakdown": {
+        "affinity": 0.1429,
+        "proximity": 0.5412,
+        "openNow": 1,
+        "freshness": 0.1997
+      }
+    },
+    {
+      "id": 36,
+      "categoryId": 108,
+      "distanceMeters": 10555,
+      "openState": "open",
+      "score": 0.4204,
+      "breakdown": {
+        "affinity": 0.4571,
+        "proximity": 0.0296,
+        "openNow": 1,
+        "freshness": 0.1581
+      }
+    }
+  ],
+  "professional-weekday-11am": [
+    {
+      "id": 13,
+      "categoryId": 82,
+      "distanceMeters": 754,
+      "openState": "open",
+      "score": 0.8263,
+      "breakdown": {
+        "affinity": 0.9,
+        "proximity": 0.7778,
+        "openNow": 1,
+        "freshness": 0.083
+      }
+    },
+    {
+      "id": 21,
+      "categoryId": 83,
+      "distanceMeters": 1842,
+      "openState": "open",
+      "score": 0.7299,
+      "breakdown": {
+        "affinity": 0.8,
+        "proximity": 0.5412,
+        "openNow": 1,
+        "freshness": 0.1997
+      }
+    },
+    {
+      "id": 9,
+      "categoryId": 81,
+      "distanceMeters": 4151,
+      "openState": "open",
+      "score": 0.7056,
+      "breakdown": {
+        "affinity": 1,
+        "proximity": 0.2507,
+        "openNow": 1,
+        "freshness": 0.4346
+      }
+    },
+    {
+      "id": 46,
+      "categoryId": 132,
+      "distanceMeters": 631,
+      "openState": "open",
+      "score": 0.5878,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0.8103,
+        "openNow": 1,
+        "freshness": 0.012
+      }
+    },
+    {
+      "id": 56,
+      "categoryId": 95,
+      "distanceMeters": 2049,
+      "openState": "open",
+      "score": 0.5862,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0.5051,
+        "openNow": 1,
+        "freshness": 0.8187
+      }
+    },
+    {
+      "id": 69,
+      "categoryId": 100,
+      "distanceMeters": 9071,
+      "openState": "open",
+      "score": 0.523,
+      "breakdown": {
+        "affinity": 0.7,
+        "proximity": 0.0486,
+        "openNow": 1,
+        "freshness": 0.1353
+      }
+    }
+  ],
+  "weekend-family-saturday-afternoon": [
+    {
+      "id": 65,
+      "categoryId": 99,
+      "distanceMeters": 11206,
+      "openState": "open",
+      "score": 0.6115,
+      "breakdown": {
+        "affinity": 0.85,
+        "proximity": 0.0239,
+        "openNow": 1,
+        "freshness": 0.7245
+      }
+    },
+    {
+      "id": 46,
+      "categoryId": 132,
+      "distanceMeters": 631,
+      "openState": "open",
+      "score": 0.5767,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0.8103,
+        "openNow": 1,
+        "freshness": 0.012
+      }
+    },
+    {
+      "id": 13,
+      "categoryId": 82,
+      "distanceMeters": 754,
+      "openState": "open",
+      "score": 0.5712,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0.7778,
+        "openNow": 1,
+        "freshness": 0.083
+      }
+    },
+    {
+      "id": 56,
+      "categoryId": 95,
+      "distanceMeters": 2049,
+      "openState": "open",
+      "score": 0.5565,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0.5051,
+        "openNow": 1,
+        "freshness": 0.8187
+      }
+    },
+    {
+      "id": 21,
+      "categoryId": 83,
+      "distanceMeters": 1842,
+      "openState": "open",
+      "score": 0.5246,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0.5412,
+        "openNow": 1,
+        "freshness": 0.1997
+      }
+    },
+    {
+      "id": 40,
+      "categoryId": 84,
+      "distanceMeters": 2145,
+      "openState": "unknown",
+      "score": 0.5186,
+      "breakdown": {
+        "affinity": 0.6,
+        "proximity": 0.4892,
+        "openNow": 0.5,
+        "freshness": 0.191
+      }
+    }
+  ],
+  "sunday-evening-beauty": [
+    {
+      "id": 56,
+      "categoryId": 95,
+      "distanceMeters": 2049,
+      "openState": "open",
+      "score": 0.8179,
+      "breakdown": {
+        "affinity": 0.9111,
+        "proximity": 0.5051,
+        "openNow": 1,
+        "freshness": 0.8187
+      }
+    },
+    {
+      "id": 46,
+      "categoryId": 132,
+      "distanceMeters": 631,
+      "openState": "open",
+      "score": 0.5318,
+      "breakdown": {
+        "affinity": 0.1111,
+        "proximity": 0.8103,
+        "openNow": 1,
+        "freshness": 0.012
+      }
+    },
+    {
+      "id": 13,
+      "categoryId": 82,
+      "distanceMeters": 754,
+      "openState": "open",
+      "score": 0.5161,
+      "breakdown": {
+        "affinity": 0.1111,
+        "proximity": 0.7778,
+        "openNow": 1,
+        "freshness": 0.083
+      }
+    },
+    {
+      "id": 62,
+      "categoryId": 96,
+      "distanceMeters": 9357,
+      "openState": "unknown",
+      "score": 0.5009,
+      "breakdown": {
+        "affinity": 0.8667,
+        "proximity": 0.0442,
+        "openNow": 0.5,
+        "freshness": 0.3932
+      }
+    },
+    {
+      "id": 21,
+      "categoryId": 83,
+      "distanceMeters": 1842,
+      "openState": "open",
+      "score": 0.4574,
+      "breakdown": {
+        "affinity": 0.1111,
+        "proximity": 0.5412,
+        "openNow": 1,
+        "freshness": 0.1997
+      }
+    },
+    {
+      "id": 9,
+      "categoryId": 81,
+      "distanceMeters": 4151,
+      "openState": "open",
+      "score": 0.4204,
+      "breakdown": {
+        "affinity": 0.1111,
+        "proximity": 0.2507,
+        "openNow": 1,
+        "freshness": 0.4346
+      }
+    }
+  ],
+  "late-night-anon-0030": [
+    {
+      "id": 17,
+      "categoryId": 82,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.9257,
+      "breakdown": {
+        "affinity": 0.9,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.7086
+      }
+    },
+    {
+      "id": 20,
+      "categoryId": 83,
+      "distanceMeters": null,
+      "openState": null,
+      "score": 0.8951,
+      "breakdown": {
+        "affinity": 1,
+        "proximity": 0,
+        "openNow": 0,
+        "freshness": 0.5368
+      }
+    },
+    {
+      "id": 53,
+      "categoryId": 92,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.6804,
+      "breakdown": {
+        "affinity": 0.6,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.2607
+      }
+    },
+    {
+      "id": 56,
+      "categoryId": 95,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.6137,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.8187
+      }
+    },
+    {
+      "id": 65,
+      "categoryId": 99,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.5868,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.7245
+      }
+    },
+    {
+      "id": 5,
+      "categoryId": 81,
+      "distanceMeters": null,
+      "openState": "open",
+      "score": 0.5373,
+      "breakdown": {
+        "affinity": 0.25,
+        "proximity": 0,
+        "openNow": 1,
+        "freshness": 0.4111
+      }
+    }
+  ]
+}

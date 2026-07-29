@@ -1,25 +1,26 @@
 import { type NextRequest } from "next/server";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { ok } from "@/lib/mobile/response";
-import { requireMobileUser } from "@/lib/mobile/auth";
+import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { query } from "@/lib/db";
 import {
   toListingCard,
   toListingImage,
+  LISTING_CARD_COLUMNS,
   type ListingImageDTO,
   type ListingRowLike,
 } from "@/lib/mobile/mappers";
-import {
-  resolveCategoryIdScope,
-  listingCategoriesExistsClause,
-} from "@/lib/listings/category-scope";
-import { getListingCategoryIdsMap } from "@/lib/listings/sync-listing-categories";
+import { getRecommendationCandidates } from "@/lib/recommendations/candidates";
+import { scoreCandidates, diversify, type ScoredCandidate } from "@/lib/recommendations/scoring";
+import { getTimeIntentBoostsByCategoryId } from "@/lib/recommendations/time-intent";
+import { getUserCategoryAffinity } from "@/lib/recommendations/affinity";
 
 export const dynamic = "force-dynamic";
 
-const LISTING_CARD_SQL_COLUMNS =
-  "id, name, slug, description, address, category_id, category_name, latitude, longitude, avg_rating, review_count, is_featured, status, menu_pdf_url, google_maps_url";
+// Same Karachi bounding box used by the nearby-listings server action.
+const LAT_BOUNDS = { min: 24.7, max: 25.0 };
+const LNG_BOUNDS = { min: 66.9, max: 67.4 };
 
 function toNumericListingRow(row: Record<string, unknown>): ListingRowLike {
   return {
@@ -31,154 +32,101 @@ function toNumericListingRow(row: Record<string, unknown>): ListingRowLike {
   } as unknown as ListingRowLike;
 }
 
-/**
- * Resolves the `category` query param (a stringified integer id per the
- * mobile contract) to the set of category ids it covers: a top-level
- * category expands to itself plus its subcategories, a subcategory resolves
- * to just itself. Returns null for an unknown/invalid/"all" id.
- */
-async function resolveCategoryIds(
-  categoryParam: string | null,
-): Promise<number[] | null> {
-  if (!categoryParam || categoryParam === "all") return null;
-  const categoryId = Number(categoryParam);
-  if (!Number.isInteger(categoryId) || categoryId <= 0) return null;
+function parseCoord(raw: string | null, bounds: { min: number; max: number }): number | null {
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < bounds.min || n > bounds.max) return null;
+  return n;
+}
 
-  const ids = await resolveCategoryIdScope(categoryId);
-  return ids.length > 0 ? ids : null;
+function isAdmin(role?: string): boolean {
+  return role === "admin" || role === "super_admin";
+}
+
+function buildReasonText(candidate: ScoredCandidate): string {
+  const parts: string[] = [];
+  if (candidate.openState === "open") parts.push("Open now");
+  else if (candidate.openState === "closed") parts.push("Closed now");
+
+  if (candidate.distanceMeters != null) {
+    const km = candidate.distanceMeters / 1000;
+    parts.push(km < 1 ? `${Math.round(candidate.distanceMeters)} m away` : `${km.toFixed(1)} km away`);
+  }
+
+  return parts.join(" · ") || "Recommended for you";
 }
 
 /**
- * GET /api/mobile/v1/user/recommendations?limit=&category=
+ * GET /api/mobile/v1/user/recommendations?limit=&lat=&lng=&debug=
  *
- * Personalized "Recommended For You" listings for the home screen. When the
- * caller has an active saved location, results are ranked by proximity to it
- * (via `get_nearby_listings`). Without a `category`, favorite-category matches
- * are bubbled to the top; with one, results are scoped to that category (a
- * top-level id includes its subcategories). Falls back to featured/top-rated
- * published listings (within the category when given). Returns the same
- * `ListingCard[]` shape as GET /listings so the client renders it unchanged.
+ * Context-aware "Recommended For You": a weighted blend of category affinity
+ * (time-of-day context, blended with learned per-user signal as it
+ * accumulates), geo proximity, "open now", and freshness - see
+ * lib/recommendations/scoring.ts for the model. No `category` param anymore
+ * (the client no longer sends one; a themed category feed belongs on the
+ * category browse screen, not here).
+ *
+ * Auth is optional: geo + time + open-now needs no account, and requiring
+ * one meant a token expiry on Home mount silently logged the user out (see
+ * src/lib/api.ts's 401 -> clearSession handling in the RN app). Signed-out
+ * callers are identified by the `X-Anon-Id` header for affinity purposes.
+ *
+ * Location preference: `lat`/`lng` query params -> the caller's active saved
+ * location -> none (time-of-day + freshness only).
+ *
+ * `?debug=1` (admin only) adds a per-term score breakdown to `meta.signals`.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
-  await enforceMobileRateLimit(request);
-  const { user } = await requireMobileUser(request);
+  const { user } = await getOptionalMobileUser(request);
+  await enforceMobileRateLimit(request, user?.id);
 
   const { searchParams } = new URL(request.url);
   const limitRaw = Number(searchParams.get("limit"));
-  const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 20
-    ? limitRaw
-    : 6;
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 20 ? limitRaw : 6;
+  const debug = searchParams.get("debug") === "1" && isAdmin(user?.role);
+  const anonId = request.headers.get("x-anon-id");
 
-  const categoryIdsInScope = await resolveCategoryIds(
-    searchParams.get("category"),
-  );
-  const hasCategory = categoryIdsInScope !== null;
+  let lat = parseCoord(searchParams.get("lat"), LAT_BOUNDS);
+  let lng = parseCoord(searchParams.get("lng"), LNG_BOUNDS);
 
-  // Active saved location + favorite categories (across ALL of a favorited
-  // listing's categories, not just its primary) drive the ranking.
-  const [{ rows: activeRows }, { rows: favRows }] = await Promise.all([
-    query(
+  if ((lat == null || lng == null) && user) {
+    const { rows } = await query(
       `SELECT latitude, longitude FROM public.user_saved_locations
        WHERE user_id = $1 AND is_active = true LIMIT 1`,
       [user.id],
-    ),
-    query(
-      `SELECT DISTINCT lc.category_id
-       FROM favorite_listings fl
-       JOIN listing_categories lc ON lc.listing_id = fl.listing_id
-       WHERE fl.user_id = $1
-       LIMIT 10`,
-      [user.id],
-    ),
+    );
+    const active = rows[0];
+    if (active) {
+      lat = Number(active.latitude);
+      lng = Number(active.longitude);
+    }
+  }
+
+  const now = new Date();
+
+  const [candidates, timeIntentByCategoryId, affinity] = await Promise.all([
+    getRecommendationCandidates({ lat, lng, now }),
+    getTimeIntentBoostsByCategoryId(now),
+    getUserCategoryAffinity({ userId: user?.id ?? null, anonId: user ? null : anonId }),
   ]);
 
-  const active = activeRows[0];
-  const favoriteCategories: number[] = favRows
-    .map((r) => Number(r.category_id))
-    .filter((n) => Number.isInteger(n));
-
-  // Build an ordered list of listing ids.
-  let orderedIds: number[] = [];
-
-  if (active) {
-    try {
-      const { rows: nearby } = await query(
-        `SELECT id, status FROM get_nearby_listings($1, $2, $3, $4)`,
-        [active.latitude, active.longitude, 15000, 60],
-      );
-      const published = nearby.filter((l) => l.status === "published");
-      const publishedIds = published.map((l) => Number(l.id));
-
-      // get_nearby_listings() only returns each listing's legacy primary
-      // category, so pull the full category set per listing from the
-      // junction table to match on secondary categories too.
-      const categoriesByListing =
-        await getListingCategoryIdsMap(publishedIds);
-
-      if (hasCategory) {
-        // Scope strictly to the requested category (already distance-ordered).
-        const scopeSet = new Set(categoryIdsInScope);
-        const inScope = published.filter((l) =>
-          (categoriesByListing.get(Number(l.id)) ?? []).some((id) =>
-            scopeSet.has(id),
-          ),
-        );
-        orderedIds = inScope.map((l) => Number(l.id)).slice(0, limit);
-      } else {
-        // General recs: float favorite-category matches to the top.
-        const isFavoriteMatch = (l: { id: number | string }) =>
-          (categoriesByListing.get(Number(l.id)) ?? []).some((id) =>
-            favoriteCategories.includes(id),
-          );
-        const matched = published.filter(isFavoriteMatch);
-        const rest = published.filter((l) => !isFavoriteMatch(l));
-        orderedIds = [...matched, ...rest]
-          .map((l) => Number(l.id))
-          .slice(0, limit);
-      }
-    } catch (error) {
-      console.error("[mobile-api] nearby recommendations failed:", error);
-    }
+  if (candidates.length === 0) {
+    return ok([], { reason: "No listings available right now.", signals: {} });
   }
 
-  // Fallback: featured/top-rated, scoped to the requested category when given,
-  // else favorite categories, else all published.
-  if (orderedIds.length === 0) {
-    let rows;
-    if (hasCategory) {
-      ({ rows } = await query(
-        `SELECT id FROM listings_with_details
-         WHERE status = 'published' AND ${listingCategoriesExistsClause("listings_with_details.id", 1)}
-         ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
-         LIMIT $2`,
-        [categoryIdsInScope, limit],
-      ));
-    } else if (favoriteCategories.length > 0) {
-      ({ rows } = await query(
-        `SELECT id FROM listings_with_details
-         WHERE status = 'published' AND ${listingCategoriesExistsClause("listings_with_details.id", 1)}
-         ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
-         LIMIT $2`,
-        [favoriteCategories, limit],
-      ));
-    } else {
-      ({ rows } = await query(
-        `SELECT id FROM listings_with_details
-         WHERE status = 'published'
-         ORDER BY is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC
-         LIMIT $1`,
-        [limit],
-      ));
-    }
-    orderedIds = rows.map((r) => Number(r.id));
-  }
+  const scored = scoreCandidates(candidates, {
+    timeIntentByCategoryId,
+    learnedAffinityByCategoryId: affinity.byCategoryId,
+    eventCount: affinity.eventCount,
+    now,
+    actorKey: user?.id ?? anonId ?? "anon",
+  });
 
-  if (orderedIds.length === 0) return ok([]);
+  const ranked = diversify(scored, limit);
+  const orderedIds = ranked.map((c) => c.id);
 
-  // Fetch full card rows + images for the chosen ids, preserving rank order.
   const { rows: cardRows } = await query(
-    `SELECT ${LISTING_CARD_SQL_COLUMNS} FROM listings_with_details
-     WHERE id = ANY($1::int[])`,
+    `SELECT ${LISTING_CARD_COLUMNS} FROM listings_with_details WHERE id = ANY($1::int[])`,
     [orderedIds],
   );
   const byId = new Map<number, ListingRowLike>();
@@ -204,5 +152,27 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     .filter((r): r is ListingRowLike => r !== undefined)
     .map((r) => toListingCard(r, imagesByListing[r.id as number] ?? []));
 
-  return ok(listings);
+  const signals: Record<
+    number,
+    {
+      distanceMeters: number | null;
+      openState: ScoredCandidate["openState"];
+      reason: string;
+      score?: number;
+      breakdown?: ScoredCandidate["breakdown"];
+    }
+  > = {};
+  for (const candidate of ranked) {
+    signals[candidate.id] = {
+      distanceMeters: candidate.distanceMeters,
+      openState: candidate.openState,
+      reason: buildReasonText(candidate),
+      ...(debug ? { score: candidate.score, breakdown: candidate.breakdown } : {}),
+    };
+  }
+
+  return ok(listings, {
+    reason: lat != null && lng != null ? "Based on your location and time of day" : "Based on time of day",
+    signals,
+  });
 });

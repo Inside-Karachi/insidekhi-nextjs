@@ -88,6 +88,14 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   }
   const minRating = searchParams.get("rating");
   const excludeFeatured = searchParams.get("exclude_featured") === "true";
+  // Client-generated once per screen visit (not per request) - keeps the
+  // shuffle stable across pagination within one visit, but different on the
+  // next visit. Bound as a query param below, never concatenated into SQL.
+  const shuffleSeedRaw = searchParams.get("shuffleSeed");
+  const shuffleSeed =
+    shuffleSeedRaw && shuffleSeedRaw.length > 0 && shuffleSeedRaw.length <= 64
+      ? shuffleSeedRaw
+      : null;
   // Curated single-identity carousels (e.g. Home's "Retail Therapy") pass
   // this so a listing's secondary category tags don't qualify it - only its
   // primary category counts.
@@ -136,6 +144,12 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     whereClauses.push(`is_featured = false`);
   }
 
+  // Placeholder swapped for the real $N once dataParams is finalized below -
+  // kept out of the shared `params` array so the COUNT query (which doesn't
+  // need it) never sees it.
+  const SHUFFLE_SEED_PLACEHOLDER = "$SHUFFLE_SEED";
+  const usesShuffleSeed = sort === "featured" && shuffleSeed !== null;
+
   let orderBySql: string;
   switch (sort) {
     case "rating":
@@ -149,7 +163,16 @@ export const GET = mobileRoute(async (request: NextRequest) => {
       orderBySql = `name ASC, id ASC`;
       break;
     default:
-      orderBySql = `is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC`;
+      // Ratings 3.5-5 float to the top; within that tier, order is a stable
+      // pseudo-random shuffle keyed by shuffleSeed - same seed always
+      // produces the same order (so pagination within one screen visit
+      // never duplicates/skips a listing), but a client that generates a
+      // fresh seed per visit sees a different shuffle each time it opens
+      // the screen. Without a seed, this tier still floats to the top, just
+      // in the previous stable order.
+      orderBySql = usesShuffleSeed
+        ? `(avg_rating IS NOT NULL AND avg_rating >= 3.5) DESC, md5(id::text || ${SHUFFLE_SEED_PLACEHOLDER}) ASC, is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC`
+        : `(avg_rating IS NOT NULL AND avg_rating >= 3.5) DESC, is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC`;
       break;
   }
 
@@ -164,11 +187,21 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     );
     count = parseInt(countRows[0].count, 10);
 
-    const dataParams = [...params, limit, offset];
+    const dataParams = [...params];
+    let finalOrderBySql = orderBySql;
+    if (usesShuffleSeed) {
+      dataParams.push(shuffleSeed);
+      finalOrderBySql = finalOrderBySql.replace(
+        SHUFFLE_SEED_PLACEHOLDER,
+        `$${dataParams.length}`,
+      );
+    }
+    dataParams.push(limit, offset);
+
     const { rows } = await query(
       `SELECT ${LISTING_CARD_SQL_COLUMNS} FROM listings_with_details
        ${whereSql}
-       ORDER BY ${orderBySql}
+       ORDER BY ${finalOrderBySql}
        LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
       dataParams,
     );

@@ -21,6 +21,26 @@ export const dynamic = "force-dynamic";
 const MAX_GALLERY_IMAGES = 20;
 const REVIEW_PREVIEW_LIMIT = 5;
 
+/**
+ * `id`/`category_id`/`review_count`/`avg_rating` come back as strings from pg
+ * for bigint/numeric columns - a bare `as` cast doesn't convert them, it just
+ * asserts the (wrong) type. Mirrors the same helper in listings/route.ts and
+ * user/recommendations/route.ts. Missing this here is what caused this
+ * listing's `id` to round-trip as a string into POST /reviews' `listing_id`
+ * (which expects a number) once the client echoed it back.
+ */
+function toNumericListingRow<T extends Record<string, unknown>>(
+  row: T,
+): T & { id: number; category_id: number | null; review_count: number | null; avg_rating: number | null } {
+  return {
+    ...row,
+    id: Number(row.id),
+    category_id: row.category_id !== null ? Number(row.category_id) : null,
+    review_count: row.review_count !== null ? Number(row.review_count) : null,
+    avg_rating: row.avg_rating !== null ? Number(row.avg_rating) : null,
+  };
+}
+
 /** Explicit column list for `listings_with_details` - never use `*`. */
 const LISTING_DETAIL_SQL_COLUMNS =
   "id, name, slug, description, address, category_id, category_name, latitude, longitude, avg_rating, review_count, is_featured, status, menu_pdf_url, google_maps_url, place_id, phone_number, email, website";
@@ -50,14 +70,14 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
     throw new MobileApiError("not_found", "Listing not found.", 404);
   }
 
-  const row = listingRow as unknown as ListingRowLike & {
-    id: number;
-    category_id: number | null;
-    place_id: string | null;
-    phone_number: string | null;
-    email: string | null;
-    website: string | null;
-  };
+  const row = toNumericListingRow(
+    listingRow as unknown as ListingRowLike & {
+      place_id: string | null;
+      phone_number: string | null;
+      email: string | null;
+      website: string | null;
+    },
+  );
   const listingId = row.id;
 
   const listingCategoryIds = await getListingCategoryIds(listingId);
@@ -246,28 +266,46 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
     branch_id: h.branch_id,
   }));
 
-  const branches = branchesRes.rows as Array<{
-    id: number;
-    name: string;
-    address: string;
-    city: string;
-    latitude: number | null;
-    longitude: number | null;
-    is_primary: boolean | null;
-    phone_number: string | null;
-  }>;
+  // `as` alone was a type-only assertion with no runtime conversion - id is
+  // bigint, so node-postgres actually returns it as a string, silently
+  // breaking any client that JSON-serializes it back as a `branch_id`
+  // (e.g. POST /reviews' zod schema expects a number). lat/lng are numeric
+  // for the same reason.
+  const branches = (
+    branchesRes.rows as Array<{
+      id: number | string;
+      name: string;
+      address: string;
+      city: string;
+      latitude: number | string | null;
+      longitude: number | string | null;
+      is_primary: boolean | null;
+      phone_number: string | null;
+    }>
+  ).map((b) => ({
+    id: Number(b.id),
+    name: b.name,
+    address: b.address,
+    city: b.city,
+    latitude: b.latitude !== null ? Number(b.latitude) : null,
+    longitude: b.longitude !== null ? Number(b.longitude) : null,
+    is_primary: b.is_primary,
+    phone_number: b.phone_number,
+  }));
 
   const reviewsPreview = (reviewsRes.rows as Array<Record<string, unknown>>).map(
     (r) => {
       const reviewRow: ReviewRowLike = {
-        id: r.id as number,
-        listing_id: r.listing_id as number,
-        branch_id: r.branch_id as number,
+        // id/listing_id/branch_id are bigint - Number() them same as
+        // `branches` above, not just cast, or they come back as strings.
+        id: Number(r.id),
+        listing_id: Number(r.listing_id),
+        branch_id: Number(r.branch_id),
         user_id: r.user_id as string,
-        rating: r.rating as number,
+        rating: Number(r.rating),
         comment: r.comment as string | null,
         status: r.status as string,
-        helpful_count: r.helpful_count as number | null,
+        helpful_count: r.helpful_count !== null ? Number(r.helpful_count) : null,
         created_at:
           r.created_at instanceof Date
             ? r.created_at.toISOString()

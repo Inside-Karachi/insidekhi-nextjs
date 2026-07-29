@@ -15,7 +15,7 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, Info } from "lucide-react";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 
 type Listing = Database["public"]["Tables"]["listings"]["Row"] & {
   category?: {

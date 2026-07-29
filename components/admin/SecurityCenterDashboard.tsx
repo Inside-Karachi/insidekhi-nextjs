@@ -27,7 +27,7 @@ import {
   BarChart3,
 } from "lucide-react";
 import Link from "next/link";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import { useSecurityAlerts } from "@/hooks/useSecurityAlerts";
 
 // Use Supabase generated types

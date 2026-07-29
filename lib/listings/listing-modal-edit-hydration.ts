@@ -1,4 +1,4 @@
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import type { BranchWithHours, ListingImage, OpeningHour } from "@/types/listing.types";
 
 /** Menu graph returned by `/api/admin/listings/:id/menu` */

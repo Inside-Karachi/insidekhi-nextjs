@@ -24,7 +24,7 @@ import {
   AlertCircle,
   Image as ImageIcon,
 } from "lucide-react";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import Image from "next/image";
 
 type ListingImage = Database["public"]["Tables"]["listing_images"]["Row"];

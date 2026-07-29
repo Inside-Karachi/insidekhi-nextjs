@@ -8,7 +8,7 @@
  * ALSO filter explicitly by `inviter_id`/`user_id` - the SELECT policies admit
  * admin/lister/invitee rows, so we never rely on RLS alone to scope to "mine".
  */
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import { getClientIp } from "./forms";
 
 /**

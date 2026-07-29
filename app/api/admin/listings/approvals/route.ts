@@ -3,7 +3,7 @@ import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { createNotification } from "@/lib/notifications/service";
 import { getListingCategoryIdsMap } from "@/lib/listings/sync-listing-categories";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 
 export const dynamic = "force-dynamic";
 

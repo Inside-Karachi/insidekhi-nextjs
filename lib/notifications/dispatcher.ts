@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 
 import { query } from "@/lib/db";
 import { logNotificationFailed, logNotificationSent } from "@/lib/audit";
-import type { Json } from "@/types/supabase";
+import type { Json } from "@/types/database";
 import type {
   NotificationChannelRecord,
   NotificationOutboxRecord,

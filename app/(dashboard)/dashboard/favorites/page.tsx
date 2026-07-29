@@ -3,7 +3,7 @@ import { PremiumFavoritesGrid } from "@/components/dashboard/PremiumFavoritesGri
 import { FavoritesHydrator } from "@/components/dashboard/FavoritesHydrator";
 import { requireSessionUser } from "@/lib/auth/require-session";
 import { query } from "@/lib/db";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { FavoriteListing } from "@/types/favorites.types";
 
 export const dynamic = "force-dynamic";

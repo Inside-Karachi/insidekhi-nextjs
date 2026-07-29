@@ -58,7 +58,7 @@ import {
   ListingFormData,
   BranchWithHours,
 } from "@/types/listing.types";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { getListingStatusLabel } from "@/lib/listings/status-display";
 import {
   loadListingEditModalHydration,

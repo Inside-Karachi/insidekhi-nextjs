@@ -4,7 +4,7 @@ import { useState } from "react";
 import Image from "next/image";
 import { CreditCard, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 // Use real Supabase types
 type CardVariant = Database["public"]["Tables"]["card_variants"]["Row"];

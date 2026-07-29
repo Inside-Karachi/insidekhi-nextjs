@@ -3,7 +3,7 @@ import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { Parser } from "json2csv";
 import { getListingCategoryIdsMap } from "@/lib/listings/sync-listing-categories";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 
 type ExportListingRow = Database["public"]["Tables"]["listings"]["Row"] & {
   categories?: SupabaseCategory[];

@@ -1,4 +1,4 @@
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { PremiumListingHeroClient } from "./PremiumListingHeroClient";
 
 type Listing = Database["public"]["Views"]["listings_with_details"]["Row"];

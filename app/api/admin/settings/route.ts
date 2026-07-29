@@ -1,7 +1,7 @@
 import { query } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
-import { Json } from "@/types/supabase";
+import { Json } from "@/types/database";
 
 // GET /api/admin/settings - Get system settings
 export async function GET() {

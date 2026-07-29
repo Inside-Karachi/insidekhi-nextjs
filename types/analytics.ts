@@ -1,5 +1,5 @@
 import { z, type ZodType } from "zod";
-import type { Database, Json } from "@/types/supabase";
+import type { Database, Json } from "@/types/database";
 
 export type AnalyticsEventType =
   Database["public"]["Enums"]["analytics_event_type_enum"];

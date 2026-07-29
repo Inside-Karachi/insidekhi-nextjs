@@ -2,7 +2,7 @@
 
 import { query } from "@/lib/db";
 import { deleteFile, getKeyFromPublicUrl } from "@/lib/storage/spaces";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import type {
   MappedListing,
   MappedBranch,

@@ -17,7 +17,7 @@ import type {
   TransactionalImportResult,
   FieldStats,
 } from "@/types/import.types";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import type {
   ImportHistory,
   ImportOptions,

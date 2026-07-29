@@ -18,7 +18,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, Plus, Pencil, Trash2, Star, MapPin } from "lucide-react";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 
 type Branch = Database["public"]["Tables"]["listing_branches"]["Row"];
 

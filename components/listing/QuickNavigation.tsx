@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { ChefHat, Clock, Star, Tag, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PremiumHeading } from "@/components/brand/Typography";

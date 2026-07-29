@@ -10,7 +10,7 @@
  * simply not representable in its input.
  */
 import { z } from "zod";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import { MobileApiError } from "./errors";
 
 /**

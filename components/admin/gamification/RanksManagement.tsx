@@ -15,7 +15,7 @@ import {
   ChevronUp,
   AlertCircle,
 } from "lucide-react";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 
 type Rank = Database["public"]["Tables"]["ranks"]["Row"];
 

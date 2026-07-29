@@ -462,21 +462,10 @@ export function FormSubmissionModal({
   React.useEffect(() => {
     const fetchUserRole = async () => {
       try {
-        const { createClient } = await import("@/lib/supabase/client");
-        const supabase = createClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-
-        if (user) {
-          const { data: profile } = await supabase
-            .from("profiles")
-            .select("role")
-            .eq("id", user.id)
-            .single();
-
-          setUserRole(profile?.role || null);
-        }
+        const response = await fetch("/api/user/me", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = await response.json();
+        setUserRole(data.user?.role ?? null);
       } catch (error) {
         console.error("Failed to fetch user role:", error);
       }

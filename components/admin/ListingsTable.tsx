@@ -22,7 +22,7 @@ import {
   Phone,
   Globe,
 } from "lucide-react";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import type { ListingEditorInfo } from "@/lib/hooks/useListingEditors";
 
 type Listing = Database["public"]["Tables"]["listings"]["Row"] & {

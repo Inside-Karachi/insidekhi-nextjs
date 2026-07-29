@@ -11,7 +11,7 @@ import type {
   NotificationPriority,
   NotificationFeedStatusFilter,
 } from "@/types/notifications.types";
-import type { Json } from "@/types/supabase";
+import type { Json } from "@/types/database";
 
 export const dynamic = "force-dynamic";
 

@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 type UserRole = Database["public"]["Enums"]["user_role"];
 type Profile = Database["public"]["Tables"]["profiles"]["Row"];

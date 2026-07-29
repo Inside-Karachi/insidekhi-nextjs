@@ -2,7 +2,7 @@
 
 import { motion } from "framer-motion";
 import { useState } from "react";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import {
   Phone,
   Mail,

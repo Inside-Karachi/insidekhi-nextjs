@@ -1,5 +1,5 @@
 import { query } from "@/lib/db";
-import type { Json } from "@/types/supabase";
+import type { Json } from "@/types/database";
 
 export type AuditAction =
   // User Management

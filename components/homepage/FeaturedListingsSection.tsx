@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { getListingImageUrl } from "@/lib/utils/listing-images";
 import { useFavoritesStore } from "@/lib/context/favoritesStore";
 import { toggleFavorite } from "@/lib/favorites";

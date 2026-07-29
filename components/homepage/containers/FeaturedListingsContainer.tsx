@@ -2,7 +2,7 @@
 import { query } from "@/lib/db";
 import { FeaturedListingsSection } from "@/components/homepage/FeaturedListingsSection";
 import { getFavoritedListingIdsForUser } from "@/lib/utils/favorites-server";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 export async function FeaturedListingsContainer() {
   try {

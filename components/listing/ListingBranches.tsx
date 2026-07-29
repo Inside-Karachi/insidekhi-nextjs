@@ -30,7 +30,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import { useBranchSelection } from "@/lib/context/BranchSelectionContext";
 
 // Use the actual database types

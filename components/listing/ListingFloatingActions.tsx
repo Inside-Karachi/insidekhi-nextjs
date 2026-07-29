@@ -3,7 +3,7 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 type Listing = Database["public"]["Views"]["listings_with_details"]["Row"];
 

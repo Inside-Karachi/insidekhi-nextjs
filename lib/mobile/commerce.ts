@@ -6,7 +6,7 @@
  * until the booking is paid.
  */
 import crypto from "crypto";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 
 // ---------------------------------------------------------------------------
 // Booking DTO

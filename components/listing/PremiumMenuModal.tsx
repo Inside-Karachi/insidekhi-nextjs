@@ -6,7 +6,7 @@ import Image from "next/image";
 import { X, Search, Utensils, Dessert, Coffee, ChefHat } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 type MenuSection = Database["public"]["Tables"]["menu_sections"]["Row"] & {
   menu_items: Database["public"]["Tables"]["menu_items"]["Row"][] | null;

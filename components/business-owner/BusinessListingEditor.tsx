@@ -27,7 +27,7 @@ import GalleryTab from "@/components/business-owner/tabs/GalleryTab";
 import MenuTab from "@/components/business-owner/tabs/MenuTab";
 import DealsTab from "@/components/business-owner/tabs/DealsTab";
 import FeaturesTab from "@/components/business-owner/tabs/FeaturesTab";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import { cn } from "@/lib/utils";
 import { BUSINESS_OWNER_CARD_SURFACE } from "./BusinessOwnerPageHeader";
 

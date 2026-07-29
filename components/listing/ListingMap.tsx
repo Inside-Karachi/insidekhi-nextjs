@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { MapPin, Navigation, Landmark } from "lucide-react";
 import { PremiumHeading } from "@/components/brand/Typography";
-import { Database, Json } from "@/types/supabase";
+import { Database, Json } from "@/types/database";
 import {
   sectionVariants,
   viewportSettings,

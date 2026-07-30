@@ -8,10 +8,8 @@ import {
   enforcePasswordChangeLimit,
 } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
-import {
-  createMobilePublicClient,
-  createMobileServiceClient,
-} from "@/lib/mobile/supabase";
+import { query } from "@/lib/db";
+import { verifyPassword, hashPassword } from "@/lib/auth/password";
 
 export const dynamic = "force-dynamic";
 
@@ -75,14 +73,24 @@ export const PUT = mobileRoute(async (request: NextRequest) => {
     throw new MobileApiError("internal_error", "Account has no email.", 500);
   }
 
-  // Verify the current password on a throwaway client (persistSession is off, so
-  // this never clobbers the caller's real session).
-  const verifier = createMobilePublicClient();
-  const { error: signInError } = await verifier.auth.signInWithPassword({
-    email: user.email,
-    password: currentPassword,
-  });
-  if (signInError) {
+  // Verify + update password directly in our Postgres auth schema.
+  const { rows } = await query(
+    "SELECT email, encrypted_password FROM auth.users WHERE id = $1 LIMIT 1",
+    [user.id],
+  );
+  const authUser = rows[0] as
+    | { email: string; encrypted_password: string }
+    | undefined;
+
+  if (!authUser) {
+    throw new MobileApiError("not_found", "Account not found.", 404);
+  }
+
+  const isCorrect = await verifyPassword(
+    currentPassword,
+    authUser.encrypted_password,
+  );
+  if (!isCorrect) {
     throw new MobileApiError(
       "validation_error",
       "Current password is incorrect.",
@@ -91,18 +99,23 @@ export const PUT = mobileRoute(async (request: NextRequest) => {
     );
   }
 
-  const service = createMobileServiceClient();
-  const { error: updateError } = await service.auth.admin.updateUserById(
-    user.id,
-    { password: newPassword },
+  const newHash = await hashPassword(newPassword);
+  await query(
+    "UPDATE auth.users SET encrypted_password = $1, updated_at = NOW() WHERE id = $2",
+    [newHash, user.id],
   );
-  if (updateError) {
-    console.error("[mobile-api] password update failed:", updateError.message);
-    throw new MobileApiError(
-      "internal_error",
-      "Failed to update password.",
-      500,
+
+  // Best-effort audit logging (do not fail the request if it errors).
+  try {
+    const { logPasswordChange } = await import("@/lib/audit");
+    await logPasswordChange(
+      user.id,
+      request.headers.get("x-forwarded-for") ||
+        request.headers.get("x-real-ip") ||
+        "unknown",
     );
+  } catch (logError) {
+    console.error("[mobile-api] password audit logging failed:", logError);
   }
 
   return ok({ updated: true });

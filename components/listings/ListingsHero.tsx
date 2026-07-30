@@ -5,7 +5,7 @@ import { Search, MapPin, Filter } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 

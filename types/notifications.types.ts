@@ -1,4 +1,4 @@
-import type { Database, Json, Tables, TablesInsert } from "@/types/supabase";
+import type { Database, Json, Tables, TablesInsert } from "@/types/database";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type NotificationChannel =

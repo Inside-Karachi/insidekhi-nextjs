@@ -18,18 +18,21 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { getListingImageUrl } from "@/lib/utils/listing-images";
 import { useFavoritesStore } from "@/lib/context/favoritesStore";
 import { toggleFavorite } from "@/lib/favorites";
 
-type Listing = Database["public"]["Views"]["listings_with_details"]["Row"];
+type Listing = Database["public"]["Views"]["listings_with_details"]["Row"] & {
+  category_group?: string | null;
+};
 
 interface FeaturedListingsSectionProps {
   listings: Listing[];
 }
 
-// Premium category color schemes for listing cards
+// Premium category color schemes for listing cards, keyed by top-level
+// category name (categories.parent_id IS NULL) from the current taxonomy.
 const categoryColorSchemes: Record<
   string,
   {
@@ -40,47 +43,54 @@ const categoryColorSchemes: Record<
     icon: string;
   }
 > = {
-  "Eat & Drink": {
+  "Food & Dining": {
     bg: "bg-orange-100 dark:bg-orange-500/10",
     border: "border-orange-200 dark:border-orange-500/20",
     glow: "hover:shadow-lg hover:shadow-orange-500/10",
     accent: "bg-orange-500",
     icon: "text-orange-600 dark:text-orange-400",
   },
-  "Where to Stay": {
+  "Services & Living": {
     bg: "bg-blue-100 dark:bg-blue-500/10",
     border: "border-blue-200 dark:border-blue-500/20",
     glow: "hover:shadow-lg hover:shadow-blue-500/10",
     accent: "bg-blue-500",
     icon: "text-blue-600 dark:text-blue-400",
   },
-  Entertainment: {
-    bg: "bg-purple-100 dark:bg-purple-500/10",
-    border: "border-purple-200 dark:border-purple-500/20",
-    glow: "hover:shadow-lg hover:shadow-purple-500/10",
-    accent: "bg-purple-500",
-    icon: "text-purple-600 dark:text-purple-400",
+  "Fitness & Sports": {
+    bg: "bg-teal-100 dark:bg-teal-500/10",
+    border: "border-teal-200 dark:border-teal-500/20",
+    glow: "hover:shadow-lg hover:shadow-teal-500/10",
+    accent: "bg-teal-500",
+    icon: "text-teal-600 dark:text-teal-400",
   },
-  Shopping: {
+  "Shopping & Fashion": {
     bg: "bg-emerald-100 dark:bg-emerald-500/10",
     border: "border-emerald-200 dark:border-emerald-500/20",
     glow: "hover:shadow-lg hover:shadow-emerald-500/10",
     accent: "bg-emerald-500",
     icon: "text-emerald-600 dark:text-emerald-400",
   },
-  "Things to Do": {
+  "Education & Learning": {
     bg: "bg-amber-100 dark:bg-amber-500/10",
     border: "border-amber-200 dark:border-amber-500/20",
     glow: "hover:shadow-lg hover:shadow-amber-500/10",
     accent: "bg-amber-500",
     icon: "text-amber-600 dark:text-amber-400",
   },
-  Events: {
-    bg: "bg-violet-100 dark:bg-violet-500/10",
-    border: "border-violet-200 dark:border-violet-500/20",
-    glow: "hover:shadow-lg hover:shadow-violet-500/10",
-    accent: "bg-violet-500",
-    icon: "text-violet-600 dark:text-violet-400",
+  "Health & Wellness": {
+    bg: "bg-rose-100 dark:bg-rose-500/10",
+    border: "border-rose-200 dark:border-rose-500/20",
+    glow: "hover:shadow-lg hover:shadow-rose-500/10",
+    accent: "bg-rose-500",
+    icon: "text-rose-600 dark:text-rose-400",
+  },
+  "Beauty & Personal Care": {
+    bg: "bg-pink-100 dark:bg-pink-500/10",
+    border: "border-pink-200 dark:border-pink-500/20",
+    glow: "hover:shadow-lg hover:shadow-pink-500/10",
+    accent: "bg-pink-500",
+    icon: "text-pink-600 dark:text-pink-400",
   },
 };
 
@@ -172,7 +182,7 @@ export function FeaturedListingsSection({
             const status = getStatus();
             const imageUrl = getListingImageUrl(listing);
             const categoryColors = categoryColorSchemes[
-              listing.category_name || ""
+              listing.category_group || listing.category_name || ""
             ] || {
               bg: "from-gray-500/10 via-gray-500/5 to-transparent",
               border: "border-gray-500/20",

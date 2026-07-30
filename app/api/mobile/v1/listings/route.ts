@@ -13,6 +13,10 @@ import {
 } from "@/lib/mobile/mappers";
 import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
 import { sortFetchedListingsBySearchRelevance } from "@/lib/listings/search-relevance";
+import {
+  resolveCategoryIdScope,
+  listingCategoriesExistsClause,
+} from "@/lib/listings/category-scope";
 
 /** Explicit column list for `listings_with_details` - never use `*`. */
 const LISTING_CARD_SQL_COLUMNS =
@@ -52,6 +56,10 @@ const SUPPORTED_SORTS = new Set([
  * `category` is the stringified integer id from GET /categories (contract
  * section 1, IDs) - not a slug. An id with no matching category (or a
  * non-numeric value) is treated as no filter, same as omitting it.
+ *
+ * `primary_only=true` restricts the category match to each listing's
+ * primary category, ignoring secondary tags - use for curated single-theme
+ * carousels where a listing's secondary tags shouldn't qualify it.
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
@@ -80,43 +88,40 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   }
   const minRating = searchParams.get("rating");
   const excludeFeatured = searchParams.get("exclude_featured") === "true";
+  // Client-generated once per screen visit (not per request) - keeps the
+  // shuffle stable across pagination within one visit, but different on the
+  // next visit. Bound as a query param below, never concatenated into SQL.
+  const shuffleSeedRaw = searchParams.get("shuffleSeed");
+  const shuffleSeed =
+    shuffleSeedRaw && shuffleSeedRaw.length > 0 && shuffleSeedRaw.length <= 64
+      ? shuffleSeedRaw
+      : null;
+  // Curated single-identity carousels (e.g. Home's "Retail Therapy") pass
+  // this so a listing's secondary category tags don't qualify it - only its
+  // primary category counts.
+  const primaryOnly = searchParams.get("primary_only") === "true";
 
   // Resolve a category id (per the mobile contract, `category` is the
   // stringified integer id returned by GET /categories, not a slug) to the
-  // set of category names covering it and its subcategories.
-  let categoryNames: string[] = [];
+  // set of category ids covering it and its subcategories.
+  let categoryIds: number[] = [];
   if (categoryParam && categoryParam !== "all") {
     const categoryId = Number(categoryParam);
     if (Number.isInteger(categoryId) && categoryId > 0) {
-      const { rows: categoryRows } = await query(
-        `SELECT id, name, parent_id FROM categories WHERE id = $1`,
-        [categoryId],
-      );
-      const category = categoryRows[0];
-
-      if (category) {
-        if (category.parent_id === null) {
-          const { rows: subcategories } = await query(
-            `SELECT name FROM categories WHERE parent_id = $1`,
-            [category.id],
-          );
-          categoryNames = [
-            category.name,
-            ...subcategories.map((s) => s.name),
-          ];
-        } else {
-          categoryNames = [category.name];
-        }
-      }
+      categoryIds = await resolveCategoryIdScope(categoryId);
     }
   }
 
   const whereClauses: string[] = [`status = 'published'`];
   const params: unknown[] = [];
 
-  if (categoryNames.length > 0) {
-    params.push(categoryNames);
-    whereClauses.push(`category_name = ANY($${params.length}::text[])`);
+  if (categoryIds.length > 0) {
+    params.push(categoryIds);
+    whereClauses.push(
+      listingCategoriesExistsClause("listings_with_details.id", params.length, {
+        primaryOnly,
+      }),
+    );
   }
 
   if (sanitizedSearch) {
@@ -139,6 +144,12 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     whereClauses.push(`is_featured = false`);
   }
 
+  // Placeholder swapped for the real $N once dataParams is finalized below -
+  // kept out of the shared `params` array so the COUNT query (which doesn't
+  // need it) never sees it.
+  const SHUFFLE_SEED_PLACEHOLDER = "$SHUFFLE_SEED";
+  const usesShuffleSeed = sort === "featured" && shuffleSeed !== null;
+
   let orderBySql: string;
   switch (sort) {
     case "rating":
@@ -152,7 +163,16 @@ export const GET = mobileRoute(async (request: NextRequest) => {
       orderBySql = `name ASC, id ASC`;
       break;
     default:
-      orderBySql = `is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC`;
+      // Ratings 3.5-5 float to the top; within that tier, order is a stable
+      // pseudo-random shuffle keyed by shuffleSeed - same seed always
+      // produces the same order (so pagination within one screen visit
+      // never duplicates/skips a listing), but a client that generates a
+      // fresh seed per visit sees a different shuffle each time it opens
+      // the screen. Without a seed, this tier still floats to the top, just
+      // in the previous stable order.
+      orderBySql = usesShuffleSeed
+        ? `(avg_rating IS NOT NULL AND avg_rating >= 3.5) DESC, md5(id::text || ${SHUFFLE_SEED_PLACEHOLDER}) ASC, is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC`
+        : `(avg_rating IS NOT NULL AND avg_rating >= 3.5) DESC, is_featured DESC NULLS LAST, avg_rating DESC NULLS LAST, id ASC`;
       break;
   }
 
@@ -167,11 +187,21 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     );
     count = parseInt(countRows[0].count, 10);
 
-    const dataParams = [...params, limit, offset];
+    const dataParams = [...params];
+    let finalOrderBySql = orderBySql;
+    if (usesShuffleSeed) {
+      dataParams.push(shuffleSeed);
+      finalOrderBySql = finalOrderBySql.replace(
+        SHUFFLE_SEED_PLACEHOLDER,
+        `$${dataParams.length}`,
+      );
+    }
+    dataParams.push(limit, offset);
+
     const { rows } = await query(
       `SELECT ${LISTING_CARD_SQL_COLUMNS} FROM listings_with_details
        ${whereSql}
-       ORDER BY ${orderBySql}
+       ORDER BY ${finalOrderBySql}
        LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
       dataParams,
     );

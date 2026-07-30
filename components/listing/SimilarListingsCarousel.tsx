@@ -17,7 +17,7 @@ import {
   MessageSquare,
   ArrowRight,
 } from "lucide-react";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { useMenuModal } from "@/lib/context/MenuModalContext";
 import { useFavoritesStore } from "@/lib/context/favoritesStore";
 import { motion } from "framer-motion";

@@ -5,7 +5,7 @@
  * honeypot + per-IP rate limiting (no web reCAPTCHA - a native app can't mint a
  * v3 browser token; decided 2026-06-19).
  */
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import { query } from "@/lib/db";
 import { MobileApiError } from "./errors";
 

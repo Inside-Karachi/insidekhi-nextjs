@@ -72,6 +72,7 @@ export const POST = mobileRoute(async (request: NextRequest) => {
       `DELETE FROM favorite_listings WHERE user_id = $1 AND listing_id = $2`,
       [user.id, listingId],
     );
+    await logListingEvent(user.id, listingId, "unfavorite");
     return ok({ favorited: false });
   }
 
@@ -102,5 +103,29 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     throw new MobileApiError("internal_error", "Failed to add favorite.", 500);
   }
 
+  await logListingEvent(user.id, listingId, "favorite");
   return ok({ favorited: true });
 });
+
+/**
+ * Writes favorite/unfavorite straight into user_listing_events server-side
+ * (rather than relying on the client's POST /listing-events) so this signal
+ * lands even if the client misses it, and so unfavoriting - which deletes
+ * the favorite_listings row - doesn't destroy the history entirely.
+ * Best-effort: never let a logging failure fail the favorite toggle itself.
+ */
+async function logListingEvent(
+  userId: string,
+  listingId: number,
+  eventType: "favorite" | "unfavorite",
+): Promise<void> {
+  try {
+    await query(
+      `INSERT INTO public.user_listing_events (user_id, listing_id, event_type)
+       VALUES ($1, $2, $3)`,
+      [userId, listingId, eventType],
+    );
+  } catch (error) {
+    console.error("[mobile-api] favorite event logging failed:", error);
+  }
+}

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { useEffect } from "react";
 
 // Extended Review type with listing details

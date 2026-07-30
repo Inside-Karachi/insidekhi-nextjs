@@ -133,12 +133,15 @@ export async function getListingCategoryIdsMap(
      WHERE listing_id = ANY($1::bigint[])
      ORDER BY listing_id, is_primary DESC, category_id ASC`,
     [listingIds],
-  )) as { rows: Array<{ listing_id: number; category_id: number }> };
+  )) as { rows: Array<{ listing_id: number | string; category_id: number | string }> };
 
   for (const row of rows) {
-    const list = map.get(row.listing_id) ?? [];
-    list.push(row.category_id);
-    map.set(row.listing_id, list);
+    // listing_id is bigint - node-postgres returns bigint columns as strings,
+    // so the map key must be normalized or every .get(number) lookup misses.
+    const listingId = Number(row.listing_id);
+    const list = map.get(listingId) ?? [];
+    list.push(Number(row.category_id));
+    map.set(listingId, list);
   }
   return map;
 }

@@ -34,7 +34,7 @@ import {
   Check,
 } from "lucide-react";
 import { TabsContent } from "@/components/ui/tabs";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { BankCardImage } from "@/components/bank-cards/BankCardImage";
 
 type Deal = Database["public"]["Tables"]["deals"]["Row"] & {

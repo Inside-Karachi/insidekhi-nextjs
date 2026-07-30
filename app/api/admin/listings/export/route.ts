@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { Parser } from "json2csv";
-import type { Database } from "@/types/supabase";
+import { getListingCategoryIdsMap } from "@/lib/listings/sync-listing-categories";
+import type { Database } from "@/types/database";
 
 type ExportListingRow = Database["public"]["Tables"]["listings"]["Row"] & {
-  categories?: SupabaseCategory;
+  categories?: SupabaseCategory[];
   listing_features?: SupabaseFeature[];
   opening_hours?: SupabaseOpeningHour[];
   deals?: SupabaseDeal[];
@@ -128,8 +129,16 @@ export async function POST(request: NextRequest) {
 
     if (includeRelated && listings.length > 0) {
       const listingIds = listings.map((l) => l.id);
+      const categoryIdsByListing = await getListingCategoryIdsMap(listingIds);
       const categoryIds = [
-        ...new Set(listings.map((l) => l.category_id).filter((id): id is number => id != null)),
+        ...new Set(
+          [
+            ...listings
+              .map((l) => l.category_id)
+              .filter((id): id is number => id != null),
+            ...[...categoryIdsByListing.values()].flat(),
+          ],
+        ),
       ];
 
       const [
@@ -319,9 +328,12 @@ export async function POST(request: NextRequest) {
       }
 
       for (const listing of listings) {
-        listing.categories = listing.category_id
-          ? categoryById.get(listing.category_id) || null
-          : null;
+        const ids =
+          categoryIdsByListing.get(listing.id) ??
+          (listing.category_id != null ? [listing.category_id] : []);
+        listing.categories = ids
+          .map((id) => categoryById.get(id))
+          .filter((c): c is NonNullable<typeof c> => !!c);
         listing.listing_features = featuresByListingId.get(listing.id) || [];
         listing.opening_hours = hoursByListingId.get(listing.id) || [];
         listing.deals = dealsByListingId.get(listing.id) || [];
@@ -522,13 +534,16 @@ function formatFeatures(features: SupabaseFeature[]): string {
     .join(", ");
 }
 
-type SupabaseCategory = { name?: string; parent?: { name?: string } } | null;
-function formatCategories(category: SupabaseCategory): string {
-  if (!category) return "";
-  if (category.parent) {
-    return `${normalizeExportText(category.parent.name)} > ${normalizeExportText(category.name)}`;
-  }
-  return normalizeExportText(category.name);
+type SupabaseCategory = { name?: string; parent?: { name?: string } };
+function formatCategories(categories: SupabaseCategory[] | null): string {
+  if (!categories || categories.length === 0) return "";
+  return categories
+    .map((category) =>
+      category.parent
+        ? `${normalizeExportText(category.parent.name)} > ${normalizeExportText(category.name)}`
+        : normalizeExportText(category.name),
+    )
+    .join(", ");
 }
 
 type SupabaseImage = { url?: string; display_order?: number | null };

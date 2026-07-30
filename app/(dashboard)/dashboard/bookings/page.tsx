@@ -3,7 +3,7 @@ import {
   BookingsDashboard,
   DashboardBooking,
 } from "@/components/dashboard/BookingsDashboard";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { requireSessionUser } from "@/lib/auth/require-session";
 
 export const dynamic = "force-dynamic";

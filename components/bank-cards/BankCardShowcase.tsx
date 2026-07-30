@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { BankCardImage, BankCardFallback } from "./BankCardImage";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 // Use real Supabase types
 type CardVariant = Database["public"]["Tables"]["card_variants"]["Row"];

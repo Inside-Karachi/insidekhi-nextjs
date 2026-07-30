@@ -1,4 +1,5 @@
 import { query } from "@/lib/db";
+import type { Json } from "@/types/database";
 
 export type AuditAction =
   // User Management
@@ -78,9 +79,9 @@ export async function logAuditEvent(data: AuditLogData) {
         data.action,
         data.entity_type || null,
         data.entity_id || null,
-        data.old_values ? JSON.stringify(data.old_values) : null,
-        data.new_values ? JSON.stringify(data.new_values) : null,
-        data.metadata ? JSON.stringify(data.metadata) : null,
+        (data.old_values || null) as Json | null,
+        (data.new_values || null) as Json | null,
+        (data.metadata || null) as Json | null,
         ipAddress,
         data.user_agent || null,
       ],

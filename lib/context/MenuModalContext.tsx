@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useState, ReactNode } from "react";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 // This type is used by ListingMenu and now also by our context
 type MenuSection = Database["public"]["Tables"]["menu_sections"]["Row"] & {

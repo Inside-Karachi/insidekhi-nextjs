@@ -1,5 +1,4 @@
 import { MobileApiError } from "./errors";
-import { getBearerToken, createMobileUserClient, createMobilePublicClient, type MobileSupabase } from "./supabase";
 import { verifyToken } from "@/lib/auth/jwt";
 
 export type MobileUser = {
@@ -8,14 +7,30 @@ export type MobileUser = {
   role: string;
 };
 
+/**
+ * Extracts a Bearer token from the `Authorization` header.
+ * Returns null when absent or malformed. Tokens are accepted ONLY from this
+ * header.
+ */
+function getBearerToken(request: Request): string | null {
+  const header =
+    request.headers.get("authorization") ??
+    request.headers.get("Authorization");
+  if (!header) return null;
+
+  const [scheme, token] = header.split(" ");
+  if (!token || scheme?.toLowerCase() !== "bearer") return null;
+
+  const trimmed = token.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 export type MobileAuthContext = {
   user: MobileUser;
-  supabase: MobileSupabase;
 };
 
 export type MobileOptionalAuthContext = {
   user: MobileUser | null;
-  supabase: MobileSupabase;
 };
 
 /**
@@ -43,15 +58,12 @@ export async function requireMobileUser(
     );
   }
 
-  const supabase = createMobileUserClient(token);
-
   return {
     user: {
       id: payload.userId,
       email: payload.email,
       role: payload.role,
     },
-    supabase,
   };
 }
 
@@ -63,15 +75,13 @@ export async function getOptionalMobileUser(
 ): Promise<MobileOptionalAuthContext> {
   const token = getBearerToken(request);
   if (!token) {
-    return { user: null, supabase: createMobilePublicClient() };
+    return { user: null };
   }
 
   const payload = await verifyToken(token);
   if (!payload) {
-    return { user: null, supabase: createMobilePublicClient() };
+    return { user: null };
   }
-
-  const supabase = createMobileUserClient(token);
 
   return {
     user: {
@@ -79,7 +89,6 @@ export async function getOptionalMobileUser(
       email: payload.email,
       role: payload.role,
     },
-    supabase,
   };
 }
 

@@ -1,7 +1,7 @@
 import { PremiumListingsGrid } from "@/components/listings/PremiumListingsGrid";
 import { FeaturedListingsCarousel } from "@/components/listings/FeaturedListingsCarousel";
 import { PremiumListingsHeaderInline as PremiumListingsHeader } from "@/components/listings/PremiumListingsHeaderInline";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { buildGridSearchParams } from "@/lib/utils/listings-filters";
 import { query } from "@/lib/db";
 import {

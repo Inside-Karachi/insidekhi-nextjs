@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Sparkles } from "lucide-react";
 import { PremiumHeading } from "@/components/brand/Typography";
 
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import {
   sectionVariants,
   cardGridVariants,

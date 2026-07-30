@@ -3,7 +3,7 @@
  * rules in one place: no `select("*")` pass-through ever reaches the client, and
  * other users' auth UUIDs are never exposed (only `is_own` + display fields).
  */
-import type { Database, Json } from "@/types/supabase";
+import type { Database, Json } from "@/types/database";
 import type {
   NotificationFeedItem,
   NotificationChannel,

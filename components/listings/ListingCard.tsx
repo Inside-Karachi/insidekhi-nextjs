@@ -7,7 +7,7 @@ import { toggleFavorite } from "@/lib/favorites";
 import { useFavoritesStore } from "@/lib/context/favoritesStore";
 import { useToast } from "@/hooks/use-toast";
 import { useState } from "react";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { getListingImageUrl } from "@/lib/utils/listing-images";
 import Link from "next/link";
 import {

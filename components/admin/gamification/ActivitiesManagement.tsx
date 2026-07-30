@@ -34,7 +34,7 @@ import {
   ToggleLeft,
   ToggleRight,
 } from "lucide-react";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 
 type XPActivity = Database["public"]["Tables"]["xp_activities"]["Row"];
 

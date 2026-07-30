@@ -2,7 +2,7 @@ import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
-import type { Json } from "@/types/supabase";
+import type { Json } from "@/types/database";
 
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const BREVO_SENDER_EMAIL =

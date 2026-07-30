@@ -2,18 +2,23 @@
 import { query } from "@/lib/db";
 import { FeaturedListingsSection } from "@/components/homepage/FeaturedListingsSection";
 import { getFavoritedListingIdsForUser } from "@/lib/utils/favorites-server";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 export async function FeaturedListingsContainer() {
   try {
     const { rows: featuredListings } = await query(
-      `SELECT * FROM listings_with_details
-         WHERE is_featured = true AND status = 'published'
-         ORDER BY display_order DESC NULLS LAST, created_at DESC
+      `SELECT lwd.*, COALESCE(parent.name, cat.name) AS category_group
+         FROM listings_with_details lwd
+         LEFT JOIN categories cat ON lwd.category_id = cat.id
+         LEFT JOIN categories parent ON cat.parent_id = parent.id
+         WHERE lwd.is_featured = true AND lwd.status = 'published'
+         ORDER BY lwd.display_order DESC NULLS LAST, lwd.created_at DESC
          LIMIT 6`,
     );
 
-    type ListingRow = Database["public"]["Views"]["listings_with_details"]["Row"];
+    type ListingRow = Database["public"]["Views"]["listings_with_details"]["Row"] & {
+      category_group?: string | null;
+    };
     type HydratedListing = ListingRow & { favorited?: boolean };
     // node-pg returns bigint columns (id) as strings; normalize to number to
     // match the shape callers/components expect.

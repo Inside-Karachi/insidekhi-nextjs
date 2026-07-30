@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { requireStaff, getAdminAuthErrorStatus } from "@/lib/auth/admin";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 import type { FormSubmissionWithAssets } from "@/types/form.types";
 
 // GET all form submissions (admin only)

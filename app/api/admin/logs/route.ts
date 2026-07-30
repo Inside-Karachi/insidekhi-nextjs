@@ -1,7 +1,7 @@
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import type { Json } from "@/types/supabase";
+import type { Json } from "@/types/database";
 
 export async function GET(request: NextRequest) {
   const session = await getSessionFromCookies();

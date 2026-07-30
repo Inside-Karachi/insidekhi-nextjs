@@ -24,7 +24,7 @@ import {
   Settings,
   Loader2,
 } from "lucide-react";
-import type { Database } from "@/types/supabase";
+import type { Database } from "@/types/database";
 
 type Listing = Database["public"]["Tables"]["listings"]["Row"];
 

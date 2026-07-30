@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ArrowRight, Eye, ChefHat, Download, FileText } from "lucide-react";
 import { PremiumHeading } from "@/components/brand/Typography";
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 import { useMenuModal } from "@/lib/context/MenuModalContext";
 
 type MenuSection = Database["public"]["Tables"]["menu_sections"]["Row"] & {

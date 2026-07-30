@@ -1,4 +1,4 @@
-import { Database } from "@/types/supabase";
+import { Database } from "@/types/database";
 
 // FavoriteListing type: combines listings_with_details view row with favorited_at
 // timestamp and its images (fetched separately from listing_images).

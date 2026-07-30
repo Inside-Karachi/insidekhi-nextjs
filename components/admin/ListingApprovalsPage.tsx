@@ -52,7 +52,7 @@ interface Listing {
   reviewed_at?: string;
   review_notes?: string;
   owner_id: string;
-  categories?: { id: number; name: string; icon_name?: string };
+  categories?: { id: number; name: string; icon_name?: string }[];
   profiles?: { id: string; full_name?: string };
   deletion_request?: {
     id: number;

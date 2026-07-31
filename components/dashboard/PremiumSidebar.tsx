@@ -31,6 +31,7 @@ import {
   ScanLine,
   ClipboardCheck,
   Store,
+  PenSquare,
 } from "lucide-react";
 
 const navigation = [
@@ -41,6 +42,7 @@ const navigation = [
   { name: "My Bookings", href: "/dashboard/bookings", icon: Calendar },
   { name: "Favorites", href: "/dashboard/favorites", icon: Heart },
   { name: "Reviews", href: "/dashboard/reviews", icon: Star },
+  { name: "Become a Writer", href: "/dashboard/writer/apply", icon: PenSquare },
 ];
 
 // Business Owner navigation
@@ -55,6 +57,13 @@ const businessOwnerNavigation = [
   { name: "Analytics", href: "/dashboard/business/analytics", icon: BarChart3 },
   { name: "Reviews", href: "/dashboard/business/reviews", icon: Star },
   { name: "Reports", href: "/dashboard/business/reports", icon: FileText },
+];
+
+// Writer navigation
+const writerNavigation = [
+  { name: "Home", href: "/", icon: Home },
+  { name: "Dashboard", href: "/dashboard/writer", icon: LayoutDashboard },
+  { name: "My Posts", href: "/dashboard/writer/blogs", icon: PenSquare },
 ];
 
 // Admin-focused navigation for staff accounts
@@ -84,6 +93,17 @@ const listerNavigation = [
   },
   { name: "Review Moderation", href: "/admin/reviews", icon: Star },
   { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList },
+  {
+    name: "Blog Approvals",
+    href: "/admin/blogs/approvals",
+    icon: ClipboardCheck,
+  },
+  {
+    name: "Writer Applications",
+    href: "/admin/writer-applications",
+    icon: PenSquare,
+  },
+  { name: "Blog Categories", href: "/admin/blog-categories", icon: FileText },
 ];
 
 // Limited data-entry navigation — capacity fields only
@@ -111,6 +131,13 @@ const organizerSecondaryNavigation = [
 
 // Business Owner secondary navigation
 const businessOwnerSecondaryNavigation = [
+  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
+  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
+  { name: "Settings", href: "/dashboard/settings", icon: Settings },
+];
+
+// Writer secondary navigation
+const writerSecondaryNavigation = [
   { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
   { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
@@ -151,6 +178,17 @@ const adminNavigation: SidebarNavItem[] = [
   },
   { name: "Review Moderation", href: "/admin/reviews", icon: Star },
   { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList },
+  {
+    name: "Blog Approvals",
+    href: "/admin/blogs/approvals",
+    icon: ClipboardCheck,
+  },
+  {
+    name: "Writer Applications",
+    href: "/admin/writer-applications",
+    icon: PenSquare,
+  },
+  { name: "Blog Categories", href: "/admin/blog-categories", icon: FileText },
   { name: "Gamification", href: "/admin/gamification", icon: Trophy },
   {
     name: "Listing Scraper",
@@ -262,10 +300,16 @@ export function PremiumSidebar({
   const isDataEntry = activeRole === "data_entry";
   const isOrganizer = activeRole === "organizer";
   const isBusinessOwner = activeRole === "business_owner";
+  const isWriter = activeRole === "writer";
 
   // Only fetch gamification data for regular users
   const shouldShowGamification =
-    !isAdmin && !isLister && !isDataEntry && !isOrganizer && !isBusinessOwner;
+    !isAdmin &&
+    !isLister &&
+    !isDataEntry &&
+    !isOrganizer &&
+    !isBusinessOwner &&
+    !isWriter;
   const { xpTotal, rank } = useUserGamification(
     shouldShowGamification ? user.id : "",
   );
@@ -342,8 +386,9 @@ export function PremiumSidebar({
     if (isDataEntry) return dataEntryNavigation;
     if (isOrganizer) return organizerMainNavigation;
     if (isBusinessOwner) return businessOwnerNavigation;
+    if (isWriter) return writerNavigation;
     return navigation;
-  }, [isAdmin, isLister, isDataEntry, isOrganizer, isBusinessOwner]);
+  }, [isAdmin, isLister, isDataEntry, isOrganizer, isBusinessOwner, isWriter]);
 
   // Create admin section for admin users
   const adminSection = React.useMemo(() => {
@@ -372,8 +417,9 @@ export function PremiumSidebar({
     if (isDataEntry) return dataEntrySecondaryNavigation;
     if (isOrganizer) return organizerSecondaryNavigation;
     if (isBusinessOwner) return businessOwnerSecondaryNavigation;
+    if (isWriter) return writerSecondaryNavigation;
     return secondaryNavigation; // Public users get achievements
-  }, [isAdmin, isLister, isDataEntry, isOrganizer, isBusinessOwner]);
+  }, [isAdmin, isLister, isDataEntry, isOrganizer, isBusinessOwner, isWriter]);
 
   const handleSignOut = async () => {
     try {
@@ -442,6 +488,8 @@ export function PremiumSidebar({
                         <Calendar className="h-6 w-6 text-white" />
                       ) : isBusinessOwner ? (
                         <Store className="h-6 w-6 text-white" />
+                      ) : isWriter ? (
+                        <PenSquare className="h-6 w-6 text-white" />
                       ) : (
                         <Sparkles className="h-6 w-6 text-primary-foreground" />
                       )}
@@ -460,7 +508,9 @@ export function PremiumSidebar({
                                   ? "Event Organizer"
                                   : isBusinessOwner
                                     ? "Business Owner"
-                                    : currentRankDisplay || "Unranked"}
+                                    : isWriter
+                                      ? "Writer"
+                                      : currentRankDisplay || "Unranked"}
                       </h3>
                       <p className="text-sm text-muted-foreground">
                         {activeRole === "public_user"
@@ -475,7 +525,9 @@ export function PremiumSidebar({
                                   ? "Organizer Account"
                                   : isBusinessOwner
                                     ? "Business Account"
-                                    : `${xpTotal || profile?.points || 0} XP`}
+                                    : isWriter
+                                      ? "Writer Account"
+                                      : `${xpTotal || profile?.points || 0} XP`}
                       </p>
                     </div>
                   </div>
@@ -527,6 +579,17 @@ export function PremiumSidebar({
                       </p>
                     </div>
                   )}
+                  {isWriter &&
+                    !isAdmin &&
+                    !isLister &&
+                    !isOrganizer &&
+                    !isBusinessOwner && (
+                      <div className="p-3 bg-gradient-to-r from-primary/10 to-primary/5 rounded-xl border border-primary/20">
+                        <p className="text-xs text-primary font-medium">
+                          Blog Writer Access
+                        </p>
+                      </div>
+                    )}
                 </div>
 
                 {/* Quick Stats */}

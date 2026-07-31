@@ -5,10 +5,27 @@ import {
   isDataEntryRoute,
 } from "@/lib/middleware/admin";
 import { getSession } from "@/lib/auth/session";
+import { corsHeaders } from "@/lib/mobile/cors";
 
 export async function middleware(request: NextRequest) {
-  const sessionUser = await getSession(request);
   const pathname = request.nextUrl.pathname;
+
+  // Mobile API: Bearer-token auth, no cookie session — skip the admin/session
+  // logic below entirely and just handle CORS (only Expo web needs it; native
+  // fetch isn't subject to it, but the preflight must still be answered).
+  if (pathname.startsWith("/api/mobile/")) {
+    const headers = corsHeaders(request.headers.get("origin"));
+
+    if (request.method === "OPTIONS") {
+      return new NextResponse(null, { status: 204, headers });
+    }
+
+    const response = NextResponse.next();
+    Object.entries(headers).forEach(([key, value]) => response.headers.set(key, value));
+    return response;
+  }
+
+  const sessionUser = await getSession(request);
 
   // data_entry may ONLY access listing-capacity (site-wide, not just under /admin)
   if (sessionUser?.role === "data_entry" && !isDataEntryRoute(pathname)) {
@@ -73,5 +90,6 @@ export const config = {
   matcher: [
     "/((?!monitoring|api|_next|__nextjs|favicon\\.ico|.*\\..+$).*)",
     "/api/admin/:path*",
+    "/api/mobile/:path*",
   ],
 };

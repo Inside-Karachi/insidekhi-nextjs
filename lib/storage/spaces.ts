@@ -15,6 +15,7 @@ export const MENU_ITEM_IMAGES_PREFIX = "menu-item-images";
 export const LISTING_PDFS_PREFIX = "listing-pdfs";
 export const SHARE_SCREENSHOTS_PREFIX = "share-screenshots";
 export const BANKS_PREFIX = "banks";
+export const BLOG_IMAGES_PREFIX = "blog-images";
 
 /** Known prefixes that were historically mistaken for Spaces bucket names. */
 export const SPACES_ASSET_PREFIXES = [
@@ -25,6 +26,7 @@ export const SPACES_ASSET_PREFIXES = [
   LISTING_PDFS_PREFIX,
   SHARE_SCREENSHOTS_PREFIX,
   BANKS_PREFIX,
+  BLOG_IMAGES_PREFIX,
 ] as const;
 
 export type SpacesAssetPrefix = (typeof SPACES_ASSET_PREFIXES)[number];

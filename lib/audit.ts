@@ -36,6 +36,11 @@ export type AuditAction =
   | "review_created"
   | "review_updated"
   | "review_deleted"
+  // Blog Operations
+  | "post_created"
+  | "post_updated"
+  | "post_deleted"
+  | "writer_application_reviewed"
   // Category Operations
   | "category_created"
   | "category_updated"

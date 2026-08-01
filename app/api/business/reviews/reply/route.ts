@@ -7,6 +7,12 @@ import {
   handleApiError,
 } from "@/lib/business-owner/api-utils";
 import { z } from "zod";
+import {
+  createNotification,
+  resolveCategorySlugForRole,
+  dispatchEmailOutboxBatch,
+} from "@/lib/notifications";
+import type { NotificationUserRole } from "@/types/notifications.types";
 
 export const dynamic = "force-dynamic";
 
@@ -33,7 +39,7 @@ export async function POST(request: NextRequest) {
 
     // Get the review and verify ownership
     const { rows: reviewRows } = await query(
-      `SELECT r.id, r.listing_id, l.owner_id
+      `SELECT r.id, r.listing_id, l.owner_id, l.name AS listing_name
        FROM reviews r
        JOIN listings l ON l.id = r.listing_id
        WHERE r.id = $1`,
@@ -75,7 +81,59 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // TODO: Notify admins for moderation (implement when notification system is ready)
+    // Notify listers/admins that a reply needs moderation.
+    try {
+      const { rows: recipients } = await query(
+        `SELECT id, role FROM profiles WHERE role::text = ANY($1::text[])`,
+        [["lister", "admin", "super_admin"]],
+      );
+
+      if (recipients.length) {
+        const categoryCache = new Map<NotificationUserRole, string>();
+        await Promise.allSettled(
+          recipients.map(async (recipient) => {
+            try {
+              const role = recipient.role as NotificationUserRole;
+              if (!categoryCache.has(role)) {
+                categoryCache.set(role, await resolveCategorySlugForRole(role));
+              }
+              await createNotification({
+                recipientId: recipient.id,
+                roleScope: role,
+                categorySlug: categoryCache.get(role)!,
+                title: "New review reply pending moderation",
+                body: `A business owner replied to a review on "${review.listing_name}".`,
+                priority: "normal",
+                ctaLabel: "Review Reply",
+                ctaUrl: "/admin/reviews",
+                metadata: {
+                  comment_id: comment.id,
+                  review_id: reviewId,
+                  listing_id: review.listing_id,
+                  listing_name: review.listing_name,
+                },
+              });
+            } catch (notificationError) {
+              console.error(
+                "Failed to queue review reply notification:",
+                notificationError,
+              );
+            }
+          }),
+        );
+
+        try {
+          await dispatchEmailOutboxBatch({});
+        } catch (dispatchError) {
+          console.error(
+            "Failed to dispatch review reply notifications:",
+            dispatchError,
+          );
+        }
+      }
+    } catch (notifyError) {
+      console.error("Failed to notify staff of review reply:", notifyError);
+    }
 
     return apiSuccess({
       commentId: comment.id,

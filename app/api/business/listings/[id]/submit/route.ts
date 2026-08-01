@@ -7,6 +7,12 @@ import {
   apiError,
   handleApiError,
 } from "@/lib/business-owner/api-utils";
+import {
+  createNotification,
+  resolveCategorySlugForRole,
+  dispatchEmailOutboxBatch,
+} from "@/lib/notifications";
+import type { NotificationUserRole } from "@/types/notifications.types";
 
 export const dynamic = "force-dynamic";
 
@@ -110,8 +116,58 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // TODO: Notify admins for review (implement when notification system is ready)
-    // await notifyAdminsNewListing(listingId);
+    // Notify listers/admins that a listing needs review.
+    try {
+      const { rows: recipients } = await query(
+        `SELECT id, role FROM profiles WHERE role::text = ANY($1::text[])`,
+        [["lister", "admin", "super_admin"]],
+      );
+
+      if (recipients.length) {
+        const categoryCache = new Map<NotificationUserRole, string>();
+        await Promise.allSettled(
+          recipients.map(async (recipient) => {
+            try {
+              const role = recipient.role as NotificationUserRole;
+              if (!categoryCache.has(role)) {
+                categoryCache.set(role, await resolveCategorySlugForRole(role));
+              }
+              await createNotification({
+                recipientId: recipient.id,
+                roleScope: role,
+                categorySlug: categoryCache.get(role)!,
+                title: "New listing submitted for review",
+                body: `"${listing.name}" was submitted and is awaiting approval.`,
+                priority: "normal",
+                ctaLabel: "Review Listing",
+                ctaUrl: "/admin/listings/approvals",
+                metadata: {
+                  listing_id: listingId,
+                  listing_name: listing.name,
+                  owner_id: userId,
+                },
+              });
+            } catch (notificationError) {
+              console.error(
+                "Failed to queue listing submission notification:",
+                notificationError,
+              );
+            }
+          }),
+        );
+
+        try {
+          await dispatchEmailOutboxBatch({});
+        } catch (dispatchError) {
+          console.error(
+            "Failed to dispatch listing submission notifications:",
+            dispatchError,
+          );
+        }
+      }
+    } catch (notifyError) {
+      console.error("Failed to notify staff of listing submission:", notifyError);
+    }
 
     return apiSuccess(
       { submitted: true, status: "pending_approval" },

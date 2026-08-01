@@ -53,7 +53,7 @@ export async function resolveCategorySlugForRole(
 ): Promise<string> {
   const { rows: targetedRows } = await query(
     `SELECT slug FROM public.notification_categories
-     WHERE audience_roles @> ARRAY[$1]::text[]
+     WHERE audience_roles @> ARRAY[$1]::public.user_role[]
      ORDER BY is_mandatory DESC
      LIMIT 1`,
     [role]

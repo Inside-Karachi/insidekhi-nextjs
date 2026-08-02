@@ -67,6 +67,17 @@ export default async function EventPage({
   );
 
   const eventImages = (eventImagesData || []) as EventImage[];
+  // TEMP PREVIEW ONLY - revert before commit
+  if (eventImages.length === 0 && event.id === 85) {
+    eventImages.push({
+      id: -1,
+      event_id: 85,
+      url: "/tmp-preview-farmhouse.jpg",
+      alt_text: "Paaltu FarmHouse preview",
+      is_primary: true,
+      display_order: 1,
+    } as EventImage);
+  }
 
   // Get hero images from event_images table
   const heroImages =

@@ -79,6 +79,16 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
   const images = imagesRes.rows.map(
     (row) => ({ ...row, id: Number(row.id) }) as unknown as EventImageRow,
   );
+
+  // TEMP PREVIEW ONLY - revert before commit
+  if (eventId === 85 && images.length === 0) {
+    images.push({
+      id: -1,
+      url: "http://localhost:3000/tmp-preview-farmhouse.jpg",
+      alt_text: "Paaltu FarmHouse preview",
+      display_order: 1,
+    } as unknown as EventImageRow);
+  }
   const tickets = ticketsRes.rows.map(
     (row) =>
       ({

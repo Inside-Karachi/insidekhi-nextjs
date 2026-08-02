@@ -121,6 +121,13 @@ export const GET = mobileRoute(async (request: NextRequest) => {
 
   const events = rows.map(toEventCardRow).map(toEventCard);
 
+  // TEMP PREVIEW ONLY - revert before commit
+  const previewIdx = events.findIndex((e) => e.event_id === 85);
+  if (previewIdx !== -1) {
+    (events[previewIdx] as unknown as Record<string, unknown>).image_url =
+      "http://localhost:3000/tmp-preview-farmhouse.jpg";
+  }
+
   return ok(events, {
     pagination: buildPaginationMeta(page, limit, count),
   });

@@ -126,6 +126,18 @@ export default async function EventsPage({ searchParams }: EventsPageProps) {
     }
   }
 
+  // TEMP PREVIEW ONLY - revert before commit
+  if (!primaryImageByEvent.has(85)) {
+    primaryImageByEvent.set(85, {
+      id: -1,
+      event_id: 85,
+      url: "/tmp-preview-farmhouse.jpg",
+      alt_text: "Paaltu FarmHouse preview",
+      is_primary: true,
+      display_order: 1,
+    } as EventImage);
+  }
+
   // Helper to map DB row to Event (attach only primary image)
   const mapRowToEvent = (row: EventWithDetails): Event => {
     const eid = Number(row.event_id);

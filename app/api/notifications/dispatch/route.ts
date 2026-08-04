@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { dispatchEmailOutboxBatch } from "@/lib/notifications";
+import {
+  dispatchEmailOutboxBatch,
+  dispatchPushOutboxBatch,
+} from "@/lib/notifications";
 
 const DISPATCH_SECRET =
   process.env.NOTIFICATIONS_DISPATCH_TOKEN ?? process.env.CRON_SECRET ?? null;
@@ -54,13 +57,16 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now();
 
   try {
-    const summary = await dispatchEmailOutboxBatch({ limit });
+    const [email, push] = await Promise.all([
+      dispatchEmailOutboxBatch({ limit }),
+      dispatchPushOutboxBatch({ limit }),
+    ]);
     const durationMs = Date.now() - startedAt;
 
     return NextResponse.json({
       success: true,
       durationMs,
-      summary,
+      summary: { email, push },
     });
   } catch (error) {
     console.error("POST /api/notifications/dispatch failed", error);

@@ -10,6 +10,7 @@ import type {
 } from "@/types/notifications.types";
 
 import { NotificationEmailError, sendNotificationEmail } from "./email";
+import { NotificationPushError, sendNotificationPush } from "./push";
 import { generateBookingConfirmationEmail } from "@/lib/emails/booking-confirmation-template";
 
 const MAX_BATCH_SIZE = 25;
@@ -689,3 +690,370 @@ export async function dispatchEmailOutboxBatch(
 }
 
 export class EmailDispatchError extends NotificationDispatchError {}
+
+type PushChannelRecord = NotificationChannelRecord & {
+  notification: NotificationRecord | null;
+};
+
+type PushOutboxRow = NotificationOutboxRecord & {
+  notification_channel: PushChannelRecord | null;
+};
+
+async function fetchPushOutboxRows(
+  limit: number,
+  now: Date,
+): Promise<PushOutboxRow[]> {
+  const nowIso = now.toISOString();
+
+  const { rows } = await query(
+    `SELECT
+       o.id, o.notification_channel_id, o.retry_count, o.scheduled_for, o.status,
+       o.next_attempt_at, o.locked_at, o.locked_by, o.last_error, o.created_at, o.updated_at,
+       json_build_object(
+         'id', nc.id,
+         'notification_id', nc.notification_id,
+         'channel', nc.channel,
+         'status', nc.status,
+         'attempt_count', nc.attempt_count,
+         'last_attempted_at', nc.last_attempted_at,
+         'sent_at', nc.sent_at,
+         'provider_message_id', nc.provider_message_id,
+         'deliver_after', nc.deliver_after,
+         'error', nc.error,
+         'created_at', nc.created_at,
+         'updated_at', nc.updated_at,
+         'notification', json_build_object(
+           'id', n.id,
+           'recipient_id', n.recipient_id,
+           'role_scope', n.role_scope,
+           'category_slug', n.category_slug,
+           'title', n.title,
+           'body', n.body,
+           'metadata', n.metadata,
+           'priority', n.priority,
+           'triggered_at', n.triggered_at,
+           'cta_label', n.cta_label,
+           'cta_url', n.cta_url
+         )
+       ) AS notification_channel
+     FROM public.notification_outbox o
+     INNER JOIN public.notification_channels nc ON nc.id = o.notification_channel_id AND nc.channel = 'push'
+     INNER JOIN public.notifications n ON n.id = nc.notification_id
+     WHERE o.status = 'pending'
+       AND o.locked_at IS NULL
+       AND o.scheduled_for <= $1
+     ORDER BY o.scheduled_for ASC
+     LIMIT $2`,
+    [nowIso, limit],
+  );
+
+  const typedRows = rows as unknown as PushOutboxRow[];
+  const nowTs = now.getTime();
+
+  return typedRows.filter((row) => {
+    if (!row.notification_channel || !row.notification_channel.notification) {
+      return false;
+    }
+    if (!row.next_attempt_at) {
+      return true;
+    }
+    const nextAttemptTs = Date.parse(row.next_attempt_at);
+    return Number.isNaN(nextAttemptTs) ? true : nextAttemptTs <= nowTs;
+  });
+}
+
+async function fetchPushTokens(userId: string): Promise<string[]> {
+  try {
+    const { rows } = await query(
+      `SELECT expo_push_token FROM public.push_tokens WHERE user_id = $1`,
+      [userId],
+    );
+    return rows.map((row) => row.expo_push_token as string);
+  } catch (error) {
+    console.error(
+      `[notifications] Failed to load push tokens for ${userId}`,
+      error,
+    );
+    return [];
+  }
+}
+
+async function deleteDeadPushTokens(tokens: string[]): Promise<void> {
+  if (tokens.length === 0) {
+    return;
+  }
+  try {
+    await query(
+      `DELETE FROM public.push_tokens WHERE expo_push_token = ANY($1)`,
+      [tokens],
+    );
+  } catch (error) {
+    console.error("[notifications] Failed to prune dead push tokens", error);
+  }
+}
+
+function isRetryablePushError(error: unknown): boolean {
+  if (error instanceof NotificationPushError) {
+    if (error.message.includes("No push tokens")) {
+      return false;
+    }
+    const status = extractStatusCode(error.message);
+    if (status !== null) {
+      if (status === 429) {
+        return true;
+      }
+      if (status >= 500) {
+        return true;
+      }
+      if (status >= 400) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return true;
+}
+
+async function safeLogPushSent(
+  notificationId: string,
+  outboxId: number,
+): Promise<void> {
+  try {
+    await logNotificationSent(notificationId, "push", { outboxId });
+  } catch (error) {
+    console.error(
+      `[notifications] Failed to log notification_sent for ${notificationId}`,
+      error,
+    );
+  }
+}
+
+async function safeLogPushFailure(
+  notificationId: string,
+  channelId: number,
+  outcome: "failed" | "deferred",
+  retries: number,
+  outboxId: number,
+  error: unknown,
+  nextAttemptAt?: string | null,
+) {
+  try {
+    await logNotificationFailed(notificationId, "push", error, {
+      outcome,
+      retries,
+      outboxId,
+      channelId,
+      nextAttemptAt: nextAttemptAt ?? null,
+    });
+  } catch (logError) {
+    console.error(
+      `[notifications] Failed to log notification_failed for ${notificationId}`,
+      logError,
+    );
+  }
+}
+
+async function handlePushDispatchFailure(
+  row: PushOutboxRow,
+  channel: PushChannelRecord,
+  notification: NotificationRecord,
+  lockToken: string,
+  attemptIso: string,
+  error: unknown,
+): Promise<"failed" | "deferred"> {
+  const nextRetryCount = (row.retry_count ?? 0) + 1;
+  const serializedError = serializeErrorDetails(error);
+  const hasRetriesLeft =
+    nextRetryCount < MAX_RETRY_ATTEMPTS && isRetryablePushError(error);
+
+  try {
+    await query(
+      `UPDATE public.notification_channels
+       SET status = $1, last_attempted_at = $2, attempt_count = $3, error = $4
+       WHERE id = $5`,
+      [
+        hasRetriesLeft ? "pending" : "failed",
+        attemptIso,
+        (channel.attempt_count ?? 0) + 1,
+        serializedError,
+        channel.id,
+      ],
+    );
+  } catch (channelError) {
+    throw new NotificationDispatchError(
+      `Failed to update channel ${channel.id} after error: ${(channelError as Error).message}`,
+      channelError,
+    );
+  }
+
+  const nextAttemptAt = hasRetriesLeft
+    ? new Date(Date.now() + getBackoffDelayMs(nextRetryCount)).toISOString()
+    : null;
+
+  try {
+    await query(
+      `UPDATE public.notification_outbox
+       SET retry_count = $1, last_error = $2, locked_at = NULL, locked_by = NULL,
+           updated_at = $3, status = $4, next_attempt_at = $5
+       WHERE id = $6 AND locked_by = $7`,
+      [
+        nextRetryCount,
+        serializedError,
+        attemptIso,
+        hasRetriesLeft ? "pending" : "failed",
+        nextAttemptAt,
+        row.id,
+        lockToken,
+      ],
+    );
+  } catch (outboxError) {
+    throw new NotificationDispatchError(
+      `Failed to persist outbox failure for ${row.id}: ${(outboxError as Error).message}`,
+      outboxError,
+    );
+  }
+
+  await safeLogPushFailure(
+    notification.id,
+    channel.id,
+    hasRetriesLeft ? "deferred" : "failed",
+    nextRetryCount,
+    row.id,
+    error,
+    nextAttemptAt,
+  );
+
+  return hasRetriesLeft ? "deferred" : "failed";
+}
+
+/**
+ * Sends pending `push` outbox rows via Expo's push API. Fans out to every
+ * device token a recipient has registered; drops tokens Expo reports as
+ * `DeviceNotRegistered` so dead installs stop being retried.
+ */
+export async function dispatchPushOutboxBatch(
+  options?: DispatchOptions,
+): Promise<DispatchSummary> {
+  const limit = clampLimit(options?.limit);
+  const now = new Date();
+  const recoveredLocks = await releaseStaleLocks(
+    new Date(now.getTime() - LOCK_TIMEOUT_MS).toISOString(),
+  );
+
+  const rows = await fetchPushOutboxRows(limit, now);
+
+  const summary: DispatchSummary = {
+    attempted: 0,
+    sent: 0,
+    deferred: 0,
+    failed: 0,
+    skipped: 0,
+    recoveredLocks,
+    errors: [],
+  };
+
+  if (!rows.length) {
+    return summary;
+  }
+
+  const tokenCache = new Map<string, string[]>();
+
+  for (const row of rows) {
+    const channel = row.notification_channel;
+    if (!channel || channel.channel !== "push" || !channel.notification) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    const notification = channel.notification;
+
+    const lockToken = randomUUID();
+    const locked = await attemptLockOutboxRow(row.id, lockToken);
+    if (!locked) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    summary.attempted += 1;
+    const attemptIso = new Date().toISOString();
+
+    try {
+      let tokens = tokenCache.get(notification.recipient_id);
+      if (!tokens) {
+        tokens = await fetchPushTokens(notification.recipient_id);
+        tokenCache.set(notification.recipient_id, tokens);
+      }
+
+      if (tokens.length === 0) {
+        throw new NotificationPushError("No push tokens for recipient");
+      }
+
+      const result = await sendNotificationPush({
+        recipient: { tokens },
+        title: notification.title,
+        body: notification.body,
+        data: {
+          notificationId: notification.id,
+          categorySlug: notification.category_slug,
+          ctaUrl: notification.cta_url,
+        },
+      });
+
+      const deadTokens = result.tickets
+        .filter((ticket) => ticket.deviceNotRegistered)
+        .map((ticket) => ticket.token);
+      if (deadTokens.length > 0) {
+        await deleteDeadPushTokens(deadTokens);
+        tokenCache.set(
+          notification.recipient_id,
+          tokens.filter((token) => !deadTokens.includes(token)),
+        );
+      }
+
+      const anySucceeded = result.tickets.some((ticket) => ticket.ok);
+      if (!anySucceeded) {
+        const message =
+          result.tickets
+            .map((ticket) => ticket.error)
+            .filter(Boolean)
+            .join("; ") || "All push tickets failed";
+        throw new NotificationPushError(message);
+      }
+
+      await markChannelSuccess(channel, attemptIso, null);
+      await markOutboxSuccess(row.id, lockToken, attemptIso);
+      await safeLogPushSent(notification.id, row.id);
+      summary.sent += 1;
+    } catch (error) {
+      try {
+        const outcome = await handlePushDispatchFailure(
+          row,
+          channel,
+          notification,
+          lockToken,
+          attemptIso,
+          error,
+        );
+        if (outcome === "failed") {
+          summary.failed += 1;
+          summary.errors.push({
+            outboxId: row.id,
+            message: formatError(error),
+          });
+        } else {
+          summary.deferred += 1;
+        }
+      } catch (innerError) {
+        summary.failed += 1;
+        summary.errors.push({
+          outboxId: row.id,
+          message: formatError(innerError),
+        });
+      }
+    }
+  }
+
+  return summary;
+}
+
+export class PushDispatchError extends NotificationDispatchError {}

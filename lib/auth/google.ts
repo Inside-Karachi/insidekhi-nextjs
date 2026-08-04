@@ -53,6 +53,34 @@ export function buildGoogleAuthUrl(params: {
 }
 
 /**
+ * Verifies a Google-issued ID token (from either the web authorization-code
+ * exchange below, or one handed directly to the mobile app by the native
+ * Google Sign-In SDK) and returns its profile claims. The mobile SDK is
+ * configured with the same web client id as `GOOGLE_CLIENT_ID`, so its ID
+ * tokens pass the same audience check as the web flow's.
+ */
+export async function verifyGoogleIdToken(
+  idToken: string
+): Promise<GoogleIdTokenPayload> {
+  const { payload } = await jwtVerify(idToken, googleJwks, {
+    issuer: GOOGLE_ISSUERS,
+    audience: getGoogleClientId(),
+  });
+
+  if (!payload.sub || typeof payload.email !== "string") {
+    throw new Error("Google ID token is missing required claims");
+  }
+
+  return {
+    sub: payload.sub,
+    email: payload.email,
+    email_verified: payload.email_verified === true,
+    name: typeof payload.name === "string" ? payload.name : undefined,
+    picture: typeof payload.picture === "string" ? payload.picture : undefined,
+  };
+}
+
+/**
  * Exchanges an authorization code for tokens and returns the verified ID token payload.
  */
 export async function exchangeGoogleCode(
@@ -84,20 +112,5 @@ export async function exchangeGoogleCode(
     throw new Error("Google token response did not include an id_token");
   }
 
-  const { payload } = await jwtVerify(idToken, googleJwks, {
-    issuer: GOOGLE_ISSUERS,
-    audience: getGoogleClientId(),
-  });
-
-  if (!payload.sub || typeof payload.email !== "string") {
-    throw new Error("Google ID token is missing required claims");
-  }
-
-  return {
-    sub: payload.sub,
-    email: payload.email,
-    email_verified: payload.email_verified === true,
-    name: typeof payload.name === "string" ? payload.name : undefined,
-    picture: typeof payload.picture === "string" ? payload.picture : undefined,
-  };
+  return verifyGoogleIdToken(idToken);
 }

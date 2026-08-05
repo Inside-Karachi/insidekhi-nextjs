@@ -83,6 +83,34 @@ export function buildAppleAuthUrl(params: {
 }
 
 /**
+ * Verifies an Apple-issued ID token against a given audience. The web flow's
+ * token is audienced to the Services ID (`APPLE_CLIENT_ID`); a native
+ * in-app Sign in with Apple token (from `expo-apple-authentication`) is
+ * audienced to the app's Bundle ID instead - callers pass whichever
+ * audience applies.
+ */
+export async function verifyAppleIdToken(
+  idToken: string,
+  audience: string | string[]
+): Promise<AppleIdTokenPayload> {
+  const { payload } = await jwtVerify(idToken, appleJwks, {
+    issuer: APPLE_ISSUER,
+    audience,
+  });
+
+  if (!payload.sub || typeof payload.email !== "string") {
+    throw new Error("Apple ID token is missing required claims");
+  }
+
+  return {
+    sub: payload.sub,
+    email: payload.email,
+    email_verified:
+      payload.email_verified === true || payload.email_verified === "true",
+  };
+}
+
+/**
  * Exchanges an authorization code for tokens and returns the verified ID token payload.
  */
 export async function exchangeAppleCode(
@@ -116,19 +144,5 @@ export async function exchangeAppleCode(
     throw new Error("Apple token response did not include an id_token");
   }
 
-  const { payload } = await jwtVerify(idToken, appleJwks, {
-    issuer: APPLE_ISSUER,
-    audience: getAppleClientId(),
-  });
-
-  if (!payload.sub || typeof payload.email !== "string") {
-    throw new Error("Apple ID token is missing required claims");
-  }
-
-  return {
-    sub: payload.sub,
-    email: payload.email,
-    email_verified:
-      payload.email_verified === true || payload.email_verified === "true",
-  };
+  return verifyAppleIdToken(idToken, getAppleClientId());
 }

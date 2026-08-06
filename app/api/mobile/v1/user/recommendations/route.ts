@@ -7,6 +7,7 @@ import { query } from "@/lib/db";
 import {
   toListingCard,
   toListingImage,
+  toNumericListingRow,
   LISTING_CARD_COLUMNS,
   type ListingImageDTO,
   type ListingRowLike,
@@ -21,16 +22,6 @@ export const dynamic = "force-dynamic";
 // Same Karachi bounding box used by the nearby-listings server action.
 const LAT_BOUNDS = { min: 24.7, max: 25.0 };
 const LNG_BOUNDS = { min: 66.9, max: 67.4 };
-
-function toNumericListingRow(row: Record<string, unknown>): ListingRowLike {
-  return {
-    ...row,
-    id: Number(row.id),
-    category_id: row.category_id !== null ? Number(row.category_id) : null,
-    review_count: row.review_count !== null ? Number(row.review_count) : null,
-    avg_rating: row.avg_rating !== null ? Number(row.avg_rating) : null,
-  } as unknown as ListingRowLike;
-}
 
 function parseCoord(raw: string | null, bounds: { min: number; max: number }): number | null {
   if (!raw) return null;

@@ -6,8 +6,8 @@ import {
   LISTING_CARD_COLUMNS,
   toListingCard,
   toListingImage,
+  toNumericListingRow,
   type ListingImageDTO,
-  type ListingRowLike,
 } from "@/lib/mobile/mappers";
 import {
   buildPaginationMeta,
@@ -22,17 +22,6 @@ type RecentlyAddedRow = Record<string, unknown> & {
   id: number | string;
   added_at: string | null;
 };
-
-/** `pg` returns bigint and numeric columns as strings; normalize them for the DTO mapper. */
-function toNumericListingRow(row: RecentlyAddedRow): ListingRowLike {
-  return {
-    ...row,
-    id: Number(row.id),
-    category_id: row.category_id !== null ? Number(row.category_id) : null,
-    review_count: row.review_count !== null ? Number(row.review_count) : null,
-    avg_rating: row.avg_rating !== null ? Number(row.avg_rating) : null,
-  } as unknown as ListingRowLike;
-}
 
 /**
  * GET /api/mobile/v1/listings/recently-added

@@ -6,8 +6,8 @@ import {
   LISTING_CARD_COLUMNS,
   toListingCard,
   toListingImage,
+  toNumericListingRow,
   type ListingImageDTO,
-  type ListingRowLike,
 } from "@/lib/mobile/mappers";
 import {
   buildPaginationMeta,
@@ -32,16 +32,6 @@ type HiddenGemRow = Record<string, unknown> & {
   discovery_score: number | string | null;
   favorite_count: number | string | null;
 };
-
-function toNumericListingRow(row: HiddenGemRow): ListingRowLike {
-  return {
-    ...row,
-    id: Number(row.id),
-    category_id: row.category_id !== null ? Number(row.category_id) : null,
-    review_count: row.review_count !== null ? Number(row.review_count) : null,
-    avg_rating: row.avg_rating !== null ? Number(row.avg_rating) : null,
-  } as unknown as ListingRowLike;
-}
 
 const CARD_COLUMNS_QUALIFIED = LISTING_CARD_COLUMNS.split(", ")
   .map((column) => `ld.${column}`)

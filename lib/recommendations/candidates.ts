@@ -95,6 +95,23 @@ export function computeOpenState(
   return isOpen ? "open" : "closed";
 }
 
+/**
+ * Structural "stays open late" signal for the Late Night discovery intent
+ * (lib/discovery/intents.ts) - true if any day's hours cross midnight or
+ * fall within 23:00-05:00, regardless of what time it is right now. This is
+ * independent of {@link computeOpenState} ("is it open right now"): a
+ * listing that closes at 2am is a late-night venue at 6pm just as much as
+ * at 1am, it just isn't *open* at 6pm.
+ */
+export function computeClosesLate(rows: OpeningHourRow[] | undefined): boolean {
+  if (!rows || rows.length === 0) return false;
+  return rows.some((r) => {
+    if (r.is_closed) return false;
+    if (!r.open_time || !r.close_time) return false;
+    return r.close_time <= r.open_time || r.close_time <= "05:00:00" || r.close_time >= "23:00:00";
+  });
+}
+
 export type CandidateContext = {
   lat: number | null;
   lng: number | null;
@@ -205,6 +222,7 @@ export async function getRecommendationCandidates(
       openState: computeOpenState(hoursByListing.get(base.id), ctx.now),
       ageDays,
       avgRating: meta?.avgRating ?? null,
+      closesLate: computeClosesLate(hoursByListing.get(base.id)),
     });
   }
 

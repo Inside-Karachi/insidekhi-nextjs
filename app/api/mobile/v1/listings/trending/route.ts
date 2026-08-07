@@ -8,9 +8,9 @@ import { MobileApiError } from "@/lib/mobile/errors";
 import {
   toListingCard,
   toListingImage,
+  toNumericListingRow,
   LISTING_CARD_COLUMNS,
   type ListingImageDTO,
-  type ListingRowLike,
 } from "@/lib/mobile/mappers";
 
 export const dynamic = "force-dynamic";
@@ -18,17 +18,6 @@ export const dynamic = "force-dynamic";
 type TrendingSource = "pinned" | "organic" | "backfilled";
 
 type TrendingRow = Record<string, unknown> & { id: number | string };
-
-/** `id`/`category_id`/etc come back as strings from pg for bigint columns - convert before use. Mirrors listings/route.ts. */
-function toNumericListingRow(row: Record<string, unknown>): ListingRowLike {
-  return {
-    ...row,
-    id: Number(row.id),
-    category_id: row.category_id !== null ? Number(row.category_id) : null,
-    review_count: row.review_count !== null ? Number(row.review_count) : null,
-    avg_rating: row.avg_rating !== null ? Number(row.avg_rating) : null,
-  } as unknown as ListingRowLike;
-}
 
 // `listings_with_details` is a DB-defined view; the trending-override columns
 // live on the base `listings` table (added after the view existed), so every

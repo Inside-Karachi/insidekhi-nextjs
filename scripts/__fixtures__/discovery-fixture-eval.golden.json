@@ -1,0 +1,1072 @@
+{
+  "date-night": [
+    {
+      "id": 1,
+      "categoryId": 81,
+      "distanceMeters": 265,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.8565,
+      "breakdown": {
+        "categoryFit": 0.7,
+        "proximity": 0.9155,
+        "openNow": 1,
+        "freshness": 0.0128,
+        "rating": 0.88,
+        "price": 0
+      }
+    },
+    {
+      "id": 23,
+      "categoryId": 18,
+      "distanceMeters": 387,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 1415,
+      "score": 0.8452,
+      "breakdown": {
+        "categoryFit": 0.55,
+        "proximity": 0.879,
+        "openNow": 1,
+        "freshness": 0.02,
+        "rating": 1,
+        "price": 0
+      }
+    },
+    {
+      "id": 75,
+      "categoryId": 99,
+      "distanceMeters": 6399,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.7364,
+      "breakdown": {
+        "categoryFit": 0.85,
+        "proximity": 0.1185,
+        "openNow": 1,
+        "freshness": 0.2607,
+        "rating": 0.62,
+        "price": 0
+      }
+    },
+    {
+      "id": 26,
+      "categoryId": 105,
+      "distanceMeters": 7798,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.7169,
+      "breakdown": {
+        "categoryFit": 0.6,
+        "proximity": 0.0743,
+        "openNow": 1,
+        "freshness": 0.322,
+        "rating": 0.94,
+        "price": 0
+      }
+    },
+    {
+      "id": 78,
+      "categoryId": 99,
+      "distanceMeters": 7985,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.7043,
+      "breakdown": {
+        "categoryFit": 0.85,
+        "proximity": 0.0698,
+        "openNow": 1,
+        "freshness": 0.0334,
+        "rating": 0.62,
+        "price": 0
+      }
+    },
+    {
+      "id": 2,
+      "categoryId": 81,
+      "distanceMeters": 4742,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 2492,
+      "score": 0.7646,
+      "breakdown": {
+        "categoryFit": 0.7,
+        "proximity": 0.2058,
+        "openNow": 1,
+        "freshness": 0.0849,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 22,
+      "categoryId": 18,
+      "distanceMeters": 1925,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 719,
+      "score": 0.7328,
+      "breakdown": {
+        "categoryFit": 0.55,
+        "proximity": 0.5264,
+        "openNow": 1,
+        "freshness": 0.1399,
+        "rating": 0.8,
+        "price": 0
+      }
+    },
+    {
+      "id": 3,
+      "categoryId": 81,
+      "distanceMeters": 5256,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": 3134,
+      "score": 0.7243,
+      "breakdown": {
+        "categoryFit": 0.7,
+        "proximity": 0.1734,
+        "openNow": 1,
+        "freshness": 0.1931,
+        "rating": 0.72,
+        "price": 0
+      }
+    }
+  ],
+  "friends-visiting": [
+    {
+      "id": 84,
+      "categoryId": 97,
+      "distanceMeters": 7373,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.8386,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.0856,
+        "openNow": 1,
+        "freshness": 0.0337,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 1,
+      "categoryId": 81,
+      "distanceMeters": 265,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.838,
+      "breakdown": {
+        "categoryFit": 0.6,
+        "proximity": 0.9155,
+        "openNow": 1,
+        "freshness": 0.0128,
+        "rating": 0.88,
+        "price": 0
+      }
+    },
+    {
+      "id": 90,
+      "categoryId": 135,
+      "distanceMeters": 2326,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.8307,
+      "breakdown": {
+        "categoryFit": 0.9,
+        "proximity": 0.4606,
+        "openNow": 1,
+        "freshness": 0.1238,
+        "rating": 0.84,
+        "price": 0
+      }
+    },
+    {
+      "id": 23,
+      "categoryId": 18,
+      "distanceMeters": 387,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 1415,
+      "score": 0.8267,
+      "breakdown": {
+        "categoryFit": 0.5,
+        "proximity": 0.879,
+        "openNow": 1,
+        "freshness": 0.02,
+        "rating": 1,
+        "price": 0
+      }
+    },
+    {
+      "id": 51,
+      "categoryId": 90,
+      "distanceMeters": 2837,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.7334,
+      "breakdown": {
+        "categoryFit": 0.7,
+        "proximity": 0.3884,
+        "openNow": 1,
+        "freshness": 0.2818,
+        "rating": 0.74,
+        "price": 0
+      }
+    },
+    {
+      "id": 75,
+      "categoryId": 99,
+      "distanceMeters": 6399,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.702,
+      "breakdown": {
+        "categoryFit": 0.95,
+        "proximity": 0.1185,
+        "openNow": 1,
+        "freshness": 0.2607,
+        "rating": 0.62,
+        "price": 0
+      }
+    },
+    {
+      "id": 36,
+      "categoryId": 106,
+      "distanceMeters": 1527,
+      "openState": "closed",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.6218,
+      "breakdown": {
+        "categoryFit": 0.7,
+        "proximity": 0.6011,
+        "openNow": 0.15,
+        "freshness": 0.1252,
+        "rating": 0.82,
+        "price": 0
+      }
+    },
+    {
+      "id": 80,
+      "categoryId": 97,
+      "distanceMeters": 4884,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.8043,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.1963,
+        "openNow": 1,
+        "freshness": 0.7919,
+        "rating": 0.76,
+        "price": 0
+      }
+    }
+  ],
+  "late-night": [
+    {
+      "id": 23,
+      "categoryId": 18,
+      "distanceMeters": 387,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 1415,
+      "score": 0.8636,
+      "breakdown": {
+        "categoryFit": 0.5,
+        "proximity": 0.879,
+        "openNow": 1,
+        "freshness": 0.02,
+        "rating": 1,
+        "price": 0
+      }
+    },
+    {
+      "id": 9,
+      "categoryId": 82,
+      "distanceMeters": 1517,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.8332,
+      "breakdown": {
+        "categoryFit": 0.9,
+        "proximity": 0.6031,
+        "openNow": 1,
+        "freshness": 0.0171,
+        "rating": 0.72,
+        "price": 0
+      }
+    },
+    {
+      "id": 2,
+      "categoryId": 81,
+      "distanceMeters": 4742,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 2492,
+      "score": 0.6826,
+      "breakdown": {
+        "categoryFit": 0.6,
+        "proximity": 0.2058,
+        "openNow": 1,
+        "freshness": 0.0849,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 55,
+      "categoryId": 92,
+      "distanceMeters": 5267,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.6755,
+      "breakdown": {
+        "categoryFit": 0.5,
+        "proximity": 0.1728,
+        "openNow": 1,
+        "freshness": 0.1728,
+        "rating": 0.92,
+        "price": 0
+      }
+    },
+    {
+      "id": 59,
+      "categoryId": 92,
+      "distanceMeters": 5416,
+      "openState": null,
+      "closesLate": true,
+      "minPricePerPerson": 2304,
+      "score": 0.4274,
+      "breakdown": {
+        "categoryFit": 0.5,
+        "proximity": 0.1644,
+        "openNow": 0,
+        "freshness": 0.4697,
+        "rating": 0.8,
+        "price": 0
+      }
+    },
+    {
+      "id": 22,
+      "categoryId": 18,
+      "distanceMeters": 1925,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 719,
+      "score": 0.7459,
+      "breakdown": {
+        "categoryFit": 0.5,
+        "proximity": 0.5264,
+        "openNow": 1,
+        "freshness": 0.1399,
+        "rating": 0.8,
+        "price": 0
+      }
+    },
+    {
+      "id": 40,
+      "categoryId": 108,
+      "distanceMeters": 8451,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 2935,
+      "score": 0.6492,
+      "breakdown": {
+        "categoryFit": 0.6,
+        "proximity": 0.0598,
+        "openNow": 1,
+        "freshness": 0.4697,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 4,
+      "categoryId": 81,
+      "distanceMeters": 2588,
+      "openState": "unknown",
+      "closesLate": true,
+      "minPricePerPerson": 1844,
+      "score": 0.5355,
+      "breakdown": {
+        "categoryFit": 0.6,
+        "proximity": 0.422,
+        "openNow": 0.5,
+        "freshness": 0.425,
+        "rating": 0.66,
+        "price": 0
+      }
+    }
+  ],
+  "need-peace": [
+    {
+      "id": 69,
+      "categoryId": 95,
+      "distanceMeters": 192,
+      "openState": null,
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.9369,
+      "breakdown": {
+        "categoryFit": 0.9,
+        "proximity": 0.938,
+        "openNow": 0,
+        "freshness": 0.1037,
+        "rating": 0.98,
+        "price": 0
+      }
+    },
+    {
+      "id": 61,
+      "categoryId": 136,
+      "distanceMeters": 9412,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": 2104,
+      "score": 0.813,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.0434,
+        "openNow": 1,
+        "freshness": 0.0858,
+        "rating": 0.88,
+        "price": 0
+      }
+    },
+    {
+      "id": 26,
+      "categoryId": 105,
+      "distanceMeters": 7798,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.8084,
+      "breakdown": {
+        "categoryFit": 0.85,
+        "proximity": 0.0743,
+        "openNow": 1,
+        "freshness": 0.322,
+        "rating": 0.94,
+        "price": 0
+      }
+    },
+    {
+      "id": 23,
+      "categoryId": 18,
+      "distanceMeters": 387,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 1415,
+      "score": 0.7827,
+      "breakdown": {
+        "categoryFit": 0.4,
+        "proximity": 0.879,
+        "openNow": 1,
+        "freshness": 0.02,
+        "rating": 1,
+        "price": 0
+      }
+    },
+    {
+      "id": 68,
+      "categoryId": 95,
+      "distanceMeters": 1082,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.8748,
+      "breakdown": {
+        "categoryFit": 0.9,
+        "proximity": 0.6972,
+        "openNow": 1,
+        "freshness": 0.322,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 29,
+      "categoryId": 105,
+      "distanceMeters": 3039,
+      "openState": "unknown",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.7651,
+      "breakdown": {
+        "categoryFit": 0.85,
+        "proximity": 0.3631,
+        "openNow": 0.5,
+        "freshness": 0.0776,
+        "rating": 1,
+        "price": 0
+      }
+    },
+    {
+      "id": 70,
+      "categoryId": 95,
+      "distanceMeters": 7736,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.8002,
+      "breakdown": {
+        "categoryFit": 0.9,
+        "proximity": 0.0759,
+        "openNow": 1,
+        "freshness": 0.1931,
+        "rating": 0.86,
+        "price": 0
+      }
+    },
+    {
+      "id": 28,
+      "categoryId": 105,
+      "distanceMeters": 8329,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": 1811,
+      "score": 0.7475,
+      "breakdown": {
+        "categoryFit": 0.85,
+        "proximity": 0.0623,
+        "openNow": 1,
+        "freshness": 0.013,
+        "rating": 0.82,
+        "price": 0
+      }
+    }
+  ],
+  "one-hour-free": [
+    {
+      "id": 23,
+      "categoryId": 18,
+      "distanceMeters": 387,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 1415,
+      "score": 0.9179,
+      "breakdown": {
+        "categoryFit": 0.8,
+        "proximity": 0.879,
+        "openNow": 1,
+        "freshness": 0.02,
+        "rating": 1,
+        "price": 0
+      }
+    },
+    {
+      "id": 69,
+      "categoryId": 95,
+      "distanceMeters": 192,
+      "openState": null,
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.8275,
+      "breakdown": {
+        "categoryFit": 0.5,
+        "proximity": 0.938,
+        "openNow": 0,
+        "freshness": 0.1037,
+        "rating": 0.98,
+        "price": 0
+      }
+    },
+    {
+      "id": 9,
+      "categoryId": 82,
+      "distanceMeters": 1517,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.7325,
+      "breakdown": {
+        "categoryFit": 0.7,
+        "proximity": 0.6031,
+        "openNow": 1,
+        "freshness": 0.0171,
+        "rating": 0.72,
+        "price": 0
+      }
+    },
+    {
+      "id": 68,
+      "categoryId": 95,
+      "distanceMeters": 1082,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.7585,
+      "breakdown": {
+        "categoryFit": 0.5,
+        "proximity": 0.6972,
+        "openNow": 1,
+        "freshness": 0.322,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 22,
+      "categoryId": 18,
+      "distanceMeters": 1925,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 719,
+      "score": 0.7412,
+      "breakdown": {
+        "categoryFit": 0.8,
+        "proximity": 0.5264,
+        "openNow": 1,
+        "freshness": 0.1399,
+        "rating": 0.8,
+        "price": 0
+      }
+    },
+    {
+      "id": 19,
+      "categoryId": 18,
+      "distanceMeters": 2225,
+      "openState": "unknown",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.5414,
+      "breakdown": {
+        "categoryFit": 0.8,
+        "proximity": 0.4763,
+        "openNow": 0.5,
+        "freshness": 0.0214,
+        "rating": 0.9,
+        "price": 0
+      }
+    }
+  ],
+  "budget-friendly": [
+    {
+      "id": 9,
+      "categoryId": 82,
+      "distanceMeters": 1517,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.9178,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.6031,
+        "openNow": 1,
+        "freshness": 0.0171,
+        "rating": 0.72,
+        "price": 0
+      }
+    },
+    {
+      "id": 23,
+      "categoryId": 18,
+      "distanceMeters": 387,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 1415,
+      "score": 0.8492,
+      "breakdown": {
+        "categoryFit": 0.8,
+        "proximity": 0.879,
+        "openNow": 1,
+        "freshness": 0.02,
+        "rating": 1,
+        "price": 0.836
+      }
+    },
+    {
+      "id": 37,
+      "categoryId": 108,
+      "distanceMeters": 9537,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.807,
+      "breakdown": {
+        "categoryFit": 0.9,
+        "proximity": 0.0416,
+        "openNow": 1,
+        "freshness": 0.6271,
+        "rating": 0.72,
+        "price": 0
+      }
+    },
+    {
+      "id": 7,
+      "categoryId": 82,
+      "distanceMeters": 4339,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.9075,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.2354,
+        "openNow": 1,
+        "freshness": 0.6703,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 10,
+      "categoryId": 82,
+      "distanceMeters": 3467,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.8976,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.3148,
+        "openNow": 1,
+        "freshness": 0.0471,
+        "rating": 0.96,
+        "price": 0
+      }
+    },
+    {
+      "id": 8,
+      "categoryId": 82,
+      "distanceMeters": 4766,
+      "openState": null,
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.8773,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.2042,
+        "openNow": 0,
+        "freshness": 0.0436,
+        "rating": 0.88,
+        "price": 0
+      }
+    },
+    {
+      "id": 22,
+      "categoryId": 18,
+      "distanceMeters": 1925,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 719,
+      "score": 0.8354,
+      "breakdown": {
+        "categoryFit": 0.8,
+        "proximity": 0.5264,
+        "openNow": 1,
+        "freshness": 0.1399,
+        "rating": 0.8,
+        "price": 1
+      }
+    },
+    {
+      "id": 12,
+      "categoryId": 82,
+      "distanceMeters": 9611,
+      "openState": "unknown",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.7833,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.0406,
+        "openNow": 0.5,
+        "freshness": 0.0703,
+        "rating": 0.98,
+        "price": 0
+      }
+    }
+  ],
+  "something-new": [
+    {
+      "id": 60,
+      "categoryId": 92,
+      "distanceMeters": 7661,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": 1808,
+      "score": 0.8423,
+      "breakdown": {
+        "categoryFit": 0,
+        "proximity": 0.0778,
+        "openNow": 1,
+        "freshness": 0.9565,
+        "rating": 0.8,
+        "price": 0
+      }
+    },
+    {
+      "id": 48,
+      "categoryId": 84,
+      "distanceMeters": 8822,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.8209,
+      "breakdown": {
+        "categoryFit": 0,
+        "proximity": 0.0528,
+        "openNow": 1,
+        "freshness": 0.8559,
+        "rating": 0.98,
+        "price": 0
+      }
+    },
+    {
+      "id": 80,
+      "categoryId": 97,
+      "distanceMeters": 4884,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.7634,
+      "breakdown": {
+        "categoryFit": 0,
+        "proximity": 0.1963,
+        "openNow": 1,
+        "freshness": 0.7919,
+        "rating": 0.76,
+        "price": 0
+      }
+    },
+    {
+      "id": 7,
+      "categoryId": 82,
+      "distanceMeters": 4339,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.7346,
+      "breakdown": {
+        "categoryFit": 0,
+        "proximity": 0.2354,
+        "openNow": 1,
+        "freshness": 0.6703,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 42,
+      "categoryId": 108,
+      "distanceMeters": 9798,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.6927,
+      "breakdown": {
+        "categoryFit": 0,
+        "proximity": 0.0382,
+        "openNow": 1,
+        "freshness": 0.6778,
+        "rating": 0.76,
+        "price": 0
+      }
+    },
+    {
+      "id": 102,
+      "categoryId": 131,
+      "distanceMeters": 3380,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 1203,
+      "score": 0.69,
+      "breakdown": {
+        "categoryFit": 0,
+        "proximity": 0.3241,
+        "openNow": 1,
+        "freshness": 0.6556,
+        "rating": 0.78,
+        "price": 0
+      }
+    },
+    {
+      "id": 96,
+      "categoryId": 93,
+      "distanceMeters": 7148,
+      "openState": null,
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.684,
+      "breakdown": {
+        "categoryFit": 0,
+        "proximity": 0.0923,
+        "openNow": 0,
+        "freshness": 0.6854,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 85,
+      "categoryId": 135,
+      "distanceMeters": 6261,
+      "openState": "unknown",
+      "closesLate": false,
+      "minPricePerPerson": 1417,
+      "score": 0.6619,
+      "breakdown": {
+        "categoryFit": 0,
+        "proximity": 0.1241,
+        "openNow": 0.5,
+        "freshness": 0.6778,
+        "rating": 0.92,
+        "price": 0
+      }
+    }
+  ],
+  "family-time": [
+    {
+      "id": 23,
+      "categoryId": 18,
+      "distanceMeters": 387,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": 1415,
+      "score": 0.8193,
+      "breakdown": {
+        "categoryFit": 0.5,
+        "proximity": 0.879,
+        "openNow": 1,
+        "freshness": 0.02,
+        "rating": 1,
+        "price": 0
+      }
+    },
+    {
+      "id": 89,
+      "categoryId": 135,
+      "distanceMeters": 863,
+      "openState": "unknown",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.806,
+      "breakdown": {
+        "categoryFit": 0.95,
+        "proximity": 0.75,
+        "openNow": 0.5,
+        "freshness": 0.2412,
+        "rating": 0.86,
+        "price": 0
+      }
+    },
+    {
+      "id": 1,
+      "categoryId": 81,
+      "distanceMeters": 265,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.7979,
+      "breakdown": {
+        "categoryFit": 0.55,
+        "proximity": 0.9155,
+        "openNow": 1,
+        "freshness": 0.0128,
+        "rating": 0.88,
+        "price": 0
+      }
+    },
+    {
+      "id": 66,
+      "categoryId": 136,
+      "distanceMeters": 522,
+      "openState": "closed",
+      "closesLate": true,
+      "minPricePerPerson": 1182,
+      "score": 0.7596,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.8403,
+        "openNow": 0.15,
+        "freshness": 0.0992,
+        "rating": 0.92,
+        "price": 0
+      }
+    },
+    {
+      "id": 78,
+      "categoryId": 99,
+      "distanceMeters": 7985,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.6565,
+      "breakdown": {
+        "categoryFit": 0.9,
+        "proximity": 0.0698,
+        "openNow": 1,
+        "freshness": 0.0334,
+        "rating": 0.62,
+        "price": 0
+      }
+    },
+    {
+      "id": 84,
+      "categoryId": 97,
+      "distanceMeters": 7373,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": null,
+      "score": 0.6425,
+      "breakdown": {
+        "categoryFit": 0.7,
+        "proximity": 0.0856,
+        "openNow": 1,
+        "freshness": 0.0337,
+        "rating": 0.9,
+        "price": 0
+      }
+    },
+    {
+      "id": 90,
+      "categoryId": 135,
+      "distanceMeters": 2326,
+      "openState": "open",
+      "closesLate": true,
+      "minPricePerPerson": null,
+      "score": 0.8056,
+      "breakdown": {
+        "categoryFit": 0.95,
+        "proximity": 0.4606,
+        "openNow": 1,
+        "freshness": 0.1238,
+        "rating": 0.84,
+        "price": 0
+      }
+    },
+    {
+      "id": 61,
+      "categoryId": 136,
+      "distanceMeters": 9412,
+      "openState": "open",
+      "closesLate": false,
+      "minPricePerPerson": 2104,
+      "score": 0.728,
+      "breakdown": {
+        "categoryFit": 1,
+        "proximity": 0.0434,
+        "openNow": 1,
+        "freshness": 0.0858,
+        "rating": 0.88,
+        "price": 0
+      }
+    }
+  ]
+}

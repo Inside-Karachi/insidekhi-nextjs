@@ -38,6 +38,8 @@ export type CandidateInput = {
   avgRating: number | null;
   /** Impression-fatigue signal in [0,1]; 0 (default) is a structural no-op until Phase 2 data exists. */
   seenScore?: number;
+  /** Structural "stays open late" signal (see candidates.ts's computeClosesLate) - unused by this file's own scorer, read by lib/discovery's Late Night intent. Optional so older fixtures/tests that predate this field still compile. */
+  closesLate?: boolean;
 };
 
 export type ScoringContext = {
@@ -171,6 +173,14 @@ function jaccard(a: number[], b: number[]): number {
   return union === 0 ? 0 : intersection / union;
 }
 
+/** Minimal shape {@link diversify} needs - satisfied by ScoredCandidate and lib/discovery's ScoredDiscoveryCandidate alike. */
+export type Diversifiable = {
+  id: number;
+  score: number;
+  categoryIds: number[];
+  parentCategoryIds: number[];
+};
+
 /**
  * Greedy MMR re-rank over scored candidates, with hard caps of
  * <=MMR_MAX_PER_SUBCATEGORY sharing a subcategory and <=MMR_MAX_PER_PARENT
@@ -183,19 +193,22 @@ function jaccard(a: number[], b: number[]): number {
  * top-ranked candidates near any given point used to be almost all food, so
  * the parent cap "ran out of room" within a narrow slice and backfilled with
  * more food instead of ever reaching non-food candidates ranked lower.
+ *
+ * Generic over any {@link Diversifiable} (not hardcoded to ScoredCandidate)
+ * so lib/discovery's per-intent scorer can reuse this exact, already-tuned
+ * re-rank instead of a second copy - it only ever reads id/score/categoryIds
+ * /parentCategoryIds, never the score breakdown, so the wider "Recommended
+ * For You" shape was never actually required here.
  */
-export function diversify(
-  scored: ScoredCandidate[],
-  limit: number,
-): ScoredCandidate[] {
+export function diversify<T extends Diversifiable>(scored: T[], limit: number): T[] {
   const sorted = [...scored].sort((a, b) => b.score - a.score);
 
-  const selected: ScoredCandidate[] = [];
+  const selected: T[] = [];
   const subCounts = new Map<number, number>();
   const parentCounts = new Map<number, number>();
   const remaining = [...sorted];
 
-  const violatesCaps = (c: ScoredCandidate): boolean => {
+  const violatesCaps = (c: T): boolean => {
     for (const id of c.categoryIds) {
       if ((subCounts.get(id) ?? 0) >= MMR_MAX_PER_SUBCATEGORY) return true;
     }
@@ -205,7 +218,7 @@ export function diversify(
     return false;
   };
 
-  const commit = (c: ScoredCandidate): void => {
+  const commit = (c: T): void => {
     selected.push(c);
     for (const id of c.categoryIds) subCounts.set(id, (subCounts.get(id) ?? 0) + 1);
     for (const id of c.parentCategoryIds) {
@@ -216,7 +229,7 @@ export function diversify(
   };
 
   while (selected.length < limit && remaining.length > 0) {
-    let best: ScoredCandidate | null = null;
+    let best: T | null = null;
     let bestMmr = -Infinity;
     for (const c of remaining) {
       if (violatesCaps(c)) continue;
@@ -236,9 +249,15 @@ export function diversify(
 
   // Backfill in score order (ignoring caps) if hard caps left us short of
   // `limit` - only reachable when the whole candidate set can't fill `limit`
-  // diverse slots, e.g. thin inventory in an area.
+  // diverse slots, e.g. thin inventory in an area. Iterates a snapshot, not
+  // `remaining` itself: commit() splices out of `remaining` as it goes, and
+  // mutating an array while a `for...of` is walking it skips every other
+  // element once the loop's cursor and the splice both shift the same index
+  // (confirmed via scripts/discovery-fixture-eval.ts's thin-pool Late Night
+  // case, which needs a 2+ item backfill far more often than "Recommended
+  // For You"'s denser candidate pool ever triggers).
   if (selected.length < limit) {
-    for (const c of remaining) {
+    for (const c of [...remaining]) {
       if (selected.length >= limit) break;
       commit(c);
     }

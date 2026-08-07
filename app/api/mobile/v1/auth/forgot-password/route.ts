@@ -6,6 +6,7 @@ import { ok } from "@/lib/mobile/response";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { query } from "@/lib/db";
+import { sendPasswordResetEmail } from "@/lib/emails/send-password-reset";
 
 export const dynamic = "force-dynamic";
 
@@ -52,14 +53,34 @@ export const POST = mobileRoute(async (request: NextRequest) => {
         [recoveryToken, now, user.id],
       );
 
-      // TODO: send this link via email once email delivery is wired up
-      // (same gap as the web route this mirrors).
       const baseUrl = (
         process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"
       ).replace(/\/+$/, "");
-      console.log(
-        `[MOBILE PASSWORD RESET LINK]: ${baseUrl}/reset-password?code=${recoveryToken}`,
+      const resetLink = `${baseUrl}/reset-password?code=${recoveryToken}`;
+
+      const { rows: profiles } = await query(
+        "SELECT full_name FROM public.profiles WHERE id = $1 LIMIT 1",
+        [user.id],
       );
+      const fullName = profiles[0]?.full_name || undefined;
+
+      const emailResult = await sendPasswordResetEmail({
+        email,
+        fullName,
+        resetLink,
+        expiryHours: 24,
+      });
+
+      if (emailResult.success) {
+        console.log(`[MOBILE PASSWORD RESET EMAIL SENT]: ${email}`, {
+          messageId: emailResult.messageId,
+        });
+      } else {
+        console.error(`[MOBILE PASSWORD RESET EMAIL FAILED]: ${email}`, {
+          error: emailResult.error,
+        });
+        console.log(`[MOBILE PASSWORD RESET LINK (BACKUP)]: ${resetLink}`);
+      }
     }
 
     try {

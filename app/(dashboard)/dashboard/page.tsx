@@ -521,7 +521,7 @@ export default async function DashboardPage() {
         name: l.name,
         slug: l.slug,
         address: l.address || "Address not available",
-        rating: l.avg_rating ?? undefined,
+        rating: l.avg_rating != null ? Number(l.avg_rating) : undefined,
         category: l.category_name ?? undefined,
         distanceKm: l.distance_meters != null ? l.distance_meters / 1000 : undefined,
         reason: isFavoriteMatch(l)

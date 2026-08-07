@@ -19,3 +19,19 @@ export type MobileAuthResponse = {
 /** Must match the `7d` expiry `lib/auth/jwt.ts`'s `signToken` sets on the JWT itself. */
 export const MOBILE_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Returned by POST /auth/signup instead of a token — the account isn't
+ * usable until the emailed OTP is confirmed via POST /auth/verify-otp. */
+export type MobileSignupResponse = {
+  requiresVerification: true;
+  email: string;
+};
+
+export type MobileVerifyOtpRequest = {
+  email: string;
+  code: string;
+};
+
+export type MobileResendOtpRequest = {
+  email: string;
+};
+

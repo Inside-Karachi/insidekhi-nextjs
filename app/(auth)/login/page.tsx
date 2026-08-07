@@ -23,10 +23,12 @@ import { AuthFormPanel, WelcomePanel } from "@/components/auth/GlassPanel";
 import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
 import { AppleSignInButton } from "@/components/auth/AppleSignInButton";
 import { useToast } from "@/hooks/use-toast";
+import { useRecaptcha } from "@/hooks/useRecaptcha";
 
 function LoginForm() {
   const searchParams = useSearchParams();
   const { toast } = useToast();
+  const { executeRecaptcha } = useRecaptcha();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +37,8 @@ function LoginForm() {
   const [showResendForm, setShowResendForm] = useState(false);
   const [resendEmail, setResendEmail] = useState("");
   const [isResending, setIsResending] = useState(false);
+  const [newsletterEmail, setNewsletterEmail] = useState("");
+  const [isNewsletterLoading, setIsNewsletterLoading] = useState(false);
 
   // Handle URL parameters on component mount
   useEffect(() => {
@@ -176,6 +180,58 @@ function LoginForm() {
     }
 
     setIsResending(false);
+  };
+
+  const handleNewsletterSubmit = async (
+    e: React.FormEvent<HTMLFormElement>,
+  ) => {
+    e.preventDefault();
+    if (!newsletterEmail.trim()) return;
+
+    setIsNewsletterLoading(true);
+    try {
+      let recaptcha_token: string | undefined;
+      try {
+        const t = await executeRecaptcha("newsletter_subscribe");
+        if (t) recaptcha_token = t;
+      } catch {
+        /* loading/exec failures fall through; server will reject in production */
+      }
+
+      const response = await fetch("/api/newsletter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: newsletterEmail.trim(),
+          source: "login_page",
+          recaptcha_token,
+        }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        toast({
+          variant: "destructive",
+          title: "Subscription Failed",
+          description: data.error || "An unexpected error occurred.",
+        });
+        return;
+      }
+
+      toast({
+        title: "Subscribed",
+        description: data.message || "You have been added to our newsletter.",
+      });
+      setNewsletterEmail("");
+    } catch {
+      toast({
+        variant: "destructive",
+        title: "Subscription Failed",
+        description: "An unexpected error occurred. Please try again.",
+      });
+    } finally {
+      setIsNewsletterLoading(false);
+    }
   };
 
   return (
@@ -511,19 +567,31 @@ function LoginForm() {
                   Join our newsletter to get exclusive deals, early access to
                   events, and the best of Karachi delivered to you.
                 </p>
-                <div className="flex gap-2">
+                <form
+                  className="flex gap-2"
+                  onSubmit={handleNewsletterSubmit}
+                >
                   <Input
                     type="email"
                     placeholder="Your best email address"
+                    value={newsletterEmail}
+                    onChange={(e) => setNewsletterEmail(e.target.value)}
+                    disabled={isNewsletterLoading}
                     className="bg-white/15 border-white/30 text-white placeholder:text-white/60 focus:border-white/50 focus:ring-white/30 text-sm"
                   />
                   <Button
+                    type="submit"
                     size="sm"
-                    className="bg-primary hover:bg-primary/90 text-white px-4 whitespace-nowrap"
+                    disabled={isNewsletterLoading || !newsletterEmail.trim()}
+                    className="bg-primary hover:bg-primary/90 text-white px-4 whitespace-nowrap disabled:opacity-50"
                   >
-                    Sign Me Up
+                    {isNewsletterLoading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      "Sign Me Up"
+                    )}
                   </Button>
-                </div>
+                </form>
               </motion.div>
             </WelcomePanel>
           </div>

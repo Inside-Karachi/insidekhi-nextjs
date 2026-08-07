@@ -8,8 +8,8 @@ import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { query } from "@/lib/db";
 import { hashPassword } from "@/lib/auth/password";
-import { signToken } from "@/lib/auth/jwt";
-import { MOBILE_TOKEN_TTL_MS, type MobileAuthResponse } from "@/types/mobile-auth.types";
+import { createAndSendSignupOtp } from "@/lib/auth/otp";
+import type { MobileSignupResponse } from "@/types/mobile-auth.types";
 import {
   sanitizeInput,
   validatePasswordStrength,
@@ -173,10 +173,11 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   const newUserId = uuidv4();
   const now = new Date().toISOString();
 
+  // email_confirmed_at stays NULL until the signup OTP is verified.
   await query(
     `INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at, created_at, updated_at, role, aud)
-     VALUES ($1, $2, $3, $4, $5, $6, 'authenticated', 'authenticated')`,
-    [newUserId, sanitizedEmail, encryptedPassword, now, now, now],
+     VALUES ($1, $2, $3, NULL, $4, $5, 'authenticated', 'authenticated')`,
+    [newUserId, sanitizedEmail, encryptedPassword, now, now],
   );
 
   try {
@@ -210,22 +211,15 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     console.error("Failed to log user signup:", logError);
   }
 
-  const token = await signToken({
+  await createAndSendSignupOtp({
     userId: newUserId,
     email: sanitizedEmail,
-    role: "public_user",
+    fullName: sanitizedFullName,
   });
 
-  const response: MobileAuthResponse = {
-    token,
-    expiresAt: new Date(Date.now() + MOBILE_TOKEN_TTL_MS).toISOString(),
-    user: {
-      id: newUserId,
-      email: sanitizedEmail,
-      role: "public_user",
-      username: trimmedUsername,
-      full_name: sanitizedFullName,
-    },
+  const response: MobileSignupResponse = {
+    requiresVerification: true,
+    email: sanitizedEmail,
   };
   return ok(response);
 });

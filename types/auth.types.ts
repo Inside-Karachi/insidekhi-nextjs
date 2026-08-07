@@ -42,12 +42,32 @@ export interface SignupRequest {
 export interface SignupResponse {
   message: string;
   redirectTo: string;
+  requiresVerification?: boolean;
   user?: {
     id: string;
     email: string;
     username: string;
     full_name?: string;
   };
+}
+
+// Signup OTP verification request/response
+export interface VerifySignupOtpRequest {
+  email: string;
+  code: string;
+}
+
+export interface VerifySignupOtpResponse {
+  message: string;
+  redirectTo: string;
+}
+
+export interface ResendSignupOtpRequest {
+  email: string;
+}
+
+export interface ResendSignupOtpResponse {
+  sent: boolean;
 }
 
 // Username availability check request

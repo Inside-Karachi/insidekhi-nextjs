@@ -3,6 +3,7 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
+import { formatEventDate } from "@/lib/utils/date-utils";
 import Link from "next/link";
 import {
   MapPin,
@@ -289,7 +290,7 @@ function RecommendationCard({
                     <div className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-amber-500/15 border border-amber-500/20">
                       <Star className="h-3 w-3 text-amber-500 fill-current" />
                       <span className="text-xs font-medium text-amber-600 dark:text-amber-400">
-                        {rating.toFixed(1)}
+                        {Number(rating).toFixed(1)}
                       </span>
                     </div>
                   )}
@@ -447,9 +448,7 @@ export function PremiumBottomSection({
                                   {event.name}
                                 </p>
                                 <p className="text-sm text-muted-foreground">
-                                  {new Date(
-                                    event.start_time,
-                                  ).toLocaleDateString()}
+                                  {formatEventDate(event.start_time).date}
                                 </p>
                               </div>
                               <ArrowRight className="h-4 w-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-1 transition-all duration-300" />

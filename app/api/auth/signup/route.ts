@@ -15,7 +15,7 @@ import {
 import { verifyRecaptcha } from "@/lib/utils/recaptcha";
 import { query } from "@/lib/db";
 import { hashPassword } from "@/lib/auth/password";
-import { setSession } from "@/lib/auth/session";
+import { createAndSendSignupOtp } from "@/lib/auth/otp";
 import { v4 as uuidv4 } from "uuid";
 
 // Username validation function
@@ -220,13 +220,11 @@ export async function POST(request: Request) {
     const newUserId = uuidv4();
     const now = new Date().toISOString();
 
-    // Insert user into auth.users (automatically confirmed in this local test mode, or you can require verification)
-    // To preserve user flow, we mark email_confirmed_at = now so they are immediately verified, OR null to require verification.
-    // Let's set email_confirmed_at = now to make login/registration frictionless and completely offline from Supabase.
+    // email_confirmed_at stays NULL until the signup OTP is verified below.
     await query(
       `INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at, created_at, updated_at, role, aud)
-       VALUES ($1, $2, $3, $4, $5, $6, 'authenticated', 'authenticated')`,
-      [newUserId, sanitizedEmail, encryptedPassword, now, now, now]
+       VALUES ($1, $2, $3, NULL, $4, $5, 'authenticated', 'authenticated')`,
+      [newUserId, sanitizedEmail, encryptedPassword, now, now]
     );
 
     // Create user profile
@@ -289,9 +287,16 @@ export async function POST(request: Request) {
       }
     }
 
+    await createAndSendSignupOtp({
+      userId: newUserId,
+      email: sanitizedEmail,
+      fullName: sanitizedFullName,
+    });
+
     const responseBody: SignupResponse = {
-      message: "Registration successful.",
-      redirectTo: `${requestUrl.origin}/dashboard`,
+      message: "Registration successful. Please verify your email.",
+      redirectTo: `${requestUrl.origin}/verify-otp?email=${encodeURIComponent(sanitizedEmail)}`,
+      requiresVerification: true,
       user: {
         id: newUserId,
         email: sanitizedEmail,
@@ -300,7 +305,7 @@ export async function POST(request: Request) {
       },
     };
 
-    const response = NextResponse.json(responseBody, {
+    return NextResponse.json(responseBody, {
       headers: {
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
@@ -308,15 +313,6 @@ export async function POST(request: Request) {
         "Referrer-Policy": "strict-origin-when-cross-origin",
       },
     });
-
-    // Log the new user in immediately - skip the separate login step.
-    await setSession(response, {
-      userId: newUserId,
-      email: sanitizedEmail,
-      role: "public_user",
-    });
-
-    return response;
   } catch (error) {
     console.error("Signup error:", error);
     captureRouteError(error, { route: "/api/auth/signup", method: "POST" });

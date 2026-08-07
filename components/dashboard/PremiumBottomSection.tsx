@@ -286,7 +286,7 @@ function RecommendationCard({
                   {subtitle}
                 </p>
                 <div className="flex items-center flex-wrap gap-2">
-                  {rating && (
+                  {Number.isFinite(Number(rating)) && Number(rating) > 0 && (
                     <div className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-amber-500/15 border border-amber-500/20">
                       <Star className="h-3 w-3 text-amber-500 fill-current" />
                       <span className="text-xs font-medium text-amber-600 dark:text-amber-400">

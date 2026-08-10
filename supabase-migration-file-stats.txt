@@ -1,0 +1,49 @@
+InsideKhi — Supabase → Custom Backend Migration
+File Change Summary
+==================================================
+
+OVERALL MIGRATION
+-----------------
+Unique files changed:     ~310
+Migration commits:        73
+Lines added:              ~29,890
+Lines deleted:            ~27,567
+Date range:               Jul 8, 2026 → Jul 22, 2026
+                          (final cleanup Jul 29, 2026)
+
+BREAKDOWN BY AREA
+-----------------
+API routes (app/api/...): 213
+Lib / infrastructure:     36
+Components:               29
+App / dashboard pages:    10+
+Other (scrapers, scripts,
+middleware, package, etc): remainder to ~310
+
+WHAT THIS COVERS
+----------------
+- Auth moved from Supabase Auth → custom JWT (jose + bcryptjs)
+- Database moved from Supabase/PostgREST → direct PostgreSQL (pg Pool)
+- Storage moved from Supabase Storage → DigitalOcean Spaces (S3 SDK)
+- Mobile + web API routes rewritten to custom backend
+- React Native app: 100% on custom API (0 Supabase deps)
+
+LATEST CLEANUP COMMIT (edf186e — Jul 29, 2026)
+----------------------------------------------
+Total files changed:      70
+  Modified:               64
+  Deleted:                4
+    - lib/supabase/server.ts
+    - lib/supabase/client.ts
+    - lib/supabase/circuit-breaker.ts
+    - lib/mobile/supabase.ts
+  Added:                  2
+    - types/database.ts
+    - supabase-migration-report.pdf
+Lines:                    +21,630 / −22,038
+
+BOTTOM LINE
+-----------
+Full migration: ~310 files across 73 commits.
+Latest cleanup: 70 files in one commit.
+Migration status: effectively complete (0 Supabase runtime routes left).

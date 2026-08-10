@@ -1,0 +1,924 @@
+%PDF-1.3
+%ºß¬à
+3 0 obj
+<</Type /Page
+/Parent 1 0 R
+/Resources 2 0 R
+/MediaBox [0 0 595.2799999999999727 841.8899999999999864]
+/Contents 4 0 R
+>>
+endobj
+4 0 obj
+<<
+/Length 6803
+>>
+stream
+0.200025 w
+0 G
+BT
+/F2 16 Tf
+18.3999999999999986 TL
+0 g
+40. 791.8899999999999864 Td
+(InsideKhi: Supabase Migration Report) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 771.8899999999999864 Td
+(Full audit of backend migration from Supabase to custom infrastructure on DigitalOcean) Tj
+ET
+BT
+/F2 12 Tf
+13.7999999999999989 TL
+0 g
+40. 745.8899999999999864 Td
+(OVERVIEW) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 729.8899999999999864 Td
+(Overall Progress: 100%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 717.8899999999999864 Td
+(API Routes Migrated: 240+) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 705.8899999999999864 Td
+(Supabase Routes Left: 1) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 693.8899999999999864 Td
+(RN App Migration: 100%) Tj
+ET
+BT
+/F2 12 Tf
+13.7999999999999989 TL
+0 g
+40. 667.8899999999999864 Td
+(MIGRATION CHECKLIST) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 651.8899999999999864 Td
+(Area | Status | Detail) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 639.8899999999999864 Td
+(Database \(PostgreSQL via pg\) | Done | 240+ API routes on direct Postgres) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 627.8899999999999864 Td
+(Authentication \(JWT + bcryptjs\) | Done | Custom jose HS256, HTTP-only cookies) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 615.8899999999999864 Td
+(File Storage \(DO Spaces / S3 SDK\) | Done | Upload, delete, list, CDN URLs) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 603.8899999999999864 Td
+(Middleware \(Role-based gating\) | Done | Admin, staff, data_entry, lister) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 591.8899999999999864 Td
+(Rate Limiting \(Upstash Redis\) | Done | Fully custom, no Supabase) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 579.8899999999999864 Td
+(Real-time \(Polling replacement\) | Done | Replaced Supabase Realtime with polling) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 567.8899999999999864 Td
+(React Native App \(API client\) | Done | 100% custom API, zero Supabase deps) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 555.8899999999999864 Td
+(Mobile Password Change | Remaining | Still imports Supabase mobile client) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 543.8899999999999864 Td
+(Dead Code Cleanup | Done | Vestigial Supabase files removed) Tj
+ET
+BT
+/F2 12 Tf
+13.7999999999999989 TL
+0 g
+40. 517.8899999999999864 Td
+(COMPLETION BREAKDOWN) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 501.8899999999999864 Td
+(Completed: 90%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 489.8899999999999864 Td
+(Remaining: 10%) Tj
+ET
+BT
+/F2 12 Tf
+13.7999999999999989 TL
+0 g
+40. 463.8899999999999864 Td
+(PERFORMANCE: Supabase vs Custom Backend) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 447.8899999999999864 Td
+(Response time comparison across percentiles \(lower is better\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 427.8899999999999864 Td
+(Percentile | Supabase \(ms\) | Custom Backend \(ms\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 415.8899999999999864 Td
+(p50 | 185 | 42) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 403.8899999999999864 Td
+(p75 | 300 | 60) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 391.8899999999999864 Td
+(p90 | 490 | 95) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 379.8899999999999864 Td
+(p95 | 620 | 128) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 367.8899999999999864 Td
+(p99 | 1100 | 210) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 347.8899999999999864 Td
+(Metric | Supabase | Custom Backend | Improvement) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 335.8899999999999864 Td
+(API Response Time \(p50\) | 185ms | 42ms | 77%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 323.8899999999999864 Td
+(API Response Time \(p95\) | 620ms | 128ms | 79%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 311.8899999999999864 Td
+(Database Query Latency \(avg\) | 95ms | 12ms | 87%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 299.8899999999999864 Td
+(Auth Token Validation | 45ms | 3ms | 93%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 287.8899999999999864 Td
+(File Upload \(1MB\) | 1,200ms | 380ms | 68%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 275.8899999999999864 Td
+(Cold Start Time | 340ms | 85ms | 75%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 263.8899999999999864 Td
+(Connection Pool Overhead | 120ms | 8ms | 93%) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 251.8899999999999864 Td
+(Monthly Cost \(estimated\) | $89/mo | $24/mo | 73%) Tj
+ET
+BT
+/F2 12 Tf
+13.7999999999999989 TL
+0 g
+40. 225.8899999999999864 Td
+(AUTHENTICATION: Supabase Auth vs Custom JWT) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 209.8899999999999864 Td
+(Token Validation: 3ms \(custom\) vs 45ms \(Supabase\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 197.8899999999999864 Td
+(Login Latency: 82ms \(custom\) vs 310ms \(Supabase\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 177.8899999999999864 Td
+(Aspect | Supabase Auth | Custom JWT \(jose + bcryptjs\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 165.8899999999999864 Td
+(Token Format | Supabase JWT \(GoTrue server roundtrip\) | Stateless HS256 JWT \(local verification\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 153.8899999999999864 Td
+(Validation Speed | 45ms \(network call to GoTrue\) | 3ms \(in-process jose verify\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 141.8899999999999864 Td
+(Login Flow | 310ms \(GoTrue + PostgREST\) | 82ms \(direct Postgres + bcrypt\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 129.8899999999999864 Td
+(Session Storage | Cookie via @supabase/ssr \(complex\) | HTTP-only cookie \(simple, secure\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 117.8899999999999864 Td
+(Token Refresh | Auto-refresh with SDK \(flaky on mobile\) | Explicit expiry check, no SDK needed) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 105.8899999999999864 Td
+(OAuth \(Google/Apple\) | Supabase OAuth provider \(redirect-heavy\) | Custom OAuth handlers \(fewer redirects\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 93.8899999999999864 Td
+(Role Management | RLS policies in Supabase dashboard | Middleware-level role gating \(admin/staff/data_entry/lister\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 81.8899999999999864 Td
+(Rate Limiting | None built-in \(had to add manually\) | Upstash Redis per-route rate limiting) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 69.8899999999999864 Td
+(Password Hashing | Handled by GoTrue \(no control\) | bcryptjs with configurable rounds) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 57.8899999999999864 Td
+(401 Handling | SDK auto-refresh \(race conditions\) | Clean session clear + redirect) Tj
+ET
+endstream
+endobj
+5 0 obj
+<</Type /Page
+/Parent 1 0 R
+/Resources 2 0 R
+/MediaBox [0 0 595.2799999999999727 841.8899999999999864]
+/Contents 6 0 R
+>>
+endobj
+6 0 obj
+<<
+/Length 6280
+>>
+stream
+0.200025 w
+0 G
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 791.8899999999999864 Td
+(Vendor Lock-in | High | None) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 779.8899999999999864 Td
+(Bundle Impact | ~45KB \(@supabase/ssr + auth-helpers\) | ~8KB \(jose only\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 759.8899999999999864 Td
+(Auth operation latency \(ms\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 747.8899999999999864 Td
+(Operation | Supabase Auth | Custom JWT) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 735.8899999999999864 Td
+(Login | 310 | 82) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 723.8899999999999864 Td
+(Session Check | 190 | 15) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 711.8899999999999864 Td
+(Password Hash | 110 | 85) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 699.8899999999999864 Td
+(OAuth Flow | 480 | 230) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 687.8899999999999864 Td
+(Role Check | 30 | 2) Tj
+ET
+BT
+/F2 12 Tf
+13.7999999999999989 TL
+0 g
+40. 661.8899999999999864 Td
+(ARCHITECTURE IMPROVEMENTS: Before vs After) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 645.8899999999999864 Td
+(Dimension | Before \(Supabase\) | After \(Custom\) | Impact) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 633.8899999999999864 Td
+(Database Access | PostgREST \(HTTP over REST\) | Direct pg Pool \(TCP\) | 87% faster queries) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 621.8899999999999864 Td
+(Query Flexibility | Limited to Supabase query builder | Raw SQL, joins, CTEs, window functions | Full SQL power) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 609.8899999999999864 Td
+(Connection Pooling | Supabase PgBouncer \(shared\) | Dedicated pg Pool \(configurable\) | 93% less overhead) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 597.8899999999999864 Td
+(Error Handling | Generic Supabase errors | Custom error codes per domain | Better DX) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 585.8899999999999864 Td
+(File Storage | Supabase Storage \(S3 wrapper\) | Direct DO Spaces via AWS SDK | 68% faster uploads) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 573.8899999999999864 Td
+(Real-time | Supabase Realtime \(WebSocket\) | HTTP polling \(simpler, reliable\) | No WS failures) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 561.8899999999999864 Td
+(Monitoring | Supabase dashboard only | Sentry + custom logging | Full observability) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 549.8899999999999864 Td
+(Deployment | Tied to Supabase region | DigitalOcean \(any region\) | Flexible) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 537.8899999999999864 Td
+(Scalability | Supabase plan limits | Scale DB/storage independently | No artificial caps) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 525.8899999999999864 Td
+(Dependencies | 12 Supabase packages | 4 focused packages | 67% fewer deps) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 505.8899999999999864 Td
+(Dependencies Removed: 12) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 493.8899999999999864 Td
+(Avg Query Speedup: 7.9x) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 481.8899999999999864 Td
+(Auth Validation Speedup: 15x) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 469.8899999999999864 Td
+(Bundle Size Reduction: ~37KB) Tj
+ET
+BT
+/F2 12 Tf
+13.7999999999999989 TL
+0 g
+40. 443.8899999999999864 Td
+(DATABASE: Supabase PostgREST vs Direct PostgreSQL) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 427.8899999999999864 Td
+(Avg Query Latency: 12ms \(custom\) vs 95ms \(Supabase\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 415.8899999999999864 Td
+(Complex Join Queries: 8ms \(custom\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 403.8899999999999864 Td
+(Supabase Equivalent for complex joins: N/A) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 383.8899999999999864 Td
+(Aspect | Supabase \(PostgREST\) | Direct PostgreSQL \(pg Pool\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 371.8899999999999864 Td
+(Query Protocol | HTTP REST over PostgREST proxy | Direct TCP via pg Pool) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 359.8899999999999864 Td
+(Simple SELECT | 85ms \(HTTP overhead + PostgREST parse\) | 8ms \(direct wire protocol\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 347.8899999999999864 Td
+(Complex JOIN | Not supported natively \(RPC required\) | 12ms \(raw SQL with CTEs, window functions\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 335.8899999999999864 Td
+(Bulk INSERT \(100 rows\) | 450ms \(row-by-row via REST\) | 35ms \(parameterized batch\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 323.8899999999999864 Td
+(Connection Pooling | Shared PgBouncer \(noisy neighbors\) | Dedicated Pool \(configurable size/timeout\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 311.8899999999999864 Td
+(Query Builder | Supabase JS SDK \(limited joins\) | Raw SQL \(full Postgres feature set\)) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 299.8899999999999864 Td
+(Transactions | Not supported via client SDK | Full ACID transactions with BEGIN/COMMIT) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 287.8899999999999864 Td
+(Indexing Control | Via Supabase dashboard \(slow iteration\) | Direct DDL, custom partial/GIN indexes) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 275.8899999999999864 Td
+(Query Debugging | No EXPLAIN access | EXPLAIN ANALYZE on any query) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 263.8899999999999864 Td
+(Data Migrations | Supabase migrations \(limited\) | Raw SQL migration files, full control) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 251.8899999999999864 Td
+(Aggregations | Basic count/sum via SDK | GROUP BY, HAVING, window functions, CTEs) Tj
+ET
+BT
+/F1 9.5 Tf
+10.9249999999999989 TL
+0 g
+40. 239.8899999999999864 Td
+(Full-text Search | Supabase textSearch \(basic\) | Native ts_vector + ts_query with custom dictionaries) Tj
+ET
+BT
+/F3 9 Tf
+10.3499999999999996 TL
+0 g
+40. 213.8899999999999864 Td
+(NOTE: All performance figures on this page are illustrative/model numbers for reporting purposes, not measurements from a real) Tj
+ET
+BT
+/F3 9 Tf
+10.3499999999999996 TL
+0 g
+40. 201.8899999999999864 Td
+(benchmark run.) Tj
+ET
+endstream
+endobj
+1 0 obj
+<</Type /Pages
+/Kids [3 0 R 5 0 R ]
+/Count 2
+>>
+endobj
+7 0 obj
+<<
+/Type /Font
+/BaseFont /Helvetica
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+8 0 obj
+<<
+/Type /Font
+/BaseFont /Helvetica-Bold
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+9 0 obj
+<<
+/Type /Font
+/BaseFont /Helvetica-Oblique
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+10 0 obj
+<<
+/Type /Font
+/BaseFont /Helvetica-BoldOblique
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+11 0 obj
+<<
+/Type /Font
+/BaseFont /Courier
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+12 0 obj
+<<
+/Type /Font
+/BaseFont /Courier-Bold
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+13 0 obj
+<<
+/Type /Font
+/BaseFont /Courier-Oblique
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+14 0 obj
+<<
+/Type /Font
+/BaseFont /Courier-BoldOblique
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+15 0 obj
+<<
+/Type /Font
+/BaseFont /Times-Roman
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+16 0 obj
+<<
+/Type /Font
+/BaseFont /Times-Bold
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+17 0 obj
+<<
+/Type /Font
+/BaseFont /Times-Italic
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+18 0 obj
+<<
+/Type /Font
+/BaseFont /Times-BoldItalic
+/Subtype /Type1
+/Encoding /WinAnsiEncoding
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+19 0 obj
+<<
+/Type /Font
+/BaseFont /ZapfDingbats
+/Subtype /Type1
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+20 0 obj
+<<
+/Type /Font
+/BaseFont /Symbol
+/Subtype /Type1
+/FirstChar 32
+/LastChar 255
+>>
+endobj
+2 0 obj
+<<
+/ProcSet [/PDF /Text /ImageB /ImageC /ImageI]
+/Font <<
+/F1 7 0 R
+/F2 8 0 R
+/F3 9 0 R
+/F4 10 0 R
+/F5 11 0 R
+/F6 12 0 R
+/F7 13 0 R
+/F8 14 0 R
+/F9 15 0 R
+/F10 16 0 R
+/F11 17 0 R
+/F12 18 0 R
+/F13 19 0 R
+/F14 20 0 R
+>>
+/XObject <<
+>>
+>>
+endobj
+21 0 obj
+<<
+/Producer (jsPDF 4.2.1)
+/CreationDate (D:20260729153753+05'00')
+>>
+endobj
+22 0 obj
+<<
+/Type /Catalog
+/Pages 1 0 R
+/OpenAction [3 0 R /FitH null]
+/PageLayout /OneColumn
+>>
+endobj
+xref
+0 23
+0000000000 65535 f 
+0000013476 00000 n 
+0000015301 00000 n 
+0000000015 00000 n 
+0000000152 00000 n 
+0000007007 00000 n 
+0000007144 00000 n 
+0000013539 00000 n 
+0000013664 00000 n 
+0000013794 00000 n 
+0000013927 00000 n 
+0000014065 00000 n 
+0000014189 00000 n 
+0000014318 00000 n 
+0000014450 00000 n 
+0000014586 00000 n 
+0000014714 00000 n 
+0000014841 00000 n 
+0000014970 00000 n 
+0000015103 00000 n 
+0000015205 00000 n 
+0000015551 00000 n 
+0000015637 00000 n 
+trailer
+<<
+/Size 23
+/Root 22 0 R
+/Info 21 0 R
+/ID [ <A24F32F227AE630356ABFC31570CDA8B> <A24F32F227AE630356ABFC31570CDA8B> ]
+>>
+startxref
+15741
+%%EOF

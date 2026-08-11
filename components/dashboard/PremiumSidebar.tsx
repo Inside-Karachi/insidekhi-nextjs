@@ -9,241 +9,34 @@ import { Button } from "@/components/ui/button";
 import { useUserGamification } from "@/hooks/useUserGamification";
 import { useRole } from "@/lib/context/RoleContext";
 import {
-  LayoutDashboard,
   MapPin,
   Calendar,
-  Heart,
-  Star,
-  Trophy,
+  Store,
   User as UserIcon,
-  CreditCard,
-  Settings,
-  Bell,
+  Shield,
+  Sparkles,
+  PenSquare,
   LogOut,
   ChevronRight,
-  Sparkles,
-  Home,
-  Shield,
-  BarChart3,
-  Users,
-  FileText,
-  ClipboardList,
-  ScanLine,
-  ClipboardCheck,
-  Store,
-  PenSquare,
 } from "lucide-react";
-
-const navigation = [
-  { name: "Home", href: "/", icon: Home },
-  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { name: "Scan QR", href: "/dashboard/scan", icon: ScanLine },
-  { name: "Explore", href: "/dashboard/explore", icon: MapPin },
-  { name: "My Bookings", href: "/dashboard/bookings", icon: Calendar },
-  { name: "Favorites", href: "/dashboard/favorites", icon: Heart },
-  { name: "Reviews", href: "/dashboard/reviews", icon: Star },
-  { name: "Become a Writer", href: "/dashboard/writer/apply", icon: PenSquare },
-];
-
-// Business Owner navigation
-const businessOwnerNavigation = [
-  { name: "Home", href: "/", icon: Home },
-  {
-    name: "Dashboard",
-    href: "/dashboard/business",
-    icon: LayoutDashboard,
-  },
-  { name: "My Listings", href: "/dashboard/business/listings", icon: Store },
-  { name: "Analytics", href: "/dashboard/business/analytics", icon: BarChart3 },
-  { name: "Reviews", href: "/dashboard/business/reviews", icon: Star },
-  { name: "Reports", href: "/dashboard/business/reports", icon: FileText },
-];
-
-// Writer navigation
-const writerNavigation = [
-  { name: "Home", href: "/", icon: Home },
-  { name: "Dashboard", href: "/dashboard/writer", icon: LayoutDashboard },
-  { name: "My Posts", href: "/dashboard/writer/blogs", icon: PenSquare },
-];
-
-// Admin-focused navigation for staff accounts
-const adminMainNavigation = [
-  { name: "Home", href: "/", icon: Home },
-  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { name: "Scan QR", href: "/dashboard/scan", icon: ScanLine },
-];
-
-// Lister-focused navigation for content managers
-const listerNavigation = [
-  { name: "Home", href: "/", icon: Home },
-  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { name: "Scan QR", href: "/dashboard/scan", icon: ScanLine },
-  { name: "Listing Management", href: "/admin/listings", icon: MapPin },
-  {
-    name: "Listing Approvals",
-    href: "/admin/listings/approvals",
-    icon: ClipboardCheck,
-  },
-  { name: "Listing Capacity", href: "/admin/listing-capacity", icon: Store },
-  { name: "Event Management", href: "/admin/events", icon: Calendar },
-  {
-    name: "Event Approvals",
-    href: "/admin/events/approvals",
-    icon: ClipboardCheck,
-  },
-  { name: "Review Moderation", href: "/admin/reviews", icon: Star },
-  { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList },
-  {
-    name: "Blog Approvals",
-    href: "/admin/blogs/approvals",
-    icon: ClipboardCheck,
-  },
-  {
-    name: "Writer Applications",
-    href: "/admin/writer-applications",
-    icon: PenSquare,
-  },
-  { name: "Blog Categories", href: "/admin/blog-categories", icon: FileText },
-];
-
-// Limited data-entry navigation — capacity fields only
-const dataEntryNavigation = [
-  {
-    name: "Listing Capacity",
-    href: "/admin/listing-capacity",
-    icon: Store,
-  },
-];
-
-// Organizer-focused navigation
-const organizerMainNavigation = [
-  { name: "Home", href: "/", icon: Home },
-  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { name: "My Events", href: "/dashboard/events", icon: Calendar },
-  { name: "Scan Tickets", href: "/dashboard/scan", icon: ScanLine },
-];
-
-const organizerSecondaryNavigation = [
-  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
-  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
-  { name: "Settings", href: "/dashboard/settings", icon: Settings },
-];
-
-// Business Owner secondary navigation
-const businessOwnerSecondaryNavigation = [
-  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
-  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
-  { name: "Settings", href: "/dashboard/settings", icon: Settings },
-];
-
-// Writer secondary navigation
-const writerSecondaryNavigation = [
-  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
-  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
-  { name: "Settings", href: "/dashboard/settings", icon: Settings },
-];
-
-type NavRequiredRole = import("@/types/auth.types").UserRole;
-
-interface SidebarNavItem {
-  name: string;
-  href: string;
-  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
-  requiredRole?: NavRequiredRole; // optional required role for visibility
-}
-
-const adminNavigation: SidebarNavItem[] = [
-  { name: "User Management", href: "/admin/users", icon: Users },
-  { name: "Event Management", href: "/admin/events", icon: Calendar },
-  {
-    name: "Event Approvals",
-    href: "/admin/events/approvals",
-    icon: ClipboardCheck,
-  },
-  { name: "Bookings", href: "/admin/bookings", icon: CreditCard },
-  {
-    name: "Listing Management",
-    href: "/admin/listings",
-    icon: MapPin,
-  },
-  {
-    name: "Listing Capacity",
-    href: "/admin/listing-capacity",
-    icon: Store,
-  },
-  {
-    name: "Listing Approvals",
-    href: "/admin/listings/approvals",
-    icon: ClipboardCheck,
-  },
-  { name: "Review Moderation", href: "/admin/reviews", icon: Star },
-  { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList },
-  {
-    name: "Blog Approvals",
-    href: "/admin/blogs/approvals",
-    icon: ClipboardCheck,
-  },
-  {
-    name: "Writer Applications",
-    href: "/admin/writer-applications",
-    icon: PenSquare,
-  },
-  { name: "Blog Categories", href: "/admin/blog-categories", icon: FileText },
-  { name: "Gamification", href: "/admin/gamification", icon: Trophy },
-  {
-    name: "Listing Scraper",
-    href: "/admin/listing-scraper",
-    icon: Store,
-    requiredRole: "super_admin",
-  },
-  {
-    name: "Logs Management",
-    href: "/admin/logs",
-    icon: FileText,
-    requiredRole: "super_admin",
-  },
-  { name: "Analytics", href: "/admin/analytics", icon: BarChart3 },
-  {
-    name: "Security Center",
-    href: "/admin/security",
-    icon: Shield,
-    requiredRole: "super_admin",
-  },
-  {
-    name: "System Settings",
-    href: "/admin/settings",
-    icon: Settings,
-    requiredRole: "super_admin",
-  },
-];
-
-const secondaryNavigation = [
-  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
-  { name: "Achievements", href: "/dashboard/achievements", icon: Trophy },
-  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
-  // { name: "Billing", href: "/dashboard/billing", icon: CreditCard },
-  { name: "Settings", href: "/dashboard/settings", icon: Settings },
-];
-
-// Admin-focused secondary navigation
-const adminSecondaryNavigation = [
-  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
-  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
-  { name: "Settings", href: "/dashboard/settings", icon: Settings },
-];
-
-// Lister-focused secondary navigation
-const listerSecondaryNavigation = [
-  { name: "Notifications", href: "/dashboard/notifications", icon: Bell },
-  { name: "Profile", href: "/dashboard/profile", icon: UserIcon },
-  { name: "Settings", href: "/dashboard/settings", icon: Settings },
-];
-
-const dataEntrySecondaryNavigation: {
-  name: string;
-  href: string;
-  icon: typeof UserIcon;
-}[] = [];
+import {
+  publicUserNavigation as navigation,
+  publicUserSecondaryNavigation as secondaryNavigation,
+  businessOwnerNavigation,
+  businessOwnerSecondaryNavigation,
+  writerNavigation,
+  writerSecondaryNavigation,
+  adminMainNavigation,
+  adminSecondaryNavigation,
+  adminNavigation,
+  listerNavigation,
+  listerSecondaryNavigation,
+  dataEntryNavigation,
+  dataEntrySecondaryNavigation,
+  organizerMainNavigation,
+  organizerSecondaryNavigation,
+  type RoleNavItem as SidebarNavItem,
+} from "@/lib/navigation/role-navigation";
 
 interface ProfileShape {
   id: string;

@@ -21,6 +21,7 @@ import {
 
 // Import centralized types
 import type { ListerDashboardProps } from "@/types/dashboard.types";
+import { DashboardQuickAccess } from "./DashboardQuickAccess";
 
 interface PremiumStatCardProps {
   title: string;
@@ -376,6 +377,11 @@ export function ListerDashboard({
           trend={{ value: 8, isPositive: true }}
           delay={3}
         />
+      </motion.div>
+
+      {/* Quick Access — same routes as the sidebar */}
+      <motion.div variants={itemVariants}>
+        <DashboardQuickAccess role="lister" />
       </motion.div>
 
       {/* User & Review Statistics */}

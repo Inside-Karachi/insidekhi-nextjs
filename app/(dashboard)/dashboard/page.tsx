@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { PremiumDashboardHero } from "@/components/dashboard/PremiumDashboardHero";
 import { AdvancedStatsGrid } from "@/components/dashboard/AdvancedStatsGrid";
 import { PremiumInsightsPanel } from "@/components/dashboard/PremiumInsightsPanel";
-import { PremiumQuickActions } from "@/components/dashboard/PremiumQuickActions";
+import { DashboardQuickAccess } from "@/components/dashboard/DashboardQuickAccess";
 import { PremiumBottomSection } from "@/components/dashboard/PremiumBottomSection";
 import { InviteShareDashboardSection } from "@/components/dashboard/InviteShareDashboardSection";
 import { DashboardTabs } from "@/components/dashboard/DashboardTabs";
@@ -630,7 +630,7 @@ export default async function DashboardPage() {
       <InviteShareDashboardSection />
 
       {/* Quick actions */}
-      <PremiumQuickActions />
+      <DashboardQuickAccess role={activeRole} />
 
       {/* Weekly Insights - Only the insights cards */}
       <PremiumInsightsPanel

@@ -19,6 +19,7 @@ import {
   ClipboardCheck,
   Store,
   PenSquare,
+  Smartphone,
   type LucideIcon,
 } from "lucide-react";
 import type { UserRole } from "@/types/auth.types";
@@ -115,6 +116,7 @@ export const adminNavigation: RoleNavItem[] = [
   { name: "Blog Categories", href: "/admin/blog-categories", icon: FileText, description: "Manage blog categories" },
   { name: "Gamification", href: "/admin/gamification", icon: Trophy, description: "Manage ranks & badges" },
   { name: "Analytics", href: "/admin/analytics", icon: BarChart3, description: "Platform-wide analytics" },
+  { name: "Mobile Events", href: "/admin/mobile-events", icon: Smartphone, description: "Screen views & search activity" },
   { name: "Listing Scraper", href: "/admin/listing-scraper", icon: Store, description: "Bulk-import listings", requiredRole: "super_admin" },
   { name: "Logs Management", href: "/admin/logs", icon: FileText, description: "View system logs", requiredRole: "super_admin" },
   { name: "Security Center", href: "/admin/security", icon: Shield, description: "Platform security", requiredRole: "super_admin" },

@@ -10,6 +10,7 @@ import {
 import { MobileApiError } from "@/lib/mobile/errors";
 import { query } from "@/lib/db";
 import { computeBasketHash, type CheckoutItem } from "@/lib/mobile/commerce";
+import { hashCnic, cnicLast4 } from "@/lib/utils/cnic-server";
 
 export const dynamic = "force-dynamic";
 
@@ -39,8 +40,10 @@ const bodySchema = z.object({
  * `create_booking_with_reservation` RPC WITH `p_basket_id` - its
  * `ON CONFLICT (user_id, basket_id)` makes creation atomically idempotent (this
  * is the double-charge fix the website route lacks: it omits `p_basket_id` and
- * sets it in a separate UPDATE). Amount is server-authoritative; CNIC is hashed
- * in the DB and only `cnic_last4` is ever exposed. Mirrors `app/api/tickets/checkout`.
+ * sets it in a separate UPDATE). Amount is server-authoritative; the raw CNIC is
+ * hashed here in the API layer (hashCnic/cnicLast4) before it ever reaches the
+ * RPC or the database - only the hash and last 4 digits are ever persisted or
+ * exposed.
  */
 export const POST = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
@@ -179,8 +182,9 @@ export const POST = mobileRoute(async (request: NextRequest) => {
            p_customer_name => $3,
            p_customer_email => $4,
            p_customer_phone => $5,
-           p_customer_cnic => $6,
-           p_basket_id => $7
+           p_cnic_hash => $6,
+           p_cnic_last4 => $7,
+           p_basket_id => $8
          ) AS result`,
         [
           user.id,
@@ -188,7 +192,8 @@ export const POST = mobileRoute(async (request: NextRequest) => {
           customer.name,
           customer.email,
           customer.phone,
-          customer.cnic,
+          hashCnic(customer.cnic),
+          cnicLast4(customer.cnic),
           basket,
         ],
       );

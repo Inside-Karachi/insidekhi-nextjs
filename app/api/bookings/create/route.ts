@@ -3,6 +3,7 @@ import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { createNotification } from "@/lib/notifications/service";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
+import { hashCnic, cnicLast4 } from "@/lib/utils/cnic-server";
 import crypto from "crypto";
 
 export async function POST(request: NextRequest) {
@@ -31,8 +32,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate CNIC hash and last 4 digits
-    const cnicHash = crypto.createHash("sha256").update(rawCnic).digest("hex");
-    const cnicLast4 = rawCnic.slice(-4);
+    const cnicHash = hashCnic(rawCnic);
+    const cnicLast4Digits = cnicLast4(rawCnic);
 
     // Generate verification seed (24 chars hex)
     const verificationSeed = crypto.randomBytes(12).toString("hex");
@@ -175,7 +176,7 @@ export async function POST(request: NextRequest) {
           verificationSeed,
           expiresAt,
           cnicHash,
-          cnicLast4,
+          cnicLast4Digits,
           buyerDetails.name,
           buyerDetails.email,
           buyerDetails.phone,

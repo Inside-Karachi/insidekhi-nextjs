@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
     try {
       const { rows } = await query(
         `SELECT
-           tp.id, tp.code, tp.status, tp.guest_name, tp.guest_cnic, tp.cnic_last4,
+           tp.id, tp.code, tp.status, tp.guest_name, tp.cnic_last4,
            to_json(tp.checked_in_at) #>> '{}' AS checked_in_at,
            to_json(tp.issued_at) #>> '{}' AS issued_at,
            tp.quantity_index,
@@ -82,8 +82,7 @@ export async function GET(request: NextRequest) {
       status: pass.status,
       guestName:
         pass.guest_name || pass.customer_name || pass.buyer_full_name || "Unknown",
-      guestCnic:
-        pass.cnic_last4 || (pass.guest_cnic ? pass.guest_cnic.slice(-4) : null),
+      guestCnic: pass.cnic_last4 || null,
       guestCnicFormatted: pass.cnic_last4
         ? `*****-*******-${pass.cnic_last4.slice(0, 1)}`
         : null,

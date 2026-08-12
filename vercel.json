@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/refresh-user-scores",
+      "schedule": "0 21 * * *"
+    },
+    {
+      "path": "/api/cron/refresh-segments",
+      "schedule": "15 21 * * *"
+    },
+    {
+      "path": "/api/cron/evaluate-admin-alerts",
+      "schedule": "35 21 * * *"
+    }
+  ]
+}

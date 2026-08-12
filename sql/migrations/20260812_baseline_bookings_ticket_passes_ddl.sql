@@ -1,0 +1,77 @@
+-- Baseline reference: bookings + ticket_passes are already live in prod.
+-- This migration documents their current shape as of 2026-08-12; it makes
+-- no changes (all statements are no-ops against the live schema). Written
+-- as part of closing the "nobody can review or diff these tables" gap
+-- flagged during the CNIC privacy investigation.
+--
+-- Pulled verbatim via information_schema / pg_constraint / pg_trigger
+-- against the live DigitalOcean-hosted Postgres cluster.
+
+-- ============================================================
+-- public.bookings
+-- ============================================================
+-- Columns:
+--   id                        bigint            NOT NULL
+--   user_id                   uuid              NOT NULL
+--   total_amount              numeric           NOT NULL
+--   status                    booking_status    NOT NULL DEFAULT 'pending'
+--   payment_gateway_id        bigint
+--   transaction_reference_id  text
+--   created_at                timestamptz       NOT NULL DEFAULT now()
+--   event_id                  bigint
+--   booking_reference         text
+--   verification_seed         text
+--   payment_status            booking_payment_status_enum DEFAULT 'pending'
+--   latest_payment_id         uuid
+--   basket_id                 text
+--   expires_at                timestamptz
+--   cnic_hash                 text
+--   cnic_last4                text
+--   customer_name             text
+--   customer_email            text
+--   customer_phone            text
+--
+-- Constraints:
+--   bookings_pkey                        PRIMARY KEY (id)
+--   bookings_booking_reference_key       UNIQUE (booking_reference)
+--   bookings_user_basket_unique          UNIQUE (user_id, basket_id)
+--   bookings_cnic_hash_format_check      CHECK (cnic_hash IS NULL OR cnic_hash ~ '^[0-9a-f]{64}$')
+--   bookings_event_id_fkey               FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE RESTRICT
+--   bookings_payment_gateway_id_fkey     FOREIGN KEY (payment_gateway_id) REFERENCES payment_gateways(id) ON DELETE SET NULL
+--   bookings_user_id_fkey                FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE
+--
+-- Triggers:
+--   trg_payment_status_transition  BEFORE UPDATE ... WHEN (old.payment_status IS DISTINCT FROM new.payment_status)
+--                                   EXECUTE FUNCTION check_payment_status_transition()
+
+-- ============================================================
+-- public.ticket_passes
+-- ============================================================
+-- Columns (as of this migration; guest_cnic dropped by
+-- 20260812_drop_ticket_passes_guest_cnic.sql later in this batch):
+--   id               bigint  NOT NULL DEFAULT nextval('ticket_passes_id_seq')
+--   booking_id       bigint  NOT NULL
+--   event_id         bigint  NOT NULL
+--   ticket_type_id   bigint  NOT NULL
+--   quantity_index   integer NOT NULL
+--   cnic_last4       text
+--   code             text    NOT NULL
+--   signature        text    NOT NULL
+--   status           ticket_pass_status_enum NOT NULL DEFAULT 'issued'
+--   issued_at        timestamptz NOT NULL DEFAULT now()
+--   checked_in_at    timestamptz
+--   metadata         jsonb
+--   guest_name       text
+--   guest_cnic       text  -- raw CNIC column; never populated in practice
+--                          -- (0 of 7 rows at audit time, no live writer),
+--                          -- dropped by 20260812_drop_ticket_passes_guest_cnic.sql
+--
+-- Constraints:
+--   ticket_passes_pkey                                        PRIMARY KEY (id)
+--   ticket_passes_code_key                                     UNIQUE (code)
+--   ticket_passes_booking_id_ticket_type_id_quantity_index_key  UNIQUE (booking_id, ticket_type_id, quantity_index)
+--   ticket_passes_booking_id_fkey    FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+--   ticket_passes_event_id_fkey      FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+--   ticket_passes_ticket_type_id_fkey FOREIGN KEY (ticket_type_id) REFERENCES ticket_types(id) ON DELETE CASCADE
+--
+-- Triggers: none

@@ -81,7 +81,7 @@ export async function GET(request: NextRequest) {
     const { rows: ticketPasses } =
       bookingIds.length > 0
         ? await query(
-            `SELECT tp.booking_id, tp.guest_name, tp.guest_cnic, tp.cnic_last4, tp.code,
+            `SELECT tp.booking_id, tp.guest_name, tp.cnic_last4, tp.code,
                     tp.status, tp.checked_in_at,
                     CASE WHEN tt.id IS NULL THEN NULL
                          ELSE json_build_object('name', tt.name)
@@ -145,15 +145,7 @@ export async function GET(request: NextRequest) {
         // Guest details (from ticket_passes if available)
         // Only show last 4 digits of CNIC for privacy
         guests: passes.map((pass) => {
-          // Get last 4 digits of CNIC (prefer cnic_last4, fallback to extracting from guest_cnic)
-          let cnicLast4: string | null = null;
-          if (pass.cnic_last4) {
-            cnicLast4 = pass.cnic_last4 as string;
-          } else if (pass.guest_cnic) {
-            // Extract last 4 characters from full CNIC
-            const cnicClean = (pass.guest_cnic as string).replace(/-/g, "");
-            cnicLast4 = cnicClean.slice(-4);
-          }
+          const cnicLast4 = (pass.cnic_last4 as string | null) ?? null;
 
           return {
             name: pass.guest_name,

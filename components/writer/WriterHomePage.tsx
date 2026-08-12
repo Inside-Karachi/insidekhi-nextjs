@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { PenSquare, Clock, CheckCircle2, XCircle, FileEdit } from "lucide-react";
 import { getPostStatusLabel } from "@/lib/blogs/status-display";
 import type { PostStatus } from "@/types/blogs.types";
+import { DashboardQuickAccess } from "@/components/dashboard/DashboardQuickAccess";
 
 interface RecentPost {
   id: number;
@@ -125,6 +126,8 @@ export function WriterHomePage({ fullName, stats, recentPosts }: WriterHomePageP
           );
         })}
       </div>
+
+      <DashboardQuickAccess role="writer" />
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">

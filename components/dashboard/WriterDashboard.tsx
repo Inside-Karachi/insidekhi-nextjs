@@ -19,6 +19,7 @@ import {
 
 // Import centralized types
 import type { WriterDashboardProps } from "@/types/dashboard.types";
+import { DashboardQuickAccess } from "./DashboardQuickAccess";
 
 export function WriterDashboard({
   user,
@@ -152,6 +153,9 @@ export function WriterDashboard({
           </CardContent>
         </Card>
       </div>
+
+      {/* Quick Access — same routes as the sidebar */}
+      <DashboardQuickAccess role="writer" />
 
       {/* My Content */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

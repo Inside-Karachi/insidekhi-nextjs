@@ -119,10 +119,6 @@ initBotId({
       path: "/api/payments/*",
       method: "POST",
     },
-    {
-      path: "/api/tickets/checkout",
-      method: "POST",
-    },
 
     // Form submission endpoints
     {

@@ -29,6 +29,7 @@ import {
   BUSINESS_OWNER_CARD_SURFACE,
   BUSINESS_OWNER_EMPTY_STATE,
 } from "./BusinessOwnerPageHeader";
+import { DashboardQuickAccess } from "@/components/dashboard/DashboardQuickAccess";
 
 interface BusinessOwnerDashboardProps {
   user: User;
@@ -143,6 +144,16 @@ export function BusinessOwnerDashboard({
             />
           </>
         )}
+      </motion.div>
+
+      {/* Quick Access */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.25 }}
+        className="mb-8"
+      >
+        <DashboardQuickAccess role="business_owner" />
       </motion.div>
 
       {/* Alerts Section */}

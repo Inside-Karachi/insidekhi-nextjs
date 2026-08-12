@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { AdminDashboardProps } from "@/types/dashboard.types";
 import { PremiumFormActivityHub } from "./PremiumFormActivityHub";
+import { DashboardQuickAccess } from "./DashboardQuickAccess";
 
 // --- PremiumStatCard (copied from SuperAdminDashboard for DRY) ---
 interface PremiumStatCardProps {
@@ -335,6 +336,11 @@ export function AdminDashboardClient({
             </Button>
           </div>
         </motion.div>
+      </motion.div>
+
+      {/* Quick Access — full admin toolset, same routes as the sidebar */}
+      <motion.div variants={itemVariants}>
+        <DashboardQuickAccess role="admin" max={Infinity} />
       </motion.div>
 
       {/* Recent Activity (animated, glassmorphic) */}

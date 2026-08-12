@@ -21,6 +21,7 @@ import {
   FileText,
 } from "lucide-react";
 import { PremiumFormActivityHub } from "./PremiumFormActivityHub";
+import { DashboardQuickAccess } from "./DashboardQuickAccess";
 function PremiumActivityItem({
   activity,
   index,
@@ -582,6 +583,11 @@ export function SuperAdminDashboard({
             </Link>
           </div>
         </motion.div>
+      </motion.div>
+
+      {/* Quick Access — full admin toolset, same routes as the sidebar */}
+      <motion.div variants={itemVariants}>
+        <DashboardQuickAccess role="super_admin" max={Infinity} />
       </motion.div>
 
       {/* Recent Activity */}

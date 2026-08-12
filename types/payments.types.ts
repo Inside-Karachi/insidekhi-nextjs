@@ -45,17 +45,6 @@ export interface CheckoutRequestBody {
   };
 }
 
-export interface GoPayFastValidateRequestBody {
-  booking_id: number;
-  bank_code: string;
-  account_number: string;
-  account_title?: string;
-  account_type_id?: string;
-  cnic: string;
-  customer_email?: string;
-  customer_mobile?: string;
-}
-
 export interface GoPayFastValidateResponseBody {
   booking_id: number;
   transaction_id: string;
@@ -66,20 +55,6 @@ export interface GoPayFastValidateResponseBody {
   code?: string;
   message?: string;
   masked_account?: string;
-}
-
-export interface GoPayFastConfirmRequestBody {
-  booking_id: number;
-  transaction_id: string;
-  otp: string;
-  bank_code: string;
-  account_number: string;
-  account_title?: string;
-  account_type_id?: string;
-  cnic: string;
-  customer_email?: string;
-  customer_mobile?: string;
-  eci?: string;
 }
 
 export interface GoPayFastConfirmResponseBody {

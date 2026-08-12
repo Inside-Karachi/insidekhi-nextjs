@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 const CARD_SELECT = `
   SELECT uc.id, uc.card_variant_id, uc.nickname, uc.is_primary, uc.created_at,
          cv.card_name, cv.card_type, cv.card_network, cv.card_tier, cv.image_filename,
-         b.id AS bank_id, b.name AS bank_name
+         b.id AS bank_id, b.name AS bank_name, b.logo_url AS bank_logo_url
   FROM user_cards uc
   JOIN card_variants cv ON cv.id = uc.card_variant_id
   JOIN banks b ON b.id = cv.bank_id
@@ -27,6 +27,7 @@ function toCard(row: Record<string, unknown>) {
     createdAt: row.created_at,
     bankId: Number(row.bank_id),
     bankName: row.bank_name as string,
+    bankLogoUrl: row.bank_logo_url as string | null,
     cardName: row.card_name as string,
     cardType: row.card_type as string | null,
     cardNetwork: row.card_network as string | null,

@@ -43,7 +43,7 @@ function resolvePoolMax(): number {
   if (isProductionBuildPhase()) return 1;
   // Serverless production: one connection per isolate.
   if (process.env.VERCEL || process.env.NODE_ENV === "production") return 1;
-  return 4;
+  return 10;
 }
 
 function createPool() {
@@ -51,7 +51,7 @@ function createPool() {
   const isProd = process.env.NODE_ENV === "production";
   const max = resolvePoolMax();
 
-  return new Pool({
+  const p = new Pool({
     connectionString: cleanConnectionString,
     ssl: connectionString?.includes("sslmode=require")
       ? { rejectUnauthorized: false }
@@ -59,12 +59,14 @@ function createPool() {
 
     max,
     min: 0,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
 
     // Release idle connections quickly so slots aren't held by warm lambdas.
     idleTimeoutMillis: isProd ? 5_000 : 10_000,
 
     // How long (ms) to wait when acquiring a connection from the pool.
-    connectionTimeoutMillis: building ? 8_000 : 5_000,
+    connectionTimeoutMillis: building ? 10_000 : 10_000,
 
     // Recycle connections after 7500 uses to prevent long-lived connection
     // memory leaks on the DO managed Postgres side.
@@ -73,6 +75,12 @@ function createPool() {
     // Allow the process to exit even if idle clients linger (serverless).
     allowExitOnIdle: true,
   });
+
+  p.on("error", (err) => {
+    console.warn("Unexpected error on idle pg pool client:", err.message);
+  });
+
+  return p;
 }
 
 export const pool = global.__pgPool ?? createPool();

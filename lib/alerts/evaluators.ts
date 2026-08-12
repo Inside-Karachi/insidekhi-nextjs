@@ -1,6 +1,7 @@
 import { query } from "@/lib/db";
 import { createNotification, resolveCategorySlugForRole } from "@/lib/notifications";
 import type { NotificationUserRole } from "@/types/notifications.types";
+import type { Json } from "@/types/database";
 import {
   ADMIN_ALERT_RECIPIENT_ROLES,
   ALERT_PAYMENT_FAILURE_BASELINE_DAYS,
@@ -80,7 +81,7 @@ async function reconcileAlerts(
 async function notifyAdmins(
   title: string,
   body: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, Json>
 ): Promise<number> {
   const { rows: admins } = await query(
     `SELECT id, role FROM public.profiles WHERE role::text = ANY($1::text[])`,

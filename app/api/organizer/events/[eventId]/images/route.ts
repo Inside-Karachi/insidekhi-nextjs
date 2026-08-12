@@ -466,6 +466,24 @@ export async function DELETE(
       );
     }
 
+    // Every event must keep at least one photo — reject the delete if this
+    // is the last one instead of leaving the listing with no image.
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*) AS count FROM event_images WHERE event_id = $1`,
+      [eventIdNum]
+    );
+    const remainingImageCount = Number(countRows[0]?.count || 0);
+    if (remainingImageCount <= 1) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "This is the last photo for this event. Upload a replacement before removing it.",
+        },
+        { status: 400 }
+      );
+    }
+
     // Delete from database
     try {
       await query(`DELETE FROM event_images WHERE id = $1`, [imageIdNum]);

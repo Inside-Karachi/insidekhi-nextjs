@@ -216,6 +216,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (
+      action_type === "create" &&
+      (!event_data?.temp_images || event_data.temp_images.length === 0)
+    ) {
+      return NextResponse.json(
+        { success: false, error: "At least one event photo is required" },
+        { status: 400 }
+      );
+    }
+
     if (action_type !== "create" && !event_id) {
       return NextResponse.json(
         { success: false, error: "Event ID required for update/delete action" },

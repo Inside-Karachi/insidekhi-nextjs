@@ -105,6 +105,7 @@ export function OrganizerEventModal({
   const [tempSessionId] = React.useState(() => uuidv4());
   const [isLoadingData, setIsLoadingData] = React.useState(false);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
+  const [activeTab, setActiveTab] = React.useState("details");
   const { toast } = useToast();
   const modalRef = React.useRef<HTMLDivElement>(null);
 
@@ -410,6 +411,21 @@ export function OrganizerEventModal({
     }
   }, [isOpen, event?.event_id, images.length, tempSessionId]);
 
+  // Clear the "photo required" error as soon as at least one image is present.
+  React.useEffect(() => {
+    if (!errors.images) return;
+    const remainingImageCount = images.filter(
+      (img) => !pendingImageDeletions.has(img.id),
+    ).length;
+    if (remainingImageCount > 0) {
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next.images;
+        return next;
+      });
+    }
+  }, [images, pendingImageDeletions, errors.images]);
+
   const handleInputChange = (
     field: keyof EventFormData,
     value: string | number | boolean | null,
@@ -447,7 +463,25 @@ export function OrganizerEventModal({
       }
     }
 
+    const remainingImageCount = images.filter(
+      (img) => !pendingImageDeletions.has(img.id),
+    ).length;
+    if (remainingImageCount === 0) {
+      newErrors.images = "At least one event photo is required";
+    }
+
     setErrors(newErrors);
+
+    // Jump the user to whichever tab holds the first error so a Gallery-only
+    // failure (Details fields already valid) doesn't fail silently off-screen.
+    if (Object.keys(newErrors).length > 0) {
+      if (newErrors.name || newErrors.start_time || newErrors.end_time) {
+        setActiveTab("details");
+      } else if (newErrors.images) {
+        setActiveTab("gallery");
+      }
+    }
+
     return Object.keys(newErrors).length === 0;
   };
 
@@ -602,7 +636,11 @@ export function OrganizerEventModal({
               </div>
             </div>
           ) : (
-            <Tabs defaultValue="details" className="w-full">
+            <Tabs
+              value={activeTab}
+              onValueChange={setActiveTab}
+              className="w-full"
+            >
               <TabsList className="grid w-full grid-cols-3 mb-6">
                 <TabsTrigger
                   value="details"
@@ -617,6 +655,9 @@ export function OrganizerEventModal({
                 >
                   <ImageIcon className="h-4 w-4" />
                   Gallery
+                  {errors.images && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-destructive" />
+                  )}
                 </TabsTrigger>
                 <TabsTrigger
                   value="tickets"
@@ -1042,6 +1083,14 @@ export function OrganizerEventModal({
               </TabsContent>
 
               <TabsContent value="gallery" className="space-y-8">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <ImageIcon className="h-4 w-4 text-primary" />
+                  Event Photos <span className="text-destructive">*</span>
+                </div>
+                <p className="text-sm text-muted-foreground -mt-6">
+                  At least one photo is required so attendees can recognize
+                  your event.
+                </p>
                 <EventGalleryUpload
                   eventId={event?.event_id || null}
                   tempSessionId={!event?.event_id ? tempSessionId : undefined}
@@ -1053,6 +1102,9 @@ export function OrganizerEventModal({
                   pendingDeletions={pendingImageDeletions}
                   onPendingDeletionsChange={setPendingImageDeletions}
                 />
+                {errors.images && (
+                  <p className="text-sm text-red-500">{errors.images}</p>
+                )}
               </TabsContent>
 
               <TabsContent value="tickets" className="space-y-8">

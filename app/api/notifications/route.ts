@@ -220,8 +220,18 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("GET /api/notifications failed", error);
+    // Outside production, surface the real cause in the response body -
+    // the client only ever logs the status code, so without this a 500
+    // here is a dead end unless someone happens to be watching the
+    // `next dev` terminal at the exact moment it happens.
+    const detail =
+      process.env.NODE_ENV !== "production"
+        ? error instanceof Error
+          ? error.message
+          : String(error)
+        : undefined;
     return NextResponse.json(
-      { error: "Failed to load notifications" },
+      { error: "Failed to load notifications", ...(detail ? { detail } : {}) },
       { status: 500 }
     );
   }

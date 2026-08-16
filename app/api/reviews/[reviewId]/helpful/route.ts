@@ -172,6 +172,20 @@ export async function DELETE(
       );
     }
 
+    // Also remove the react_review XP log entry (the sync trigger reverses
+    // the points automatically on DELETE). Without this, points_log's
+    // per-(user, related_id, reason) unique dedup permanently blocks this
+    // user from ever earning react_review XP again on this review, even
+    // after voting helpful again.
+    try {
+      await query(
+        `DELETE FROM points_log WHERE user_id = $1 AND reason = 'react_review' AND related_id = $2`,
+        [session.userId, parsedReviewId]
+      );
+    } catch (error) {
+      console.error("Error removing react_review XP log:", error);
+    }
+
     // Get updated helpful count
     const { rows: updatedRows } = await query(
       `SELECT helpful_count FROM reviews WHERE id = $1`,

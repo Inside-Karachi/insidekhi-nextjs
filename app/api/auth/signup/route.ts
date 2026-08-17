@@ -71,17 +71,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Spam detected." }, { status: 400 });
     }
 
-    const captcha = await verifyRecaptcha({
-      token: body.recaptcha_token,
-      action: "signup",
-    });
-    if (!captcha.ok) {
-      return NextResponse.json(
-        { error: captcha.message },
-        { status: captcha.status },
-      );
-    }
-
     // Sanitize inputs
     const sanitizedEmail = sanitizeInput(email);
     const sanitizedUsername = sanitizeInput(username);
@@ -212,6 +201,20 @@ export async function POST(request: Request) {
           field: "email",
         },
         { status: 400 },
+      );
+    }
+
+    // Verify reCAPTCHA only after all field validation has passed, so bad
+    // input (e.g. an already-registered email) surfaces its own error
+    // instead of being masked by a captcha failure.
+    const captcha = await verifyRecaptcha({
+      token: body.recaptcha_token,
+      action: "signup",
+    });
+    if (!captcha.ok) {
+      return NextResponse.json(
+        { error: captcha.message },
+        { status: captcha.status },
       );
     }
 

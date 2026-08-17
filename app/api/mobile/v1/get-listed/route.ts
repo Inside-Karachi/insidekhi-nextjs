@@ -304,7 +304,10 @@ export const POST = mobileRoute(async (request: NextRequest) => {
         sanitizeString(str("description"), 2000),
         sanitizeString(str("socialMedia"), 1000),
         uploadedBy,
-        { formVersion: "1.0", submittedFrom: "mobile", ip },
+        // user_id here (not just the separate uploaded_by column) is what
+        // app/api/admin/forms/route.ts reads to award suggest_place XP on
+        // approval - it was missing, so that XP could never be awarded.
+        { formVersion: "1.0", submittedFrom: "mobile", ip, user_id: uploadedBy },
       ],
     );
     created = rows[0];

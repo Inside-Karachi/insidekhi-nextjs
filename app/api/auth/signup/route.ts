@@ -263,27 +263,34 @@ export async function POST(request: Request) {
       console.error("Failed to log user signup:", logError);
     }
 
-    // Handle invitation if code provided
+    // Handle invitation if a token was provided. The signup page reads this
+    // from the `?invite=` URL param, which carries the invite's `invite_token`
+    // (see the invite_url built in app/api/mobile/v1/invitations/route.ts) -
+    // despite the `invite_code` field name here, this is a token, not the
+    // separate invite_code column. Delegate to accept_invitation(), the same
+    // SECURITY DEFINER RPC used by app/api/invitations/accept - it already
+    // handles email verification, anti-spam, and awarding XP to both the
+    // inviter and invitee (award_invitation_xp()); the old inline version
+    // here reimplemented (badly - it queried by invite_code, which a token
+    // never matches) a subset of that with no XP awarded at all.
     if (invite_code) {
       try {
-        const { rows: invitations } = await query(
-          "SELECT * FROM public.invitations WHERE invite_code = $1 AND status = 'pending' LIMIT 1",
-          [invite_code]
+        const { rows: acceptRows } = await query(
+          // Positional args must match accept_invitation(p_invite_token,
+          // p_invitee_ip, p_invitee_id) - reorder here if that signature changes.
+          `SELECT accept_invitation($1, $2::inet, $3) AS result`,
+          [invite_code, ip === "unknown" ? null : ip, newUserId]
         );
-        const invitation = invitations[0];
-
-        if (invitation) {
-          if (invitation.invitee_email.toLowerCase() === sanitizedEmail.toLowerCase()) {
-            await query(
-              "UPDATE public.invitations SET invitee_id = $1, status = 'accepted', accepted_at = $2 WHERE id = $3",
-              [newUserId, now, invitation.id]
-            );
-            console.log("SIGNUP API: Linked invitation:", {
-              id: invitation.id,
-              code: invite_code,
-              userId: newUserId,
-            });
-          }
+        const result = acceptRows[0]?.result as
+          | { success: boolean; error?: string; message?: string }
+          | undefined;
+        if (result?.success) {
+          console.log("SIGNUP API: Linked invitation:", {
+            token: invite_code,
+            userId: newUserId,
+          });
+        } else {
+          console.warn("SIGNUP API: Invitation not accepted:", result?.error);
         }
       } catch (inviteError) {
         console.error("SIGNUP API: Failed to process invitation:", inviteError);

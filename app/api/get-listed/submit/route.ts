@@ -156,7 +156,10 @@ export async function POST(req: NextRequest) {
           submissionRow.operating_hours,
           submissionRow.message,
           submissionRow.social_media,
-          { ...submissionRow.additional_data, ip },
+          // user_id here (not just the separate uploaded_by column) is what
+          // app/api/admin/forms/route.ts reads to award suggest_place XP on
+          // approval - it was missing, so that XP could never be awarded.
+          { ...submissionRow.additional_data, ip, user_id: uploaded_by },
           uploaded_by,
         ],
       );

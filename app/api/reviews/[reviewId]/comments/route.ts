@@ -240,11 +240,15 @@ export async function POST(
       author_avatar: newComment.profiles?.avatar_url || null,
     };
 
-    // Award XP for commenting on a review (max 10/day per activity rules)
+    // Award XP for commenting on a review (max 10/day per activity rules).
+    // related_id must be the comment's own id, not the reviewId: points_log
+    // has a per-(user, related_id, reason) unique dedup, so keying on
+    // reviewId would let a user earn comment_review XP only once ever per
+    // review, contradicting its "unlimited, up to 10/day" cooldown config -
+    // a second comment on the same review would silently fail to award XP.
     try {
       const { awardXP } = await import("@/lib/gamification");
-      // Use review ID as related_id for audit purposes (comment_review is unlimited with daily cap)
-      const xpResult = await awardXP(session.userId, "comment_review", reviewId);
+      const xpResult = await awardXP(session.userId, "comment_review", newComment.id);
 
       if ("error" in xpResult) {
         console.error(

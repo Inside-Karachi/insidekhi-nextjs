@@ -193,34 +193,23 @@ export const POST = mobileRoute(async (request: NextRequest) => {
       });
     }
 
-    let xpActivity;
+    // Award XP via the shared helper - matches app/api/tickets/verify/route.ts
+    // (web), which used to hand-roll this insert with
+    // reason: `Attended event: ${event.name}` instead of the canonical
+    // "attend_event" activity_slug, breaking any eligibility/cooldown check
+    // or admin dashboard aggregation keyed on that slug, and skipping
+    // checkAndProcessRankUp() (a rank-up at check-in never awarded its
+    // badge). awardXP() does both correctly.
     try {
-      const { rows: xpActivityRows } = await query(
-        `SELECT xp_value FROM xp_activities
-         WHERE activity_slug = $1 AND is_active = true`,
-        ["attend_event"],
-      );
-      xpActivity = xpActivityRows[0];
-    } catch (xpQueryError) {
-      console.error("[mobile-api] failed to fetch XP activity:", xpQueryError);
-    }
-
-    if (xpActivity) {
-      xpAwarded = xpActivity.xp_value;
-      try {
-        await query(
-          `INSERT INTO points_log (user_id, points, reason, related_id)
-           VALUES ($1, $2, $3, $4)`,
-          [
-            booking.user_id,
-            xpAwarded,
-            `Attended event: ${event.name}`,
-            ticketPass.id,
-          ],
-        );
-      } catch (xpError) {
-        console.error("[mobile-api] failed to award XP:", xpError);
+      const { awardXP } = await import("@/lib/gamification");
+      const xpResult = await awardXP(booking.user_id, "attend_event", ticketPass.id);
+      if ("error" in xpResult) {
+        console.error("[mobile-api] failed to award attend_event XP:", xpResult.error, xpResult.details);
+      } else {
+        xpAwarded = xpResult.xp_awarded;
       }
+    } catch (xpError) {
+      console.error("[mobile-api] failed to award XP:", xpError);
     }
   }
 

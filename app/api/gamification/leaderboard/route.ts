@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
+import { ensureLeaderboardFresh } from "@/lib/gamification/leaderboard";
 
 type LeaderboardPeriod = "all_time" | "weekly" | "monthly";
 
@@ -32,6 +33,8 @@ export async function GET(request: NextRequest) {
     const period = validatePeriod(periodParam);
     const limit = Math.min(parseInt(limitParam || "100"), 1000); // Cap at 1000
     const offset = parseInt(offsetParam || "0");
+
+    await ensureLeaderboardFresh();
 
     // Query leaderboard_cache for the given period
     let leaderboard;

@@ -453,6 +453,13 @@ export function Footer({ serverCategories: _serverCategories }: FooterProps) {
               . All Rights Reserved.
             </p>
             <p className="text-xs text-muted-foreground/70">
+              Inside Karachi is managed by{" "}
+              <span className="font-medium text-muted-foreground">
+                CITY GUIDE NETWORK (PRIVATE) LIMITED
+              </span>
+              .
+            </p>
+            <p className="text-xs text-muted-foreground/70">
               Crafted with <span className="text-primary animate-pulse">♥</span>{" "}
               for the people of Karachi
             </p>

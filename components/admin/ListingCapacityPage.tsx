@@ -153,7 +153,14 @@ export function ListingCapacityPage() {
     React.useState<ListingCapacityCompleteness>("all");
   const [currentPage, setCurrentPage] = React.useState(1);
   const [totalPages, setTotalPages] = React.useState(1);
-  const [stats, setStats] = React.useState({ total: 0, incomplete: 0 });
+  const [stats, setStats] = React.useState({
+    total: 0,
+    incomplete: 0,
+    published: 0,
+    draft: 0,
+    archived: 0,
+    all: 0,
+  });
   const [categories, setCategories] = React.useState<CategoryOption[]>([]);
   const [categoriesLoading, setCategoriesLoading] = React.useState(false);
   const [expandedIds, setExpandedIds] = React.useState<Set<number>>(new Set());
@@ -282,6 +289,10 @@ export function ListingCapacityPage() {
       setStats({
         total: data.stats?.total ?? data.pagination?.total ?? 0,
         incomplete: data.stats?.incomplete ?? 0,
+        published: data.stats?.published ?? 0,
+        draft: data.stats?.draft ?? 0,
+        archived: data.stats?.archived ?? 0,
+        all: data.stats?.all ?? 0,
       });
     } catch (error) {
       console.error(error);
@@ -514,27 +525,48 @@ export function ListingCapacityPage() {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              Matching listings
+              Published (total)
             </CardTitle>
           </CardHeader>
           <CardContent className="flex items-center gap-2 text-2xl font-semibold">
-            <CheckCircle2 className="h-5 w-5 text-primary" />
-            {stats.total}
+            <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+            {stats.published.toLocaleString()}
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              Incomplete (any field missing)
+              Matching filters
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex items-center gap-2 text-2xl font-semibold">
+            <CheckCircle2 className="h-5 w-5 text-primary" />
+            {stats.total.toLocaleString()}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              Incomplete (in filters)
             </CardTitle>
           </CardHeader>
           <CardContent className="flex items-center gap-2 text-2xl font-semibold">
             <AlertCircle className="h-5 w-5 text-amber-500" />
-            {stats.incomplete}
+            {stats.incomplete.toLocaleString()}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              Draft (total)
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex items-center gap-2 text-2xl font-semibold text-muted-foreground">
+            {stats.draft.toLocaleString()}
           </CardContent>
         </Card>
       </div>

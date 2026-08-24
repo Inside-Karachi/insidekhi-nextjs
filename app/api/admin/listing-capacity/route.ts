@@ -127,16 +127,40 @@ export async function GET(request: NextRequest) {
       listParams,
     );
 
-    const incompleteResult = await query(
-      `SELECT COUNT(*)::int AS count
-       FROM listings l
-       WHERE NOT (
+    const incompleteWhere = [
+      `NOT (
          l.min_price_per_person IS NOT NULL
          AND l.max_price_per_person IS NOT NULL
          AND l.min_guest_capacity IS NOT NULL
          AND l.max_guest_capacity IS NOT NULL
        )`,
-    );
+      ...whereClauses,
+    ];
+    const incompleteWhereSql = `WHERE ${incompleteWhere.join(" AND ")}`;
+
+    const [incompleteResult, statusStatsResult] = await Promise.all([
+      query(
+        `SELECT COUNT(*)::int AS count
+         FROM listings l
+         ${incompleteWhereSql}`,
+        whereParams,
+      ),
+      query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'published')::int AS published,
+           COUNT(*) FILTER (WHERE status = 'draft')::int AS draft,
+           COUNT(*) FILTER (WHERE status = 'archived')::int AS archived,
+           COUNT(*)::int AS total
+         FROM listings`,
+      ),
+    ]);
+
+    const statusStats = statusStatsResult.rows[0] || {
+      published: 0,
+      draft: 0,
+      archived: 0,
+      total: 0,
+    };
 
     return NextResponse.json({
       listings: listingsResult.rows,
@@ -149,6 +173,10 @@ export async function GET(request: NextRequest) {
       stats: {
         total,
         incomplete: incompleteResult.rows[0]?.count ?? 0,
+        published: statusStats.published ?? 0,
+        draft: statusStats.draft ?? 0,
+        archived: statusStats.archived ?? 0,
+        all: statusStats.total ?? 0,
       },
     });
   } catch (error) {

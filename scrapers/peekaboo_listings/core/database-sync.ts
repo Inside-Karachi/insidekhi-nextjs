@@ -80,8 +80,18 @@ const LISTING_COLUMNS = [
   "custom_attributes",
 ] as const;
 
-function listingValues(listingData: ListingInsert): unknown[] {
-  return LISTING_COLUMNS.map(
+/** Admin-controlled fields — never overwrite from Peekaboo scrape defaults on update. */
+const PRESERVE_ON_UPDATE = [
+  "is_featured",
+  "show_member_badge",
+  "display_order",
+] as const;
+
+function listingValues(
+  listingData: ListingInsert,
+  columns: readonly string[] = LISTING_COLUMNS,
+): unknown[] {
+  return columns.map(
     (col) => (listingData as Record<string, unknown>)[col],
   );
 }
@@ -128,10 +138,12 @@ export class DatabaseSync {
       // Step 1: Check if listing already exists
       const decision = await this.decideSyncAction(listing);
 
-      if (decision.action === "skip") {
+      // skip = intentionally ignored; conflict = manual edits preserved (do not overwrite)
+      if (decision.action === "skip" || decision.action === "conflict") {
         return {
           peekabooId,
-          action: "skip",
+          action: decision.action,
+          listingId: decision.listingId,
           success: true,
           details: {
             imagesProcessed: 0,
@@ -466,10 +478,21 @@ export class DatabaseSync {
 
           if (existing?.id) {
             try {
+              const updateColumns = LISTING_COLUMNS.filter((col) => {
+                if (
+                  (PRESERVE_ON_UPDATE as readonly string[]).includes(col)
+                ) {
+                  return false;
+                }
+                if (col === "status" && !this.options.autoPublish) {
+                  return false;
+                }
+                return true;
+              });
               await query(
-                `UPDATE listings SET ${LISTING_COLUMNS.map((col, i) => `${col} = $${i + 1}`).join(", ")}
-                 WHERE id = $${LISTING_COLUMNS.length + 1}`,
-                [...listingValues(listingData), existing.id],
+                `UPDATE listings SET ${updateColumns.map((col, i) => `${col} = $${i + 1}`).join(", ")}
+                 WHERE id = $${updateColumns.length + 1}`,
+                [...listingValues(listingData, updateColumns), existing.id],
               );
             } catch (updateError) {
               throw new Error(
@@ -488,12 +511,26 @@ export class DatabaseSync {
         throw new Error(`Failed to insert listing: ${insertError.message}`);
       }
     } else {
-      // UPDATE existing listing
+      // UPDATE existing listing — never clobber admin-controlled fields with
+      // Peekaboo defaults. When autoPublish is off, also preserve status so a
+      // sync cannot demote published listings back to draft.
+      const updateColumns = LISTING_COLUMNS.filter((col) => {
+        if (
+          (PRESERVE_ON_UPDATE as readonly string[]).includes(col)
+        ) {
+          return false;
+        }
+        if (col === "status" && !this.options.autoPublish) {
+          return false;
+        }
+        return true;
+      });
+
       try {
         await query(
-          `UPDATE listings SET ${LISTING_COLUMNS.map((col, i) => `${col} = $${i + 1}`).join(", ")}
-           WHERE id = $${LISTING_COLUMNS.length + 1}`,
-          [...listingValues(listingData), decision.listingId!],
+          `UPDATE listings SET ${updateColumns.map((col, i) => `${col} = $${i + 1}`).join(", ")}
+           WHERE id = $${updateColumns.length + 1}`,
+          [...listingValues(listingData, updateColumns), decision.listingId!],
         );
       } catch (error) {
         throw new Error(`Failed to update listing: ${(error as Error).message}`);

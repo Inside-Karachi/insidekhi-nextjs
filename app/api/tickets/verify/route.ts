@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
-import crypto from "crypto";
+import { verifyTicketSignature } from "@/lib/tickets/signature";
 
 // Ticket verification for organizer check-in. Verifies code + signature, enforces organizer
 // ownership, and awards XP once per ticket (guarded by checked_in_at).
@@ -26,29 +26,6 @@ interface VerifyResponse {
   };
   xpAwarded?: number;
   error?: string;
-}
-
-// Verify HMAC signature for fraud prevention
-function verifyTicketSignature(
-  code: string,
-  eventId: number,
-  bookingId: number,
-  storedSignature: string,
-): boolean {
-  const SIGNING_SECRET = process.env.TICKET_SIGNING_SECRET;
-  if (!SIGNING_SECRET) {
-    throw new Error(
-      "TICKET_SIGNING_SECRET environment variable is not configured",
-    );
-  }
-  const payload = `${code}:${eventId}:${bookingId}`;
-  const expectedSignature = crypto
-    .createHmac("sha256", SIGNING_SECRET)
-    .update(payload)
-    .digest("hex")
-    .substring(0, 16); // First 16 chars for brevity
-
-  return storedSignature === expectedSignature;
 }
 
 export async function POST(
@@ -276,40 +253,28 @@ export async function POST(
         });
       }
 
-      // Award XP for attending event
-      // Get attend_event XP value from xp_activities
-      // Note: activity_slug is "attend_event", activity_name is display name "Attend Event"
-      let xpActivity;
+      // Award XP for attending event via the shared helper - a prior version
+      // of this route hand-rolled the points_log insert with
+      // reason: `Attended event: ${event.name}` instead of the canonical
+      // "attend_event" activity_slug, which broke any eligibility/cooldown
+      // check or admin dashboard aggregation keyed on that slug, and also
+      // skipped checkAndProcessRankUp() (a rank-up at check-in never
+      // awarded its badge). awardXP() does both correctly.
       try {
-        const { rows: xpActivityRows } = await query(
-          `SELECT xp_value FROM xp_activities
-           WHERE activity_slug = $1 AND is_active = true`,
-          ["attend_event"],
+        const { awardXP } = await import("@/lib/gamification");
+        const xpResult = await awardXP(
+          booking.user_id,
+          "attend_event",
+          ticketPass.id,
         );
-        xpActivity = xpActivityRows[0];
-      } catch (xpQueryError) {
-        console.error("Failed to fetch XP activity:", xpQueryError);
-      }
-
-      if (xpActivity) {
-        xpAwarded = xpActivity.xp_value;
-
-        // Award XP to ticket holder
-        try {
-          await query(
-            `INSERT INTO points_log (user_id, points, reason, related_id)
-             VALUES ($1, $2, $3, $4)`,
-            [
-              booking.user_id,
-              xpAwarded,
-              `Attended event: ${event.name}`,
-              ticketPass.id, // Store ticket_pass id for audit
-            ],
-          );
-        } catch (xpError) {
-          console.error("Failed to award XP:", xpError);
-          // Don't fail the check-in, just log the error
+        if ("error" in xpResult) {
+          console.error("Failed to award attend_event XP:", xpResult.error, xpResult.details);
+        } else {
+          xpAwarded = xpResult.xp_awarded;
         }
+      } catch (xpError) {
+        console.error("Failed to award XP:", xpError);
+        // Don't fail the check-in, just log the error
       }
     }
 

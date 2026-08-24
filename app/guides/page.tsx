@@ -63,7 +63,7 @@ export default async function GuidesPage({ searchParams }: GuidesPageProps) {
        LEFT JOIN profiles pr ON pr.id = p.author_id
        ${categoryJoin}
        WHERE ${whereSql}
-       ORDER BY p.published_at DESC
+       ORDER BY published_at DESC
        LIMIT $${whereParams.length + 1} OFFSET $${whereParams.length + 2}`,
       [...whereParams, PAGE_SIZE, offset],
     ),

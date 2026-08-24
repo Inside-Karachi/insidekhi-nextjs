@@ -31,6 +31,7 @@ export const PROFILE_COLUMN_KEYS = [
   "organizer_bio",
   "organizer_company",
   "organizer_website",
+  "is_verified_organizer",
   "created_at",
   "updated_at",
 ] as const;

@@ -116,6 +116,27 @@ function getCheckoutLimiter(): Ratelimit | null {
   return checkoutLimiter;
 }
 
+// Dedicated tier for POST /organizer/tickets/verify: 60 per minute per user,
+// generous enough for rapid door-scanning across multiple gates while still
+// bounding abuse (e.g. a compromised token brute-forcing ticket codes).
+let ticketVerifyLimiter: Ratelimit | null = null;
+let ticketVerifyInitialized = false;
+
+function getTicketVerifyLimiter(): Ratelimit | null {
+  if (ticketVerifyInitialized) return ticketVerifyLimiter;
+  const available = redisAvailable();
+  ticketVerifyInitialized = true;
+  if (!available) return null;
+
+  ticketVerifyLimiter = new Ratelimit({
+    redis: Redis.fromEnv(),
+    limiter: Ratelimit.slidingWindow(60, "1 m"),
+    prefix: "@upstash/ratelimit/mobile-ticket-verify",
+    analytics: true,
+  });
+  return ticketVerifyLimiter;
+}
+
 function getIp(request: Request): string {
   const forwarded = request.headers.get("x-forwarded-for");
   if (forwarded) return forwarded.split(",")[0].trim();
@@ -219,6 +240,29 @@ export async function enforceCheckoutRateLimit(userId: string): Promise<void> {
     throw new MobileApiError(
       "rate_limited",
       "Too many checkout attempts. Please try again later.",
+      429,
+      undefined,
+      { retryAfter },
+    );
+  }
+}
+
+/** Throttle for POST /organizer/tickets/verify (60 / min / user). */
+export async function enforceTicketVerifyRateLimit(
+  userId: string,
+): Promise<void> {
+  const rl = getTicketVerifyLimiter();
+  if (!rl) return;
+
+  const result = await rl.limit(`ticket-verify:${userId}`);
+  if (!result.success) {
+    const retryAfter = Math.max(
+      1,
+      Math.ceil((result.reset - Date.now()) / 1000),
+    );
+    throw new MobileApiError(
+      "rate_limited",
+      "Too many check-in attempts. Please slow down.",
       429,
       undefined,
       { retryAfter },

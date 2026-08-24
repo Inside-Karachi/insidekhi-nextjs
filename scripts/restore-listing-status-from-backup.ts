@@ -38,12 +38,12 @@ if (!backupUrl || !prodUrl) {
   process.exit(1);
 }
 
-function cleanConnectionString(url: string): string {
-  return url.split("?")[0];
+function cleanConnectionString(url?: string): string {
+  return url ? url.split("?")[0] : "";
 }
 
-function ssl(url: string) {
-  return url.includes("sslmode=require")
+function ssl(url?: string) {
+  return url?.includes("sslmode=require")
     ? { rejectUnauthorized: false }
     : undefined;
 }

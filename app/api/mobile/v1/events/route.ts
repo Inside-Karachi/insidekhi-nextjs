@@ -7,6 +7,7 @@ import { parsePagination, buildPaginationMeta } from "@/lib/mobile/pagination";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
 import { toEventCard, type EventCardRow } from "@/lib/mobile/mappers";
+import { getAttendeesPreviewByEvent } from "@/lib/mobile/attendees";
 
 export const dynamic = "force-dynamic";
 
@@ -119,14 +120,41 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     throw new MobileApiError("internal_error", "Failed to load events.", 500);
   }
 
-  const events = rows.map(toEventCardRow).map(toEventCard);
+  const eventCardRows = rows.map(toEventCardRow);
+  const eventIds = eventCardRows.map((r) => r.event_id).filter((id): id is number => id != null);
 
-  // TEMP PREVIEW ONLY - revert before commit
-  const previewIdx = events.findIndex((e) => e.event_id === 85);
-  if (previewIdx !== -1) {
-    (events[previewIdx] as unknown as Record<string, unknown>).image_url =
-      "http://localhost:3000/tmp-preview-farmhouse.jpg";
+  let attendeesPreviewByEvent: Awaited<
+    ReturnType<typeof getAttendeesPreviewByEvent>
+  > = new Map();
+  let primaryImageByEvent = new Map<number, string>();
+  try {
+    const [attendeesResult, imagesResult] = await Promise.all([
+      getAttendeesPreviewByEvent(eventIds),
+      eventIds.length > 0
+        ? query(
+            `SELECT DISTINCT ON (event_id) event_id, url
+             FROM event_images
+             WHERE event_id = ANY($1) AND (is_primary = true OR display_order = 1)
+             ORDER BY event_id, is_primary DESC NULLS LAST, display_order ASC`,
+            [eventIds],
+          )
+        : Promise.resolve({ rows: [] as { event_id: number; url: string }[] }),
+    ]);
+    attendeesPreviewByEvent = attendeesResult;
+    primaryImageByEvent = new Map(
+      imagesResult.rows.map((r) => [Number(r.event_id), r.url as string]),
+    );
+  } catch (error) {
+    console.error("[mobile-api] attendees preview / image query failed:", error);
   }
+
+  const events = eventCardRows.map((row) =>
+    toEventCard(
+      row,
+      row.event_id != null ? attendeesPreviewByEvent.get(row.event_id) : undefined,
+      row.event_id != null ? (primaryImageByEvent.get(row.event_id) ?? null) : null,
+    ),
+  );
 
   return ok(events, {
     pagination: buildPaginationMeta(page, limit, count),

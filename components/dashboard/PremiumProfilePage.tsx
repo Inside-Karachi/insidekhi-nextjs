@@ -14,7 +14,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { DeleteAccountDialog } from "@/components/dashboard/DeleteAccountDialog";
 import Image from "next/image";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -33,6 +34,7 @@ import {
   Mail,
   Eye,
   EyeOff,
+  AlertTriangle,
 } from "lucide-react";
 
 interface ProfileData {
@@ -147,6 +149,17 @@ export function PremiumProfilePage({ user, profile }: PremiumProfilePageProps) {
   const [showPasswordForm, setShowPasswordForm] = useState(false);
   // uploadProgress removed (reserved for future enhancement)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const searchParams = useSearchParams();
+
+  // Deep link from the public /delete-account page (and store-listing URL)
+  // straight into the confirmation flow.
+  React.useEffect(() => {
+    if (searchParams.get("openDelete") === "1") {
+      setShowDeleteDialog(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Form validation schema (Zod)
   const phoneRegex = /^(?:(?:\+92|0)?3\d{9})$/;
@@ -1033,6 +1046,40 @@ export function PremiumProfilePage({ user, profile }: PremiumProfilePageProps) {
           </form>
         )}
       </motion.div>
+
+      {/* Danger Zone */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.28, duration: 0.45 }}
+        className="glass-card border border-destructive/30 rounded-2xl p-8 shadow-sm mt-6"
+      >
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-lg bg-destructive/10 border border-destructive/20 flex items-center justify-center">
+            <AlertTriangle className="w-5 h-5 text-destructive" />
+          </div>
+          <div>
+            <h2 className="text-lg sm:text-xl md:text-3xl font-bold text-destructive">
+              Danger Zone
+            </h2>
+            <p className="text-muted-foreground text-sm">
+              Permanently delete your account and personal information.
+            </p>
+          </div>
+        </div>
+        <Button
+          variant="destructive"
+          onClick={() => setShowDeleteDialog(true)}
+          className="w-full md:w-auto"
+        >
+          Delete Account
+        </Button>
+      </motion.div>
+
+      <DeleteAccountDialog
+        isOpen={showDeleteDialog}
+        onClose={() => setShowDeleteDialog(false)}
+      />
 
       {/* bottom spacer so form doesn't touch footer/newsletter */}
       <div className="h-24 md:h-40" aria-hidden />

@@ -105,7 +105,7 @@ export function PrivacyPolicyContent() {
         {
           title: "Correction & Deletion",
           content:
-            "Update inaccurate information or request deletion of your personal data.",
+            "Update inaccurate information, or permanently delete your account at any time — see insidekarachi.com/delete-account for details.",
         },
         {
           title: "Communication Preferences",

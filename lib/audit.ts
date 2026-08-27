@@ -13,6 +13,7 @@ export type AuditAction =
   | "user_logout"
   | "user_login_failed"
   | "user_signup"
+  | "account_self_deleted"
   // Admin Actions
   | "admin_user_created"
   | "admin_user_deleted"
@@ -195,6 +196,16 @@ export async function logPasswordChange(userId: string, ipAddress?: string) {
     user_id: userId,
     action: "user_password_changed",
     entity_type: "user",
+    entity_id: userId,
+    ip_address: ipAddress,
+  });
+}
+
+export async function logAccountDeletion(userId: string, ipAddress?: string) {
+  await logAuditEvent({
+    user_id: userId,
+    action: "account_self_deleted",
+    entity_type: "profile",
     entity_id: userId,
     ip_address: ipAddress,
   });

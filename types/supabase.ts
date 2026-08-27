@@ -2996,6 +2996,7 @@ export type Database = {
           active_role: Database["public"]["Enums"]["user_role"]
           avatar_url: string | null
           created_at: string
+          deleted_at: string | null
           district: string | null
           email_verified_at: string | null
           full_name: string | null
@@ -3019,6 +3020,7 @@ export type Database = {
           active_role: Database["public"]["Enums"]["user_role"]
           avatar_url?: string | null
           created_at?: string
+          deleted_at?: string | null
           district?: string | null
           email_verified_at?: string | null
           full_name?: string | null
@@ -3042,6 +3044,7 @@ export type Database = {
           active_role?: Database["public"]["Enums"]["user_role"]
           avatar_url?: string | null
           created_at?: string
+          deleted_at?: string | null
           district?: string | null
           email_verified_at?: string | null
           full_name?: string | null

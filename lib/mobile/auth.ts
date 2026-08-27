@@ -1,5 +1,6 @@
 import { MobileApiError } from "./errors";
 import { verifyToken } from "@/lib/auth/jwt";
+import { isAccountDeleted } from "@/lib/auth/account-status";
 
 export type MobileUser = {
   id: string;
@@ -58,6 +59,17 @@ export async function requireMobileUser(
     );
   }
 
+  // Tokens have no server-side revocation list, so a self-deleted account's
+  // still-valid token is rejected here on every request instead of only
+  // once it naturally expires (up to 7 days later).
+  if (await isAccountDeleted(payload.userId)) {
+    throw new MobileApiError(
+      "not_authenticated",
+      "This account no longer exists.",
+      401,
+    );
+  }
+
   return {
     user: {
       id: payload.userId,
@@ -80,6 +92,10 @@ export async function getOptionalMobileUser(
 
   const payload = await verifyToken(token);
   if (!payload) {
+    return { user: null };
+  }
+
+  if (await isAccountDeleted(payload.userId)) {
     return { user: null };
   }
 

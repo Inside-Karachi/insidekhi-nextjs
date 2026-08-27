@@ -20,7 +20,22 @@ export async function getSessionFromCookies(): Promise<JWTPayload | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
   if (!token) return null;
-  return verifyToken(token);
+
+  const payload = await verifyToken(token);
+  if (!payload) return null;
+
+  // Tokens have no server-side revocation list, so a self-deleted account's
+  // still-valid JWT is rejected here on every request instead of only once
+  // it naturally expires (up to 7 days later). Dynamic import (like the
+  // `cookies()` import above): account-status.ts pulls in `lib/db` (`pg`,
+  // needs Node's `crypto`), and this file is also imported by the Edge
+  // middleware via `getSession()` - a static top-level import here would
+  // get bundled into the Edge build even though `getSession()` never calls
+  // it, and Edge doesn't support `pg`.
+  const { isAccountDeleted } = await import("./account-status");
+  if (await isAccountDeleted(payload.userId)) return null;
+
+  return payload;
 }
 
 /**

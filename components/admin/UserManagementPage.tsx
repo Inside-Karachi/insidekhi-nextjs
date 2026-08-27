@@ -48,6 +48,7 @@ interface User {
   last_sign_in: string | null;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
 }
 
 interface UserManagementPageProps {

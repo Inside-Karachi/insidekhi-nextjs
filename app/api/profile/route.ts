@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { getSessionFromCookies } from "@/lib/auth/session";
+import { getSessionFromCookies, clearSession } from "@/lib/auth/session";
+import { verifyPassword } from "@/lib/auth/password";
+import { anonymizeAndDeleteAccount } from "@/lib/auth/delete-account";
+import { getSystemConfig } from "@/lib/business-owner/api-utils";
 
 // Pakistan phone number validation (supports various formats)
 function validatePakistanPhone(phone: string): boolean {
@@ -318,9 +321,12 @@ export async function GET(_request: NextRequest) {
       return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
 
     const { rows } = await query(
-      `SELECT id, full_name, avatar_url, username, phone, membership_plan, role, points,
-              created_at, updated_at, organizer_bio, organizer_company, organizer_website
-       FROM public.profiles WHERE id = $1 LIMIT 1`,
+      `SELECT p.id, p.full_name, p.avatar_url, p.username, p.phone, p.membership_plan, p.role, p.points,
+              p.created_at, p.updated_at, p.organizer_bio, p.organizer_company, p.organizer_website,
+              (u.encrypted_password IS NOT NULL) AS has_password
+       FROM public.profiles p
+       LEFT JOIN auth.users u ON u.id = p.id
+       WHERE p.id = $1 LIMIT 1`,
       [session.userId]
     );
 
@@ -330,6 +336,88 @@ export async function GET(_request: NextRequest) {
     return NextResponse.json({ profile: rows[0] });
   } catch (err) {
     console.error("Profile fetch error:", err);
+    return NextResponse.json({ error: "unexpected_error" }, { status: 500 });
+  }
+}
+
+/**
+ * DELETE /api/profile
+ *
+ * Self-service, permanent account deletion. Anonymizes the caller's profile
+ * (name/avatar/phone/bio -> placeholder identity) and disables login, while
+ * leaving everything they created (reviews, listings, bookings, points)
+ * intact - those tables only ever join `profiles` live by user_id, so the
+ * anonymized identity cascades everywhere automatically. Irreversible.
+ */
+export async function DELETE(request: NextRequest) {
+  try {
+    const session = await getSessionFromCookies();
+    if (!session)
+      return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
+
+    const enabled = await getSystemConfig("account_deletion.enabled", "true");
+    if (enabled !== "true") {
+      return NextResponse.json(
+        {
+          error: "feature_disabled",
+          message: "Account deletion is temporarily unavailable.",
+        },
+        { status: 503 }
+      );
+    }
+
+    const body = await request.json().catch(() => ({}));
+
+    const { rows: authRows } = await query(
+      `SELECT encrypted_password FROM auth.users WHERE id = $1 LIMIT 1`,
+      [session.userId]
+    );
+    const encryptedPassword = authRows[0]?.encrypted_password as string | undefined;
+
+    if (encryptedPassword) {
+      if (
+        typeof body.currentPassword !== "string" ||
+        !(await verifyPassword(body.currentPassword, encryptedPassword))
+      ) {
+        return NextResponse.json(
+          {
+            error: "validation_error",
+            message: "Current password is incorrect.",
+            field: "currentPassword",
+          },
+          { status: 400 }
+        );
+      }
+    } else if (body.confirmText !== "DELETE") {
+      return NextResponse.json(
+        {
+          error: "validation_error",
+          message: 'Type "DELETE" to confirm.',
+          field: "confirmText",
+        },
+        { status: 400 }
+      );
+    }
+
+    const result = await anonymizeAndDeleteAccount(session.userId, {
+      ipAddress:
+        request.headers.get("x-forwarded-for") ||
+        request.headers.get("x-real-ip") ||
+        "unknown",
+    });
+
+    if (!result.success) {
+      return NextResponse.json(
+        { error: result.error, message: "Account could not be deleted." },
+        { status: 409 }
+      );
+    }
+
+    const response = NextResponse.json({ ok: true });
+    clearSession(response);
+    return response;
+  } catch (err) {
+    console.error("Account deletion error:", err);
     return NextResponse.json({ error: "unexpected_error" }, { status: 500 });
   }
 }

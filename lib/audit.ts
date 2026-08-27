@@ -14,6 +14,8 @@ export type AuditAction =
   | "user_login_failed"
   | "user_signup"
   | "account_self_deleted"
+  | "content_reported"
+  | "content_report_dismissed"
   // Admin Actions
   | "admin_user_created"
   | "admin_user_deleted"
@@ -197,6 +199,38 @@ export async function logPasswordChange(userId: string, ipAddress?: string) {
     action: "user_password_changed",
     entity_type: "user",
     entity_id: userId,
+    ip_address: ipAddress,
+  });
+}
+
+export async function logContentReport(
+  reporterId: string,
+  contentType: "review" | "comment",
+  contentId: number,
+  reason: string,
+  ipAddress?: string,
+) {
+  await logAuditEvent({
+    user_id: reporterId,
+    action: "content_reported",
+    entity_type: contentType,
+    entity_id: String(contentId),
+    metadata: { reason },
+    ip_address: ipAddress,
+  });
+}
+
+export async function logContentReportDismissed(
+  adminId: string,
+  contentType: "review" | "comment",
+  contentId: number,
+  ipAddress?: string,
+) {
+  await logAuditEvent({
+    admin_id: adminId,
+    action: "content_report_dismissed",
+    entity_type: contentType,
+    entity_id: String(contentId),
     ip_address: ipAddress,
   });
 }

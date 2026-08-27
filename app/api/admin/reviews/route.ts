@@ -74,7 +74,8 @@ export async function GET(request: NextRequest) {
         l.name       AS listing_name,
         l.slug       AS listing_slug,
         COALESCE((SELECT json_agg(ri) FROM public.review_images ri WHERE ri.review_id = r.id), '[]') AS images,
-        COALESCE((SELECT COUNT(*)::int FROM public.review_comments rc WHERE rc.review_id = r.id), 0) AS comment_count
+        COALESCE((SELECT COUNT(*)::int FROM public.review_comments rc WHERE rc.review_id = r.id), 0) AS comment_count,
+        COALESCE((SELECT COUNT(*)::int FROM public.content_reports cr WHERE cr.content_type = 'review' AND cr.content_id = r.id AND cr.status = 'pending'), 0) AS report_count
       FROM public.reviews r
       LEFT JOIN public.profiles p ON p.id = r.user_id
       LEFT JOIN public.listings l ON l.id = r.listing_id

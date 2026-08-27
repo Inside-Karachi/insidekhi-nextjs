@@ -14,6 +14,8 @@ export interface CommentWithAuthor extends Omit<ReviewComment, "user_id"> {
   author_name: string | null;
   author_avatar: string | null;
   reply_count?: number;
+  /** Number of pending user-submitted reports (see `content_reports`). */
+  report_count?: number;
 }
 
 // Comment creation/update payloads

@@ -104,6 +104,19 @@ export async function POST(
       status,
     );
 
+    // Acting on the content resolves any pending user reports against it -
+    // best-effort, must never fail the moderation action itself.
+    try {
+      await query(
+        `UPDATE public.content_reports
+         SET status = 'resolved', resolved_by = $1, resolved_at = now()
+         WHERE content_type = 'review' AND content_id = $2 AND status = 'pending'`,
+        [session.userId, reviewId],
+      );
+    } catch (reportsError) {
+      console.error("Failed to auto-resolve content reports:", reportsError);
+    }
+
     return NextResponse.json({
       success: true,
       message: `Review ${status} successfully`,

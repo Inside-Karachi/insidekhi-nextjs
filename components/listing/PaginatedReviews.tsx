@@ -15,11 +15,21 @@ import {
   Loader2,
   MapPin,
   X,
+  MoreVertical,
+  Flag,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { CommentSection } from "@/components/review/CommentSection";
 import { HelpfulVoteButton } from "@/components/review/HelpfulVoteButton";
+import { ReportContentModal } from "@/components/shared/ReportContentModal";
+import { useToast } from "@/hooks/use-toast";
 import {
   sectionVariants,
   cardVariants,
@@ -75,6 +85,20 @@ export function PaginatedReviews({
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number>(0);
   const [lightboxImages, setLightboxImages] = useState<string[]>([]);
+  const [reportingReviewId, setReportingReviewId] = useState<number | null>(null);
+  const { toast } = useToast();
+
+  const handleReportClick = (reviewId: number) => {
+    if (!currentUser) {
+      toast({
+        title: "Sign in required",
+        description: "Please sign in to report a review",
+        variant: "destructive",
+      });
+      return;
+    }
+    setReportingReviewId(reviewId);
+  };
 
   const toggleComments = (reviewId: number) => {
     setExpandedComments((prev) => {
@@ -263,6 +287,21 @@ export function PaginatedReviews({
                       initialHelpfulCount={review.helpful_count || 0}
                       className="ml-2"
                     />
+                    {(!currentUser || currentUser.id !== review.user_id) && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                            <MoreVertical className="h-3.5 w-3.5" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => handleReportClick(review.id)}>
+                            <Flag className="h-4 w-4 mr-2" />
+                            Report
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                   </div>
                 </div>
                 {review.comment && (
@@ -515,6 +554,12 @@ export function PaginatedReviews({
           </div>
         </div>
       )}
+
+      <ReportContentModal
+        isOpen={reportingReviewId !== null}
+        onClose={() => setReportingReviewId(null)}
+        endpoint={`/api/reviews/${reportingReviewId}/report`}
+      />
     </motion.div>
   );
 }

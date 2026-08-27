@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes } from "crypto";
 import { buildGoogleAuthUrl } from "@/lib/auth/google";
-import { getGoogleCallbackUrl } from "@/lib/auth/url";
+import { getGoogleCallbackUrl, getStateCookieDomain } from "@/lib/auth/url";
 
 const STATE_COOKIE_NAME = "g_oauth_state";
 
@@ -38,6 +38,7 @@ export async function GET(request: NextRequest) {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
+      domain: getStateCookieDomain(),
       path: "/api/auth/google",
       maxAge: 600, // 10 minutes
     }

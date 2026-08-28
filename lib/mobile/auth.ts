@@ -1,5 +1,5 @@
 import { MobileApiError } from "./errors";
-import { verifyToken } from "@/lib/auth/jwt";
+import { verifyTokenDetailed } from "@/lib/auth/jwt";
 import { isAccountDeleted } from "@/lib/auth/account-status";
 
 export type MobileUser = {
@@ -50,14 +50,20 @@ export async function requireMobileUser(
     );
   }
 
-  const payload = await verifyToken(token);
-  if (!payload) {
+  const verification = await verifyTokenDetailed(token);
+  if (!verification.valid) {
+    // Distinct code for a structurally broken token (malformed/tampered,
+    // not merely expired): unlike a bare `not_authenticated`, which the
+    // mobile client gives the benefit of the doubt as a transient backend
+    // blip, this can never resolve itself - the client must drop the
+    // session immediately instead of retrying forever.
     throw new MobileApiError(
-      "not_authenticated",
-      "Invalid or expired token.",
+      verification.expired ? "not_authenticated" : "invalid_token",
+      verification.expired ? "Invalid or expired token." : "Session is invalid. Please sign in again.",
       401,
     );
   }
+  const payload = verification.payload;
 
   // Tokens have no server-side revocation list, so a self-deleted account's
   // still-valid token is rejected here on every request instead of only
@@ -95,10 +101,11 @@ export async function getOptionalMobileUser(
     return { user: null };
   }
 
-  const payload = await verifyToken(token);
-  if (!payload) {
+  const verification = await verifyTokenDetailed(token);
+  if (!verification.valid) {
     return { user: null };
   }
+  const payload = verification.payload;
 
   if (await isAccountDeleted(payload.userId)) {
     return { user: null };

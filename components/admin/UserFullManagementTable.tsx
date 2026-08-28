@@ -58,6 +58,7 @@ interface User {
   last_sign_in: string | null;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
 }
 
 interface UserFullManagementTableProps {
@@ -276,8 +277,18 @@ export function UserFullManagementTable({
                         </div>
                       </div>
                       <div className="flex-1 min-w-0">
-                        <h3 className="font-semibold text-lg truncate text-foreground group-hover:text-primary transition-colors duration-300">
-                          {user.full_name || user.username || "Unnamed User"}
+                        <h3 className="font-semibold text-lg truncate text-foreground group-hover:text-primary transition-colors duration-300 flex items-center gap-2">
+                          <span className="truncate">
+                            {user.full_name || user.username || "Unnamed User"}
+                          </span>
+                          {user.deleted_at && (
+                            <Badge
+                              variant="outline"
+                              className="shrink-0 text-xs px-1.5 py-0 border-destructive/30 text-destructive bg-destructive/10"
+                            >
+                              Deleted
+                            </Badge>
+                          )}
                         </h3>
                         <p className="text-sm text-muted-foreground truncate group-hover:text-muted-foreground/80 transition-colors duration-300">
                           {user.email}

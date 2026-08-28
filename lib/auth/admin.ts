@@ -112,6 +112,13 @@ export async function requireAdmin(
       throw new Error("Profile not found");
     }
 
+    // A self-deleted account keeps a valid JWT for up to 7 days (no
+    // server-side revocation list) - without this, a deleted ex-admin would
+    // keep admin powers until their token naturally expires.
+    if (profile.deleted_at) {
+      throw new Error("Profile not found");
+    }
+
     // Check admin role
     if (!isAdminRole(profile.role)) {
       throw new Error("Admin access required");
@@ -186,6 +193,10 @@ export async function requireStaff(
       throw new Error("Profile not found");
     }
 
+    if (profile.deleted_at) {
+      throw new Error("Profile not found");
+    }
+
     // Check staff role (lister) or admin role (admins have unrestricted access)
     if (!isStaffRole(profile.role) && !isAdminRole(profile.role)) {
       throw new Error("Staff access required");
@@ -235,6 +246,10 @@ export async function requireListingCapacityAccess(
     const profile = rows[0] as Profile | undefined;
 
     if (!profile) {
+      throw new Error("Profile not found");
+    }
+
+    if (profile.deleted_at) {
       throw new Error("Profile not found");
     }
 

@@ -303,8 +303,16 @@ export function ReviewsTable({
                   {/* User Info */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-1">
-                      <h3 className="font-semibold text-foreground truncate text-base group-hover:text-primary transition-colors duration-300">
-                        {review.user_name || "Anonymous"}
+                      <h3 className="font-semibold text-foreground truncate text-base group-hover:text-primary transition-colors duration-300 flex items-center gap-2">
+                        <span className="truncate">{review.user_name || "Anonymous"}</span>
+                        {!!review.report_count && review.report_count > 0 && (
+                          <span
+                            title={`${review.report_count} pending report${review.report_count === 1 ? "" : "s"}`}
+                            className="shrink-0 inline-flex items-center gap-0.5 text-xs font-medium px-1.5 py-0.5 rounded-full bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800"
+                          >
+                            🚩 {review.report_count}
+                          </span>
+                        )}
                       </h3>
                       <span className="text-xs text-muted-foreground flex-shrink-0 ml-2">
                         {new Date(review.created_at).toLocaleDateString(

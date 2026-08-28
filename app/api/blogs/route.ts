@@ -57,7 +57,7 @@ export async function GET(request: NextRequest) {
        LEFT JOIN profiles pr ON pr.id = p.author_id
        ${categoryJoin}
        WHERE ${whereSql}
-       ORDER BY p.published_at DESC
+       ORDER BY published_at DESC
        LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
       listParams,
     );

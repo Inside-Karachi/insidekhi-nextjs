@@ -51,6 +51,7 @@ const footerLinks = {
     { name: "Terms & Conditions", href: "/terms-and-conditions" },
     { name: "Refund Policy", href: "/refund-policy" },
     { name: "Service Policy", href: "/service-policy" },
+    { name: "Delete Account", href: "/delete-account" },
   ],
 };
 
@@ -451,6 +452,13 @@ export function Footer({ serverCategories: _serverCategories }: FooterProps) {
               © <CurrentYear />{" "}
               <span className="text-primary font-semibold">Inside Karachi</span>
               . All Rights Reserved.
+            </p>
+            <p className="text-xs text-muted-foreground/70">
+              Inside Karachi is managed by{" "}
+              <span className="font-medium text-muted-foreground">
+                CITY GUIDE NETWORK (PRIVATE) LIMITED
+              </span>
+              .
             </p>
             <p className="text-xs text-muted-foreground/70">
               Crafted with <span className="text-primary animate-pulse">♥</span>{" "}

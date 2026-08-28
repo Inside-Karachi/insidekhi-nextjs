@@ -33,20 +33,48 @@ function getConfiguredSiteOrigin(): string | null {
 }
 
 function resolveSiteOrigin(requestUrl?: string): string {
-  const configuredOrigin = getConfiguredSiteOrigin();
-  const fallbackOrigin =
-    process.env.NODE_ENV === "development" && requestUrl
-      ? new URL(requestUrl).origin
-      : null;
-  const origin = configuredOrigin ?? fallbackOrigin;
-
-  if (!origin) {
-    throw new Error(
-      "SITE_URL, NEXT_PUBLIC_SITE_URL, or VERCEL_URL must be configured for auth redirects"
-    );
+  // Outside production, always use the request's own origin (localhost, a
+  // LAN IP for testing on a phone, ...) when we have one. NEXT_PUBLIC_SITE_URL
+  // in .env is the shared production value - preferring it here would
+  // silently send the OAuth round-trip to production instead of the local
+  // dev server, and the state cookie set on this origin would never come
+  // back on that unrelated domain.
+  if (process.env.NODE_ENV !== "production" && requestUrl) {
+    return new URL(requestUrl).origin;
   }
 
-  return origin;
+  const configuredOrigin = getConfiguredSiteOrigin();
+  if (configuredOrigin) {
+    return configuredOrigin;
+  }
+
+  if (requestUrl) {
+    return new URL(requestUrl).origin;
+  }
+
+  throw new Error(
+    "SITE_URL, NEXT_PUBLIC_SITE_URL, or VERCEL_URL must be configured for auth redirects"
+  );
+}
+
+/**
+ * Domain to scope the OAuth state cookie to, so it survives the round-trip
+ * regardless of whether the user started on the apex domain or "www" -
+ * Google/Apple always redirect back to the exact configured site origin
+ * (e.g. www.insidekarachi.com), but a cookie set without an explicit domain
+ * is host-only and won't be sent back if the user began on a different host
+ * variant. Returns undefined outside production (host-only cookie is fine
+ * for a single-host local/dev origin).
+ */
+export function getStateCookieDomain(): string | undefined {
+  if (process.env.NODE_ENV !== "production") return undefined;
+
+  const origin = getConfiguredSiteOrigin();
+  if (!origin) return undefined;
+
+  const hostname = new URL(origin).hostname;
+  const bareHostname = hostname.startsWith("www.") ? hostname.slice(4) : hostname;
+  return `.${bareHostname}`;
 }
 
 export function getAuthCallbackUrl(requestUrl?: string): string {

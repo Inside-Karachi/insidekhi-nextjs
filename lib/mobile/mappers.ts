@@ -201,6 +201,8 @@ export function toReview(
  * (a user auth UUID) is deliberately excluded per section 1.1.3; organizers appear as
  * `organizer_name` + `organizer_avatar` only.
  */
+export type AttendeePreviewDTO = { username: string | null; avatar_url: string | null };
+
 export type EventCardDTO = {
   event_id: number | null;
   event_name: string | null;
@@ -216,6 +218,11 @@ export type EventCardDTO = {
   address: string | null;
   latitude: number | null;
   longitude: number | null;
+  image_url?: string | null;
+  /** "N people going" preview, based on paid ticket bookings. Omitted (not
+   * just empty) when the caller doesn't pass one in, e.g. the detail route. */
+  attendees_preview?: AttendeePreviewDTO[];
+  attendees_count?: number;
 };
 
 /**
@@ -244,7 +251,11 @@ export type EventCardRow = Pick<
 export const EVENT_CARD_COLUMNS =
   "event_id, event_name, event_slug, event_description, event_status, start_time, end_time, is_featured, organizer_name, organizer_avatar, location_name, address, latitude, longitude";
 
-export function toEventCard(row: EventCardRow): EventCardDTO {
+export function toEventCard(
+  row: EventCardRow,
+  attendeesPreview?: { users: AttendeePreviewDTO[]; total_count: number },
+  imageUrl?: string | null,
+): EventCardDTO {
   return {
     event_id: row.event_id,
     event_name: row.event_name,
@@ -260,6 +271,13 @@ export function toEventCard(row: EventCardRow): EventCardDTO {
     address: row.address,
     latitude: row.latitude,
     longitude: row.longitude,
+    ...(imageUrl !== undefined ? { image_url: imageUrl } : {}),
+    ...(attendeesPreview
+      ? {
+          attendees_preview: attendeesPreview.users,
+          attendees_count: attendeesPreview.total_count,
+        }
+      : {}),
   };
 }
 

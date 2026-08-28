@@ -11,6 +11,9 @@ import {
   type ProfileRow,
 } from "@/lib/mobile/profile";
 import { query } from "@/lib/db";
+import { verifyPassword } from "@/lib/auth/password";
+import { anonymizeAndDeleteAccount } from "@/lib/auth/delete-account";
+import { getSystemConfig } from "@/lib/business-owner/api-utils";
 
 export const dynamic = "force-dynamic";
 
@@ -34,7 +37,14 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     throw new MobileApiError("not_found", "Profile not found.", 404);
   }
 
-  return ok(profile);
+  // Read-only, derived field (not part of the profiles write allow-list) -
+  // the delete-account flow needs it to pick a password vs. typed-confirm step.
+  const { rows: authRows } = await query(
+    `SELECT (encrypted_password IS NOT NULL) AS has_password FROM auth.users WHERE id = $1`,
+    [user.id],
+  );
+
+  return ok({ ...profile, has_password: Boolean(authRows[0]?.has_password) });
 });
 
 /**
@@ -155,4 +165,73 @@ export const PATCH = mobileRoute(async (request: NextRequest) => {
   }
 
   return ok(profile);
+});
+
+/**
+ * DELETE /api/mobile/v1/profile
+ *
+ * Self-service, permanent account deletion. Anonymizes the caller's profile
+ * (name/avatar/phone/bio -> placeholder identity) and disables login, while
+ * leaving everything they created (reviews, listings, bookings, points)
+ * intact. Mirrors `app/api/profile` (DELETE). Irreversible.
+ */
+export const DELETE = mobileRoute(async (request: NextRequest) => {
+  await enforceMobileRateLimit(request);
+  const { user } = await requireMobileUser(request);
+  await enforceMobileRateLimit(request, user.id);
+
+  const enabled = await getSystemConfig("account_deletion.enabled", "true");
+  if (enabled !== "true") {
+    throw new MobileApiError(
+      "feature_disabled",
+      "Account deletion is temporarily unavailable.",
+      503,
+    );
+  }
+
+  const body = await request.json().catch(() => ({}));
+
+  const { rows: authRows } = await query(
+    `SELECT encrypted_password FROM auth.users WHERE id = $1 LIMIT 1`,
+    [user.id],
+  );
+  const encryptedPassword = authRows[0]?.encrypted_password as string | undefined;
+
+  if (encryptedPassword) {
+    if (
+      typeof body.currentPassword !== "string" ||
+      !(await verifyPassword(body.currentPassword, encryptedPassword))
+    ) {
+      throw new MobileApiError(
+        "validation_error",
+        "Current password is incorrect.",
+        400,
+        "currentPassword",
+      );
+    }
+  } else if (body.confirmText !== "DELETE") {
+    throw new MobileApiError(
+      "validation_error",
+      'Type "DELETE" to confirm.',
+      400,
+      "confirmText",
+    );
+  }
+
+  const result = await anonymizeAndDeleteAccount(user.id, {
+    ipAddress:
+      request.headers.get("x-forwarded-for") ||
+      request.headers.get("x-real-ip") ||
+      "unknown",
+  });
+
+  if (!result.success) {
+    throw new MobileApiError(
+      result.error,
+      "Account could not be deleted.",
+      409,
+    );
+  }
+
+  return ok({ deleted: true });
 });

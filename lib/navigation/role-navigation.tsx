@@ -20,6 +20,7 @@ import {
   Store,
   PenSquare,
   Smartphone,
+  Flag,
   type LucideIcon,
 } from "lucide-react";
 import type { UserRole } from "@/types/auth.types";
@@ -110,6 +111,7 @@ export const adminNavigation: RoleNavItem[] = [
   { name: "Listing Capacity", href: "/admin/listing-capacity", icon: Store, description: "Update capacity fields" },
   { name: "Listing Approvals", href: "/admin/listings/approvals", icon: ClipboardCheck, description: "Review pending listings" },
   { name: "Review Moderation", href: "/admin/reviews", icon: Star, description: "Moderate user reviews" },
+  { name: "Reported Content", href: "/admin/reports", icon: Flag, description: "Review flagged reviews & comments" },
   { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList, description: "View submitted forms" },
   { name: "Blog Approvals", href: "/admin/blogs/approvals", icon: ClipboardCheck, description: "Review pending posts" },
   { name: "Writer Applications", href: "/admin/writer-applications", icon: PenSquare, description: "Review writer applicants" },
@@ -134,6 +136,7 @@ export const listerNavigation: RoleNavItem[] = [
   { name: "Event Management", href: "/admin/events", icon: Calendar, description: "Manage all events" },
   { name: "Event Approvals", href: "/admin/events/approvals", icon: ClipboardCheck, description: "Review pending events" },
   { name: "Review Moderation", href: "/admin/reviews", icon: Star, description: "Moderate user reviews" },
+  { name: "Reported Content", href: "/admin/reports", icon: Flag, description: "Review flagged reviews & comments" },
   { name: "Form Submissions", href: "/admin/forms", icon: ClipboardList, description: "View submitted forms" },
   { name: "Blog Approvals", href: "/admin/blogs/approvals", icon: ClipboardCheck, description: "Review pending posts" },
   { name: "Writer Applications", href: "/admin/writer-applications", icon: PenSquare, description: "Review writer applicants" },

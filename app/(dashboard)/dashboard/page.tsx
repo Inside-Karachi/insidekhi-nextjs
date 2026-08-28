@@ -200,7 +200,10 @@ export default async function DashboardPage() {
     );
   }
 
-  if (activeRole === "admin") {
+  // Lister shares AdminDashboard's data fetch — its internal role switch
+  // already renders ListerDashboard with real platform stats once it gets
+  // here, it just never used to be reached (this branch only checked "admin").
+  if (activeRole === "admin" || activeRole === "lister") {
     const { AdminDashboard } = await import(
       "@/components/dashboard/AdminDashboard"
     );
@@ -210,6 +213,33 @@ export default async function DashboardPage() {
         profile={
           profile as unknown as ComponentProps<
             typeof AdminDashboard
+          >["profile"]
+        }
+      />
+    );
+  }
+
+  // Writer and business_owner have their own dedicated dashboards with
+  // tailored real data (post counts, listing/booking stats) — send them
+  // there instead of showing the generic dashboard below.
+  if (activeRole === "writer") {
+    redirect("/dashboard/writer");
+  }
+
+  if (activeRole === "business_owner") {
+    redirect("/dashboard/business");
+  }
+
+  if (activeRole === "organizer") {
+    const { OrganizerDashboard } = await import(
+      "@/components/dashboard/OrganizerDashboard"
+    );
+    return (
+      <OrganizerDashboard
+        user={user}
+        profile={
+          profile as unknown as ComponentProps<
+            typeof OrganizerDashboard
           >["profile"]
         }
       />

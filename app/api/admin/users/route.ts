@@ -57,7 +57,7 @@ export async function GET(request: NextRequest) {
 
     const usersSql = `
       SELECT p.id, p.full_name, p.username, p.avatar_url, p.role, p.active_role,
-             p.membership_plan, p.phone, p.created_at, p.updated_at,
+             p.membership_plan, p.phone, p.created_at, p.updated_at, p.deleted_at,
              u.email, u.email_confirmed_at, u.last_sign_in_at
       FROM public.profiles p
       LEFT JOIN auth.users u ON u.id = p.id
@@ -95,6 +95,7 @@ export async function GET(request: NextRequest) {
         last_sign_in: u.last_sign_in_at || null,
         created_at: u.created_at,
         updated_at: u.updated_at,
+        deleted_at: u.deleted_at || null,
       };
     });
 

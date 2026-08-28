@@ -5,6 +5,7 @@ import { getOptionalMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { query } from "@/lib/db";
+import { ensureLeaderboardFresh } from "@/lib/gamification/leaderboard";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +44,8 @@ export const GET = mobileRoute(async (request: NextRequest) => {
 
   const { user } = await getOptionalMobileUser(request);
   const currentUserId = user?.id ?? null;
+
+  await ensureLeaderboardFresh();
 
   let rows;
   try {

@@ -62,9 +62,14 @@ export async function requireMobileUser(
   // Tokens have no server-side revocation list, so a self-deleted account's
   // still-valid token is rejected here on every request instead of only
   // once it naturally expires (up to 7 days later).
+  //
+  // Distinct code (`account_deleted`, not `not_authenticated`): the mobile
+  // client treats a `not_authenticated` 401 on a token that hasn't expired
+  // yet as a transient backend blip and keeps the session, but must drop it
+  // immediately for a real revocation like this one.
   if (await isAccountDeleted(payload.userId)) {
     throw new MobileApiError(
-      "not_authenticated",
+      "account_deleted",
       "This account no longer exists.",
       401,
     );

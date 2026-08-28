@@ -3,11 +3,16 @@ const ALLOWED_ORIGINS = [
   "https://sandbox.insidekarachi.com",
 ];
 
-const LOCALHOST_ORIGIN = /^http:\/\/localhost:\d+$/;
+/**
+ * Metro web (Expo) dev server. The port varies (8081, 8082, ...) and Expo may
+ * serve the page on localhost, 127.0.0.1, or the machine's LAN IP depending on
+ * how it was opened — all are the same dev server, so accept any of them.
+ */
+const DEV_ORIGIN =
+  /^http:\/\/(localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}):\d+$/;
 
-/** Metro web (Expo) dev server — origin varies by port (8081, 8082, ...). */
 function isAllowedOrigin(origin: string): boolean {
-  return ALLOWED_ORIGINS.includes(origin) || LOCALHOST_ORIGIN.test(origin);
+  return ALLOWED_ORIGINS.includes(origin) || DEV_ORIGIN.test(origin);
 }
 
 /**

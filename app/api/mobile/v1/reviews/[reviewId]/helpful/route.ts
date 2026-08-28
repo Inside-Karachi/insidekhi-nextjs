@@ -6,6 +6,7 @@ import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePathId } from "@/lib/mobile/params";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { query } from "@/lib/db";
+import { notifyReviewHelpful } from "@/lib/reviews/notifications";
 
 export const dynamic = "force-dynamic";
 
@@ -73,7 +74,7 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
   const { user } = await requireMobileUser(request);
 
   const { rows: reviewRows } = await query(
-    `SELECT id, user_id, status FROM reviews WHERE id = $1`,
+    `SELECT id, user_id, listing_id, status FROM reviews WHERE id = $1`,
     [reviewId],
   );
   const review = reviewRows[0];
@@ -127,8 +128,23 @@ export const POST = mobileRoute(async (request: NextRequest, { params }) => {
     throw new MobileApiError("internal_error", "Failed to record vote.", 500);
   }
 
+  const newCount = await helpfulCount(reviewId);
+
+  try {
+    await notifyReviewHelpful({
+      review: {
+        reviewId,
+        userId: review.user_id,
+        listingId: review.listing_id,
+      },
+      helpfulCount: newCount,
+    });
+  } catch (notifyError) {
+    console.error("[mobile-api] helpful-vote notification failed:", notifyError);
+  }
+
   return ok({
-    helpful_count: await helpfulCount(reviewId),
+    helpful_count: newCount,
     user_voted: true,
   });
 });

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSessionFromCookies } from "@/lib/auth/session";
+import { notifyReviewReply } from "@/lib/reviews/notifications";
 
 type ReviewCommentRow = {
   id: number;
@@ -107,6 +108,35 @@ export async function POST(
       ...updatedComment,
       profile: profileForCommentRows[0] ?? null,
     };
+
+    if (status === "approved") {
+      try {
+        const { rows: reviewRows } = await query(
+          "SELECT id, user_id, listing_id FROM public.reviews WHERE id = $1 LIMIT 1",
+          [updatedComment.review_id]
+        );
+        const review = reviewRows[0] as
+          | { id: number; user_id: string; listing_id: number }
+          | undefined;
+
+        if (review) {
+          await notifyReviewReply({
+            review: {
+              reviewId: review.id,
+              userId: review.user_id,
+              listingId: review.listing_id,
+            },
+            commentId: updatedComment.id,
+            replySnippet: updatedComment.content.slice(0, 200),
+          });
+        }
+      } catch (notifyError) {
+        console.error(
+          "[MODERATE COMMENT API] Failed to notify reviewer of reply:",
+          notifyError
+        );
+      }
+    }
 
     // 3. Log audit event
     try {

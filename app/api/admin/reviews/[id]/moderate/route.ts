@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromCookies } from "@/lib/auth/session";
 import { captureRouteError } from "@/lib/sentry/captureRouteError";
 import { applyLeaveReviewXpForModeration } from "@/lib/reviews/moderation-xp";
+import { notifyReviewStatus } from "@/lib/reviews/notifications";
 
 const ROUTE = "/api/admin/reviews/[id]/moderate";
 
@@ -103,6 +104,21 @@ export async function POST(
       },
       status,
     );
+
+    if (status === "approved" || status === "rejected") {
+      try {
+        await notifyReviewStatus({
+          review: {
+            reviewId,
+            userId: reviewData.user_id,
+            listingId: reviewData.listing_id,
+          },
+          status,
+        });
+      } catch (notifyError) {
+        console.error("Failed to notify reviewer of moderation outcome:", notifyError);
+      }
+    }
 
     // Acting on the content resolves any pending user reports against it -
     // best-effort, must never fail the moderation action itself.

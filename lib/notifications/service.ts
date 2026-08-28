@@ -1,4 +1,5 @@
 import { query } from "@/lib/db";
+import type { Json } from "@/types/database";
 import {
   getDefaultChannelConfig,
   getEffectiveChannelConfig,
@@ -51,6 +52,19 @@ export async function resolveCategorySlugForRole(
   role: NotificationUserRole,
   fallbackSlug?: string
 ): Promise<string> {
+  if (fallbackSlug) {
+    const { rows: exactRows } = await query(
+      `SELECT slug FROM public.notification_categories
+       WHERE slug = $1 AND audience_roles @> ARRAY[$2]::public.user_role[]
+       LIMIT 1`,
+      [fallbackSlug, role]
+    );
+
+    if (exactRows[0]?.slug) {
+      return exactRows[0].slug;
+    }
+  }
+
   const { rows: targetedRows } = await query(
     `SELECT slug FROM public.notification_categories
      WHERE audience_roles @> ARRAY[$1]::public.user_role[]
@@ -573,4 +587,37 @@ export async function markAllNotificationsRead(
 
 export function getChannelFallbackConfig(): NotificationChannelConfig {
   return getDefaultChannelConfig();
+}
+
+/**
+ * Refreshes an already-created deduped notification in place (new title/body,
+ * merged metadata, bumped back to unread/undismissed) instead of inserting a
+ * new row. Used for "batched" notifications where repeat triggers on the same
+ * entity should update one running notification rather than spam the feed.
+ */
+export async function refreshDedupedNotification(
+  recipientId: string,
+  dedupeKey: string,
+  update: { title: string; body: string; metadata?: Json }
+): Promise<NotificationRecord | null> {
+  const { rows } = await query(
+    `UPDATE public.notifications
+     SET title = $1,
+         body = $2,
+         metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+         read_at = NULL,
+         triggered_at = timezone('utc', now()),
+         updated_at = timezone('utc', now())
+     WHERE recipient_id = $4 AND dedupe_key = $5
+     RETURNING *`,
+    [
+      update.title,
+      update.body,
+      JSON.stringify(update.metadata ?? {}),
+      recipientId,
+      dedupeKey,
+    ]
+  );
+
+  return (rows[0] as NotificationRecord) ?? null;
 }

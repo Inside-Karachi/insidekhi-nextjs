@@ -6,6 +6,7 @@ import {
   applyLeaveReviewXpForModeration,
   leaveReviewListingKey,
 } from "@/lib/reviews/moderation-xp";
+import { notifyReviewStatus } from "@/lib/reviews/notifications";
 
 const ROUTE = "/api/admin/reviews/bulk-moderate";
 const MAX_BULK_REVIEWS = 100;
@@ -146,6 +147,21 @@ export async function POST(request: NextRequest) {
         },
         status,
       );
+
+      if (status === "approved" || status === "rejected") {
+        try {
+          await notifyReviewStatus({
+            review: {
+              reviewId: review.id,
+              userId: review.user_id,
+              listingId: review.listing_id,
+            },
+            status,
+          });
+        } catch (notifyError) {
+          console.error("Failed to notify reviewer of moderation outcome:", notifyError);
+        }
+      }
     }
 
     return NextResponse.json({

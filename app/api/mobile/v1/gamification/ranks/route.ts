@@ -45,20 +45,16 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   } | null = null;
 
   if (user) {
-    const { rows: profileRows } = await query(
-      `SELECT points FROM profiles WHERE id = $1`,
+    // Points + current rank in one round trip (was two sequential queries).
+    const { rows: userRows } = await query(
+      `SELECT p.points, ur.rank_id, ur.achieved_at
+       FROM profiles p
+       LEFT JOIN user_ranks ur ON ur.user_id = p.id AND ur.current_rank = true
+       WHERE p.id = $1`,
       [user.id],
     );
-    const userXP = profileRows[0]?.points ?? 0;
-
-    const { rows: userRankRows } = await query(
-      `SELECT rank_id, achieved_at
-       FROM user_ranks
-       WHERE user_id = $1 AND current_rank = true
-       LIMIT 1`,
-      [user.id],
-    );
-    const userRankData = userRankRows[0];
+    const userXP = userRows[0]?.points ?? 0;
+    const userRankData = userRows[0]?.rank_id != null ? userRows[0] : undefined;
 
     if (userRankData) {
       const currentRank =

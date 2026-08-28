@@ -38,8 +38,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    // `last_claimed_date` / `last_login_date` are DATE columns: pg parses them
+    // into JS Date objects, which never `===` a "YYYY-MM-DD" string. Cast to
+    // text so the day comparisons below actually work.
     const { rows: streaks } = await query(
-      "SELECT * FROM public.daily_login_streaks WHERE user_id = $1 LIMIT 1",
+      `SELECT current_streak, longest_streak, total_logins,
+              to_char(last_login_date, 'YYYY-MM-DD') AS last_login_date,
+              to_char(last_claimed_date, 'YYYY-MM-DD') AS last_claimed_date
+       FROM public.daily_login_streaks WHERE user_id = $1 LIMIT 1`,
       [session.userId]
     );
     const streakData = streaks[0];
@@ -101,8 +107,14 @@ export async function POST(request: NextRequest) {
       [session.userId, todayStr, now.toISOString()]
     );
 
+    // DATE columns cast to text (see GET) so the day-string comparisons and
+    // streak math below don't silently fail against JS Date objects.
     const { rows: streaks } = await query(
-      "SELECT * FROM public.daily_login_streaks WHERE user_id = $1 LIMIT 1",
+      `SELECT current_streak, longest_streak, total_logins,
+              to_char(last_login_date, 'YYYY-MM-DD') AS last_login_date,
+              to_char(last_claimed_date, 'YYYY-MM-DD') AS last_claimed_date,
+              streak_started_at, updated_at
+       FROM public.daily_login_streaks WHERE user_id = $1 LIMIT 1`,
       [session.userId]
     );
     const streakData = streaks[0];

@@ -37,8 +37,11 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
   const { user } = await requireMobileUser(request);
 
+  // `last_claimed_date` is a DATE column: pg parses it to a JS Date, which
+  // never `===` a "YYYY-MM-DD" string. Cast to text so `hasClaimedToday` works.
   const { rows: streakRows } = await query(
-    `SELECT current_streak, longest_streak, total_logins, last_claimed_date
+    `SELECT current_streak, longest_streak, total_logins,
+            to_char(last_claimed_date, 'YYYY-MM-DD') AS last_claimed_date
      FROM public.daily_login_streaks
      WHERE user_id = $1
      LIMIT 1`,
@@ -123,7 +126,10 @@ export const POST = mobileRoute(async (request: NextRequest) => {
     | undefined;
   try {
     const { rows } = await query(
-      `SELECT current_streak, longest_streak, total_logins, last_login_date, last_claimed_date, streak_started_at, updated_at
+      `SELECT current_streak, longest_streak, total_logins,
+              to_char(last_login_date, 'YYYY-MM-DD') AS last_login_date,
+              to_char(last_claimed_date, 'YYYY-MM-DD') AS last_claimed_date,
+              streak_started_at, updated_at
        FROM public.daily_login_streaks
        WHERE user_id = $1
        LIMIT 1`,

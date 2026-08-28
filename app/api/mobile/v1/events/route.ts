@@ -99,20 +99,26 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   let rows: Record<string, unknown>[];
   let count: number;
   try {
-    const [rowsRes, countRes] = await Promise.all([
-      query(
-        `SELECT ${EVENT_CARD_SQL_COLUMNS}
-         FROM events_with_details
-         WHERE ${whereSql}
-         ORDER BY ${orderBy}
-         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-        params,
-      ),
-      query(
-        `SELECT COUNT(*) AS count FROM events_with_details WHERE ${whereSql}`,
-        countParams,
-      ),
-    ]);
+    // Sequential, NOT Promise.all. The production pool is capped at `max: 1`
+    // connection per serverless instance (see lib/db.ts), so these two can
+    // never actually overlap - firing them together only makes the second one
+    // sit in the pool's queue racing `connectionTimeoutMillis` (10s) while the
+    // first holds the sole connection. That queue timeout is what intermittently
+    // turned this route into a 500 ("Failed to load events.") while unrelated
+    // screens loaded fine. Awaiting in order costs no extra wall-clock time and
+    // removes the failure mode entirely.
+    const rowsRes = await query(
+      `SELECT ${EVENT_CARD_SQL_COLUMNS}
+       FROM events_with_details
+       WHERE ${whereSql}
+       ORDER BY ${orderBy}
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params,
+    );
+    const countRes = await query(
+      `SELECT COUNT(*) AS count FROM events_with_details WHERE ${whereSql}`,
+      countParams,
+    );
     rows = rowsRes.rows;
     count = Number(countRes.rows[0]?.count ?? 0);
   } catch (error) {
@@ -128,18 +134,23 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   > = new Map();
   let primaryImageByEvent = new Map<number, string>();
   try {
-    const [attendeesResult, imagesResult] = await Promise.all([
-      getAttendeesPreviewByEvent(eventIds),
+    // Sequential for the same reason as the count query above - a `max: 1`
+    // pool turns concurrent queries into queued ones racing a 10s acquisition
+    // timeout. This block already fails soft (the catch below only logs), so a
+    // timeout here silently stripped attendee avatars and cover images off
+    // every card rather than 500ing - the same root cause showing up as
+    // "sometimes the events have images, sometimes they don't".
+    const attendeesResult = await getAttendeesPreviewByEvent(eventIds);
+    const imagesResult =
       eventIds.length > 0
-        ? query(
+        ? await query(
             `SELECT DISTINCT ON (event_id) event_id, url
              FROM event_images
              WHERE event_id = ANY($1) AND (is_primary = true OR display_order = 1)
              ORDER BY event_id, is_primary DESC NULLS LAST, display_order ASC`,
             [eventIds],
           )
-        : Promise.resolve({ rows: [] as { event_id: number; url: string }[] }),
-    ]);
+        : { rows: [] as { event_id: number; url: string }[] };
     attendeesPreviewByEvent = attendeesResult;
     primaryImageByEvent = new Map(
       imagesResult.rows.map((r) => [Number(r.event_id), r.url as string]),

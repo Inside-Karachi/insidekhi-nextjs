@@ -43,17 +43,32 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     maxLimit: 50,
   });
 
-  // Page over the user's favorites, newest first.
-  const [{ rows: favRows }, { rows: countRows }] = await Promise.all([
-    query(
-      `SELECT listing_id FROM favorite_listings WHERE user_id = $1
-       ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-      [user.id, limit, offset],
-    ),
-    query(`SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1`, [
-      user.id,
-    ]),
-  ]);
+  // Page over the user's favorites, newest first. The page and its total are
+  // fetched in ONE statement via a window function rather than two queries in
+  // a `Promise.all`: the production pool is capped at `max: 1` connection per
+  // serverless instance (see lib/db.ts), so a second concurrent query cannot
+  // actually run in parallel - it queues on the sole connection while racing
+  // `connectionTimeoutMillis` (10s), which is what made this screen fail
+  // intermittently while unrelated screens loaded fine.
+  const { rows: favRows } = await query(
+    `SELECT listing_id, COUNT(*) OVER () AS total_count
+     FROM favorite_listings WHERE user_id = $1
+     ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+    [user.id, limit, offset],
+  );
+
+  // COUNT(*) OVER () is only present on returned rows, so an empty page (no
+  // favorites at all, or an offset past the end) needs its own lookup.
+  let countRows: Record<string, unknown>[];
+  if (favRows.length > 0) {
+    countRows = [{ count: favRows[0].total_count }];
+  } else {
+    const res = await query(
+      `SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1`,
+      [user.id],
+    );
+    countRows = res.rows;
+  }
 
   const orderedIds = favRows.map((f) => Number(f.listing_id));
   const total = Number(countRows[0]?.count ?? 0);

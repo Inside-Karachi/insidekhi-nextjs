@@ -125,6 +125,19 @@ export async function POST(
       console.error("[MODERATE COMMENT API] Failed to log audit event:", auditError);
     }
 
+    // Acting on the content resolves any pending user reports against it -
+    // best-effort, must never fail the moderation action itself.
+    try {
+      await query(
+        `UPDATE public.content_reports
+         SET status = 'resolved', resolved_by = $1, resolved_at = now()
+         WHERE content_type = 'comment' AND content_id = $2 AND status = 'pending'`,
+        [session.userId, commentIdNum],
+      );
+    } catch (reportsError) {
+      console.error("[MODERATE COMMENT API] Failed to auto-resolve content reports:", reportsError);
+    }
+
     return NextResponse.json({ success: true, comment: commentWithProfile });
   } catch (error) {
     console.error("[MODERATE COMMENT API] Fatal error:", error);
@@ -206,6 +219,19 @@ export async function DELETE(
       });
     } catch (auditError) {
       console.error("[MODERATE COMMENT API] Failed to log audit event:", auditError);
+    }
+
+    // The content is gone - resolve any pending reports against it so they
+    // don't sit in the queue forever.
+    try {
+      await query(
+        `UPDATE public.content_reports
+         SET status = 'resolved', resolved_by = $1, resolved_at = now()
+         WHERE content_type = 'comment' AND content_id = $2 AND status = 'pending'`,
+        [session.userId, commentIdNum],
+      );
+    } catch (reportsError) {
+      console.error("[MODERATE COMMENT API] Failed to auto-resolve content reports:", reportsError);
     }
 
     return NextResponse.json({ success: true });

@@ -70,7 +70,8 @@ export async function GET(request: NextRequest) {
         p.full_name  AS author_full_name,
         p.avatar_url AS author_avatar_url,
         r.listing_id AS review_listing_id,
-        r.user_id    AS review_user_id
+        r.user_id    AS review_user_id,
+        COALESCE((SELECT COUNT(*)::int FROM public.content_reports cr WHERE cr.content_type = 'comment' AND cr.content_id = rc.id AND cr.status = 'pending'), 0) AS report_count
       FROM public.review_comments rc
       LEFT JOIN public.profiles p ON p.id = rc.user_id
       LEFT JOIN public.reviews r ON r.id = rc.review_id

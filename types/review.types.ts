@@ -50,6 +50,8 @@ export interface ReviewWithModeration extends Review {
   moderated_at: string | null;
   moderation_reason?: string;
   flagged_count?: number;
+  /** Number of pending user-submitted reports (see `content_reports`). */
+  report_count?: number;
 }
 
 // Review Statistics

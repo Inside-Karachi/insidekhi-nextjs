@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes } from "crypto";
 import { buildAppleAuthUrl } from "@/lib/auth/apple";
-import { getAppleCallbackUrl } from "@/lib/auth/url";
+import { getAppleCallbackUrl, getStateCookieDomain } from "@/lib/auth/url";
 
 const STATE_COOKIE_NAME = "a_oauth_state";
 
@@ -43,6 +43,7 @@ export async function GET(request: NextRequest) {
       // anyway, so this is safe unconditionally.
       secure: true,
       sameSite: "none",
+      domain: getStateCookieDomain(),
       path: "/api/auth/apple",
       maxAge: 600, // 10 minutes
     }

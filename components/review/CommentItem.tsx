@@ -22,10 +22,12 @@ import {
   XCircle,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useSupabaseUser } from "@/hooks/useSupabaseUser";
 import { RelativeTime } from "@/components/ui/RelativeTime";
 import { CommentForm } from "./CommentForm";
 import { CommentThread } from "./CommentThread";
 import { COMMENT_STATUS_COLORS } from "@/types/comment.types";
+import { ReportContentModal } from "@/components/shared/ReportContentModal";
 
 interface CommentItemProps {
   comment: CommentWithAuthor;
@@ -54,7 +56,21 @@ export function CommentItem({
   const [showingReplies, setShowingReplies] = useState(false);
   const [replying, setReplying] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [reporting, setReporting] = useState(false);
   const { toast } = useToast();
+  const { userId } = useSupabaseUser();
+
+  const handleReportClick = () => {
+    if (!userId) {
+      toast({
+        title: "Sign in required",
+        description: "Please sign in to report a comment",
+        variant: "destructive",
+      });
+      return;
+    }
+    setReporting(true);
+  };
 
   // Handle comment edit
   const handleEdit = async (content: string) => {
@@ -159,6 +175,11 @@ export function CommentItem({
 
   // Check if comment can be edited/deleted (pending comments by author, or any comment by admin)
   const canModify = comment.status === "pending" || isAdmin;
+  // Anyone (including signed-out visitors, who get prompted to sign in on
+  // click) viewing someone else's comment can report it - admins already
+  // have Flag for this, and you can't report your own comment.
+  const isOwnComment = !!userId && comment.user_id === userId;
+  const canReport = !isAdmin && !isOwnComment;
 
   return (
     <div className={`space-y-3 ${className}`}>
@@ -250,7 +271,7 @@ export function CommentItem({
               )}
 
               {/* More Actions Dropdown */}
-              {canModify && (
+              {(canModify || canReport) && (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
@@ -259,7 +280,7 @@ export function CommentItem({
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     {/* Regular user actions */}
-                    {!isAdmin && (
+                    {!isAdmin && canModify && (
                       <>
                         <DropdownMenuItem onClick={() => setEditing(true)}>
                           <Edit className="h-4 w-4 mr-2" />
@@ -278,6 +299,13 @@ export function CommentItem({
                           Delete
                         </DropdownMenuItem>
                       </>
+                    )}
+
+                    {canReport && (
+                      <DropdownMenuItem onClick={handleReportClick}>
+                        <Flag className="h-4 w-4 mr-2" />
+                        Report
+                      </DropdownMenuItem>
                     )}
 
                     {/* Admin moderation actions */}
@@ -351,6 +379,12 @@ export function CommentItem({
           />
         </div>
       )}
+
+      <ReportContentModal
+        isOpen={reporting}
+        onClose={() => setReporting(false)}
+        endpoint={`/api/reviews/${reviewId}/comments/${comment.id}/report`}
+      />
     </div>
   );
 }

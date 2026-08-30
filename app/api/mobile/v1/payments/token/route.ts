@@ -12,6 +12,7 @@ import {
   formatPayFastOrderDate,
   formatPayFastMobile,
   getPayFastTransactionUrl,
+  isPayFastConfigured,
 } from "@/lib/payments/payfast";
 
 export const runtime = "nodejs";
@@ -80,6 +81,15 @@ export const POST = mobileRoute(async (request: NextRequest) => {
       "internal_error",
       "Booking is not ready for payment.",
       500,
+    );
+  }
+
+  if (!isPayFastConfigured()) {
+    console.error("[mobile-api] PayFast is not configured (missing PAYFAST_* env).");
+    throw new MobileApiError(
+      "payment_not_configured",
+      "Payments are not configured on this server.",
+      503,
     );
   }
 

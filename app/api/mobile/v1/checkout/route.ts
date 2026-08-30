@@ -14,6 +14,28 @@ import { hashCnic, cnicLast4 } from "@/lib/utils/cnic-server";
 
 export const dynamic = "force-dynamic";
 
+/** node-pg returns bigint columns as strings — normalize before comparing. */
+type TicketTypeCheckoutRow = {
+  id: number;
+  event_id: number;
+  quantity_available: number | null;
+  sale_starts_at: string;
+  sale_ends_at: string;
+};
+
+function normalizeTicketTypeRows(
+  rows: Array<Record<string, unknown>>,
+): TicketTypeCheckoutRow[] {
+  return rows.map((row) => ({
+    id: Number(row.id),
+    event_id: Number(row.event_id),
+    quantity_available:
+      row.quantity_available == null ? null : Number(row.quantity_available),
+    sale_starts_at: String(row.sale_starts_at),
+    sale_ends_at: String(row.sale_ends_at),
+  }));
+}
+
 const bodySchema = z.object({
   event_id: z.number().int().positive().optional(),
   tickets: z
@@ -28,7 +50,10 @@ const bodySchema = z.object({
     name: z.string().min(1).max(200),
     email: z.string().email(),
     phone: z.string().min(1).max(40),
-    cnic: z.string().regex(/^\d{13}$/),
+    cnic: z
+      .string()
+      .transform((value) => value.replace(/\D/g, ""))
+      .pipe(z.string().regex(/^\d{13}$/, "CNIC must be 13 digits.")),
   }),
 });
 
@@ -98,8 +123,12 @@ export const POST = mobileRoute(async (request: NextRequest) => {
       500,
     );
   }
-  const rows = types ?? [];
+  const rows = normalizeTicketTypeRows(types ?? []);
   if (ids.some((id) => !rows.some((r) => r.id === id))) {
+    console.warn("[mobile-api] checkout ticket_types missing after lookup", {
+      requested: ids,
+      found: rows.map((r) => r.id),
+    });
     throw new MobileApiError(
       "ticket_type_missing",
       "One or more ticket types were not found.",

@@ -136,7 +136,7 @@ export async function POST(req: NextRequest) {
         ttErr,
       );
     }
-    const foundIds = new Set((ticketTypes || []).map((r) => r.id));
+    const foundIds = new Set((ticketTypes || []).map((r) => Number(r.id)));
     const missing = ticketTypeIds.filter((id) => !foundIds.has(id));
     if (missing.length) {
       console.warn("[checkout] missing ticket_types before RPC", {
@@ -152,7 +152,7 @@ export async function POST(req: NextRequest) {
     }
     // Ensure single event
     const eventIds = Array.from(
-      new Set((ticketTypes || []).map((r) => r.event_id)),
+      new Set((ticketTypes || []).map((r) => Number(r.event_id))),
     );
     if (eventIds.length !== 1) {
       console.warn("[checkout] mixed event ids detected", { eventIds });

@@ -68,6 +68,19 @@ function getEnv(key: string): string {
   return value;
 }
 
+const PAYFAST_REQUIRED_KEYS = [
+  "PAYFAST_TOKEN_URL",
+  "PAYFAST_TRANSACTION_URL",
+  "PAYFAST_MERCHANT_ID",
+  "PAYFAST_SECURED_KEY",
+  "PAYFAST_MERCHANT_NAME",
+] as const;
+
+/** True when all PayFast server-side credentials are present. */
+export function isPayFastConfigured(): boolean {
+  return PAYFAST_REQUIRED_KEYS.every((key) => Boolean(process.env[key]?.trim()));
+}
+
 // ============================================================================
 // STEP 1: FETCH ACCESS TOKEN (Server-side only)
 // ============================================================================

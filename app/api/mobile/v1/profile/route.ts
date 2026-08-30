@@ -6,6 +6,7 @@ import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 import {
   PROFILE_COLUMNS,
+  PROFILE_COLUMNS_JOINED,
   buildProfileUpdate,
   profilePatchSchema,
   type ProfileRow,
@@ -27,24 +28,23 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   const { user } = await requireMobileUser(request);
   await enforceMobileRateLimit(request, user.id);
 
+  // Joined in one round trip - `has_password` is a read-only, derived field
+  // (not part of the profiles write allow-list) the delete-account flow needs
+  // to pick a password vs. typed-confirm step.
   const { rows } = await query(
-    `SELECT ${PROFILE_COLUMNS} FROM profiles WHERE id = $1`,
+    `SELECT ${PROFILE_COLUMNS_JOINED}, (au.encrypted_password IS NOT NULL) AS has_password
+     FROM profiles p
+     LEFT JOIN auth.users au ON au.id = p.id
+     WHERE p.id = $1`,
     [user.id],
   );
-  const profile = rows[0] as ProfileRow | undefined;
+  const profile = rows[0] as (ProfileRow & { has_password: boolean }) | undefined;
 
   if (!profile) {
     throw new MobileApiError("not_found", "Profile not found.", 404);
   }
 
-  // Read-only, derived field (not part of the profiles write allow-list) -
-  // the delete-account flow needs it to pick a password vs. typed-confirm step.
-  const { rows: authRows } = await query(
-    `SELECT (encrypted_password IS NOT NULL) AS has_password FROM auth.users WHERE id = $1`,
-    [user.id],
-  );
-
-  return ok({ ...profile, has_password: Boolean(authRows[0]?.has_password) });
+  return ok({ ...profile, has_password: Boolean(profile.has_password) });
 });
 
 /**

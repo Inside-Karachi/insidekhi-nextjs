@@ -1,0 +1,56 @@
+# Keeps the deploy fork (inside-khi-admin/insidekhi-nextjs) up to date with
+# upstream (Inside-Karachi/insidekhi-nextjs).
+#
+# Vercel deploys from the FORK, but day-to-day work is pushed to UPSTREAM, so
+# without this the fork silently goes stale and production stops receiving
+# commits - which is exactly what happened between Aug 24 and Aug 28 2026.
+#
+# This MERGES rather than fast-forwards. The fork carries its own commits
+# (apps/scraper-worker, admin routes, scrapers/peekaboo_listings) that upstream
+# does not have, so `gh repo sync` refuses (not a fast-forward) and
+# `gh repo sync --force` would DESTROY that work. A merge is the only safe
+# automatic option, and a conflicting merge fails the run loudly instead of
+# guessing - resolve those by hand.
+name: Sync fork from upstream
+
+on:
+  schedule:
+    # Hourly. Adjust to taste; every push to upstream is picked up on the next run.
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    # This file also lives in upstream (that is how it reaches the fork), so
+    # guard it - upstream must never try to merge itself into itself.
+    if: github.repository == 'inside-khi-admin/insidekhi-nextjs'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # Full history: a shallow clone cannot compute the merge base.
+          fetch-depth: 0
+
+      - name: Merge upstream/main into fork main
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/Inside-Karachi/insidekhi-nextjs.git
+          git fetch upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream/main - nothing to do."
+            exit 0
+          fi
+
+          # Fails (non-zero) on conflict, leaving the fork untouched and the
+          # run red. That is deliberate: a bad auto-merge would deploy itself.
+          git merge --no-edit upstream/main
+
+          git push origin main

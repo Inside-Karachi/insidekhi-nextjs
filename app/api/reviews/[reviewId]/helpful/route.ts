@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
+import { notifyReviewHelpful } from "@/lib/reviews/notifications";
 
 export async function POST(
   request: NextRequest,
@@ -28,7 +29,7 @@ export async function POST(
 
     // Validate review exists and is approved
     const { rows: reviewRows } = await query(
-      `SELECT id, user_id, status FROM reviews WHERE id = $1`,
+      `SELECT id, user_id, listing_id, status FROM reviews WHERE id = $1`,
       [parsedReviewId]
     );
     const review = reviewRows[0];
@@ -90,6 +91,19 @@ export async function POST(
       [parsedReviewId]
     );
     const updatedReview = updatedRows[0];
+
+    try {
+      await notifyReviewHelpful({
+        review: {
+          reviewId: parsedReviewId,
+          userId: review.user_id,
+          listingId: review.listing_id,
+        },
+        helpfulCount: updatedReview?.helpful_count || 0,
+      });
+    } catch (notifyError) {
+      console.error("Failed to send helpful-vote notification:", notifyError);
+    }
 
     // Award XP for reacting to a review (max 10/day per activity rules)
     try {

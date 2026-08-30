@@ -20,97 +20,98 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   );
   const role = profileRows[0]?.role ?? null;
 
+  // Every counter below is fetched as scalar subqueries in ONE statement.
+  //
+  // These used to be separate `query()` calls inside a `Promise.all`, which
+  // looked parallel but is actively harmful here: the production pool is
+  // capped at `max: 1` connection per serverless instance (see lib/db.ts), so
+  // the calls can't overlap - they queue on the single connection, and every
+  // queued call is racing `connectionTimeoutMillis` (10s) while it waits. The
+  // six-query user branch was the worst case: under any slowness the tail
+  // queries timed out acquiring a connection, which surfaced to the app as a
+  // 500 and left Bookings/Favorites/Reviews blank while other screens loaded
+  // fine. One statement = one connection acquisition = nothing to queue.
+  const num = (v: unknown): number => Number(v) || 0;
+
   if (role === "admin" || role === "super_admin") {
-    const [usersResult, eventsResult, listingsResult] = await Promise.all([
-      query(`SELECT COUNT(*) FROM profiles`),
-      query(`SELECT COUNT(*) FROM events`),
-      query(`SELECT COUNT(*) FROM listings`),
-    ]);
+    const { rows } = await query(
+      `SELECT
+         (SELECT COUNT(*) FROM profiles) AS users,
+         (SELECT COUNT(*) FROM events) AS events,
+         (SELECT COUNT(*) FROM listings) AS listings`,
+    );
     return ok({
       role,
       stats: {
-        users: parseInt(usersResult.rows[0].count, 10) || 0,
-        events: parseInt(eventsResult.rows[0].count, 10) || 0,
-        listings: parseInt(listingsResult.rows[0].count, 10) || 0,
+        users: num(rows[0]?.users),
+        events: num(rows[0]?.events),
+        listings: num(rows[0]?.listings),
       },
     });
   }
 
   if (role === "lister") {
-    const [listingsResult, eventsResult, reviewsResult] = await Promise.all([
-      query(`SELECT COUNT(*) FROM listings`),
-      query(`SELECT COUNT(*) FROM events`),
-      query(`SELECT COUNT(*) FROM reviews`),
-    ]);
+    const { rows } = await query(
+      `SELECT
+         (SELECT COUNT(*) FROM listings) AS listings,
+         (SELECT COUNT(*) FROM events) AS events,
+         (SELECT COUNT(*) FROM reviews) AS reviews`,
+    );
     return ok({
       role,
       stats: {
-        listings: parseInt(listingsResult.rows[0].count, 10) || 0,
-        events: parseInt(eventsResult.rows[0].count, 10) || 0,
-        reviews: parseInt(reviewsResult.rows[0].count, 10) || 0,
+        listings: num(rows[0]?.listings),
+        events: num(rows[0]?.events),
+        reviews: num(rows[0]?.reviews),
       },
     });
   }
 
   if (role === "organizer") {
-    const [eventsResult, bookingsResult, ticketsResult] = await Promise.all([
-      query(`SELECT COUNT(*) FROM events WHERE organizer_id = $1`, [user.id]),
-      query(`SELECT COUNT(*) FROM bookings WHERE user_id = $1`, [user.id]),
-      query(
-        `SELECT COUNT(*) FROM ticket_passes tp
-         JOIN bookings b ON b.id = tp.booking_id
-         WHERE b.user_id = $1`,
-        [user.id],
-      ),
-    ]);
+    const { rows } = await query(
+      `SELECT
+         (SELECT COUNT(*) FROM events WHERE organizer_id = $1) AS events,
+         (SELECT COUNT(*) FROM bookings WHERE user_id = $1) AS bookings,
+         (SELECT COUNT(*) FROM ticket_passes tp
+            JOIN bookings b ON b.id = tp.booking_id
+            WHERE b.user_id = $1) AS tickets`,
+      [user.id],
+    );
     return ok({
       role,
       stats: {
-        events: parseInt(eventsResult.rows[0].count, 10) || 0,
-        bookings: parseInt(bookingsResult.rows[0].count, 10) || 0,
-        tickets: parseInt(ticketsResult.rows[0].count, 10) || 0,
+        events: num(rows[0]?.events),
+        bookings: num(rows[0]?.bookings),
+        tickets: num(rows[0]?.tickets),
       },
     });
   }
 
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const [
-    reviewsResult,
-    bookingsResult,
-    favoritesResult,
-    weeklyXpResult,
-    weeklyBookingsResult,
-    weeklyReviewsResult,
-  ] = await Promise.all([
-    query(`SELECT COUNT(*) FROM reviews WHERE user_id = $1`, [user.id]),
-    query(`SELECT COUNT(*) FROM bookings WHERE user_id = $1`, [user.id]),
-    query(`SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1`, [
-      user.id,
-    ]),
-    query(
-      `SELECT COALESCE(SUM(points), 0) AS total FROM points_log WHERE user_id = $1 AND created_at >= $2`,
-      [user.id, sevenDaysAgo],
-    ),
-    query(
-      `SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND payment_status = 'paid' AND created_at >= $2`,
-      [user.id, sevenDaysAgo],
-    ),
-    query(
-      `SELECT COUNT(*) FROM reviews WHERE user_id = $1 AND created_at >= $2`,
-      [user.id, sevenDaysAgo],
-    ),
-  ]);
+  const { rows } = await query(
+    `SELECT
+       (SELECT COUNT(*) FROM reviews WHERE user_id = $1) AS reviews,
+       (SELECT COUNT(*) FROM bookings WHERE user_id = $1) AS bookings,
+       (SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1) AS favorites,
+       (SELECT COALESCE(SUM(points), 0) FROM points_log
+          WHERE user_id = $1 AND created_at >= $2) AS weekly_xp,
+       (SELECT COUNT(*) FROM bookings
+          WHERE user_id = $1 AND payment_status = 'paid' AND created_at >= $2) AS weekly_bookings,
+       (SELECT COUNT(*) FROM reviews
+          WHERE user_id = $1 AND created_at >= $2) AS weekly_reviews`,
+    [user.id, sevenDaysAgo],
+  );
   return ok({
     role: role ?? "user",
     stats: {
-      reviews: parseInt(reviewsResult.rows[0].count, 10) || 0,
-      bookings: parseInt(bookingsResult.rows[0].count, 10) || 0,
-      favorites: parseInt(favoritesResult.rows[0].count, 10) || 0,
+      reviews: num(rows[0]?.reviews),
+      bookings: num(rows[0]?.bookings),
+      favorites: num(rows[0]?.favorites),
     },
     weekly: {
-      xp_earned: parseInt(weeklyXpResult.rows[0].total, 10) || 0,
-      events_attended: parseInt(weeklyBookingsResult.rows[0].count, 10) || 0,
-      reviews_written: parseInt(weeklyReviewsResult.rows[0].count, 10) || 0,
+      xp_earned: num(rows[0]?.weekly_xp),
+      events_attended: num(rows[0]?.weekly_bookings),
+      reviews_written: num(rows[0]?.weekly_reviews),
     },
   });
 });

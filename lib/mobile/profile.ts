@@ -38,6 +38,9 @@ export const PROFILE_COLUMN_KEYS = [
 
 export const PROFILE_COLUMNS = PROFILE_COLUMN_KEYS.join(", ");
 
+/** Same columns, `p.`-prefixed for GET /profile's join against `auth.users`. */
+export const PROFILE_COLUMNS_JOINED = PROFILE_COLUMN_KEYS.map((k) => `p.${k}`).join(", ");
+
 export type ProfileRow = Pick<
   Database["public"]["Tables"]["profiles"]["Row"],
   (typeof PROFILE_COLUMN_KEYS)[number]

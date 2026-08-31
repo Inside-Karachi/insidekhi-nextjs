@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Inter } from "next/font/google";
+import { Inter, Fraunces, Instrument_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 import { ThemeProvider } from "@/components/layout/theme-provider";
@@ -51,6 +51,31 @@ const inter = Inter({
   ],
 });
 
+// Auth-surface type system (scoped: only elements referencing these vars use them).
+const fraunces = Fraunces({
+  subsets: ["latin"],
+  variable: "--font-display",
+  display: "swap",
+  weight: ["400", "500", "600"],
+  style: ["normal", "italic"],
+  fallback: ["Georgia", "Times New Roman", "serif"],
+});
+
+const instrumentSans = Instrument_Sans({
+  subsets: ["latin"],
+  variable: "--font-ui",
+  display: "swap",
+  fallback: ["system-ui", "-apple-system", "Segoe UI", "Roboto", "sans-serif"],
+});
+
+const ibmPlexMono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono-ui",
+  display: "swap",
+  weight: ["400", "500"],
+  fallback: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+});
+
 export const metadata: Metadata = {
   title: "Inside Karachi - Your City Guide",
   description: "Discover the best of Karachi, from restaurants to events.",
@@ -82,6 +107,9 @@ export default async function RootLayout({
         className={cn(
           "min-h-screen bg-background font-sans antialiased",
           inter.variable,
+          fraunces.variable,
+          instrumentSans.variable,
+          ibmPlexMono.variable,
         )}
         suppressHydrationWarning
       >

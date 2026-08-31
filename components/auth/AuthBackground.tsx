@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import Image from "next/image";
 
 // Karachi landmark backgrounds with descriptions
-const karachiBackgrounds = [
+export const karachiBackgrounds = [
   {
     id: 1,
     name: "Quaid-e-Azam Mausoleum",

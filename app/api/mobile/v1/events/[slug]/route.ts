@@ -12,6 +12,7 @@ import {
   type EventImageRow,
   type TicketTypeRow,
 } from "@/lib/mobile/mappers";
+import { getAttendeesPreviewByEvent } from "@/lib/mobile/attendees";
 
 export const dynamic = "force-dynamic";
 
@@ -100,12 +101,28 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
 
   const organizerProfile = organizerRes.rows[0];
 
+  // "N people going" for the detail screen's attendee strip. Fail-soft and
+  // sequential (not folded into the Promise.all above): the production pool is
+  // capped at one connection per instance, so a slow "who's going" lookup must
+  // never contend for it or 500 the whole screen — same stance the events list
+  // route takes. A timeout here just drops the strip.
+  let attendeesPreview: Awaited<ReturnType<typeof getAttendeesPreviewByEvent>> =
+    new Map();
+  try {
+    attendeesPreview = await getAttendeesPreviewByEvent([eventId]);
+  } catch (error) {
+    console.error("[mobile-api] event detail attendees query failed:", error);
+  }
+
   return ok({
     event: {
-      ...toEventCard({
-        ...eventRow,
-        event_id: eventId,
-      } as unknown as EventCardRow),
+      ...toEventCard(
+        {
+          ...eventRow,
+          event_id: eventId,
+        } as unknown as EventCardRow,
+        attendeesPreview.get(eventId),
+      ),
       organizer_username: organizerProfile?.username ?? null,
       organizer_is_verified: organizerProfile?.is_verified_organizer ?? false,
     },

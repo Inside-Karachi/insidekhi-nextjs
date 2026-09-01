@@ -16,6 +16,12 @@ import {
   Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useRouter } from "next/navigation";
+import { ResumeBookingCard } from "./ResumeBookingCard";
+import type {
+  ResumableBookingDTO,
+  ResumableResponse,
+} from "@/types/checkout-resume.types";
 
 interface CheckoutFailedContentProps {
   status: "failed" | "security_failed";
@@ -33,10 +39,66 @@ export function CheckoutFailedContent({
   errMsg,
 }: CheckoutFailedContentProps) {
   const [mounted, setMounted] = useState(false);
+  const router = useRouter();
+
+  const [resumable, setResumable] = useState<ResumableBookingDTO | null>(null);
+  const [resumeBlockedMessage, setResumeBlockedMessage] = useState<string | null>(
+    null,
+  );
+  const [isResuming, setIsResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // Look up the booking that just failed by its reference, so we can offer to
+  // re-pay THAT booking. `basketId` here is PayFast's basket_id, which on the
+  // web path equals the booking_reference.
+  useEffect(() => {
+    if (status === "security_failed" || !basketId) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/checkout/resumable?bookingReference=${encodeURIComponent(basketId)}`,
+        );
+        const body = (await res.json()) as ResumableResponse;
+        if (cancelled) return;
+        if (body.booking) setResumable(body.booking);
+        else if (body.message) setResumeBlockedMessage(body.message);
+      } catch {
+        // Non-fatal: the static failure actions below still apply.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [status, basketId]);
+
+  const handleResume = async () => {
+    if (!resumable) return;
+    setIsResuming(true);
+    setResumeError(null);
+    try {
+      const res = await fetch(
+        `/api/bookings/${resumable.booking_id}/resume-payment`,
+        { method: "POST" },
+      );
+      const body = await res.json();
+      if (!res.ok) {
+        setResumeError(body?.error ?? "Couldn't resume this booking.");
+        return;
+      }
+      router.push(`/checkout/payment?bookingId=${resumable.booking_id}`);
+    } catch {
+      setResumeError("Couldn't resume this booking. Please try again.");
+    } finally {
+      setIsResuming(false);
+    }
+  };
 
   if (!mounted) {
     return (
@@ -292,6 +354,32 @@ export function CheckoutFailedContent({
             </p>
           </motion.div>
 
+          {/* Resume the exact booking that just failed, rather than sending the
+              user back to a cart that no longer has anything in it. */}
+          {!isSecurityFailed && resumable && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: 0.5 }}
+              className="w-full"
+            >
+              <ResumeBookingCard
+                booking={resumable}
+                onResume={handleResume}
+                onDismiss={() => setResumable(null)}
+                dismissLabel="Browse other events"
+                isResuming={isResuming}
+                error={resumeError}
+              />
+            </motion.div>
+          )}
+
+          {!isSecurityFailed && !resumable && resumeBlockedMessage && (
+            <p className="text-sm text-muted-foreground text-center">
+              {resumeBlockedMessage}
+            </p>
+          )}
+
           {/* Action Buttons */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -299,11 +387,11 @@ export function CheckoutFailedContent({
             transition={{ duration: 0.5, delay: 0.6 }}
             className="flex flex-col sm:flex-row gap-3 items-stretch justify-center w-full sm:w-auto"
           >
-            {!isSecurityFailed && basketId && (
+            {!isSecurityFailed && !resumable && (
               <Button asChild size="lg" className="w-full sm:w-auto sm:px-8">
-                <Link href={`/checkout?retry=${basketId}`} className="gap-2">
+                <Link href="/events" className="gap-2">
                   <RefreshCw className="w-4 h-4" />
-                  Try Again
+                  Browse Events
                 </Link>
               </Button>
             )}

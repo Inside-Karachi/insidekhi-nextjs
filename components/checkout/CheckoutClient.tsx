@@ -6,17 +6,24 @@ import { useCartStore } from "@/lib/context/cartStore";
 import { useSupabaseUser } from "@/hooks/useSupabaseUser";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Loader2, ArrowRight, ShoppingBag, AlertCircle, Clock } from "lucide-react";
-import { motion } from "framer-motion";
+import { Loader2, ArrowRight, ShoppingBag } from "lucide-react";
 import { OrderSummary } from "./OrderSummary";
 import { BuyerDetailsForm } from "./BuyerDetailsForm";
 import { GuestDetailsForm } from "./GuestDetailsForm";
 import { useToast } from "@/hooks/use-toast";
 import { CheckoutSteps } from "./CheckoutSteps";
+import { ResumeBookingCard } from "./ResumeBookingCard";
+import type {
+  ResumableBookingDTO,
+  ResumableResponse,
+} from "@/types/checkout-resume.types";
+
+/** Per-tab record of a dismissed resume prompt. Booking id only - no PII. */
+const RESUME_DISMISS_KEY = "ik:resume:dismissed";
 
 export function CheckoutClient() {
   const router = useRouter();
-  const { items, updateGuestInfo, clearCart } = useCartStore();
+  const { items, updateGuestInfo } = useCartStore();
   const { user, isLoading: isUserLoading } = useSupabaseUser();
   const { toast } = useToast();
 
@@ -26,11 +33,9 @@ export function CheckoutClient() {
   const [eventDetails, setEventDetails] = useState<
     Record<number, { require_guest_details: boolean }>
   >({});
-  const [existingBooking, setExistingBooking] = useState<{
-    id: number;
-    booking_reference: string;
-    total_amount: number;
-  } | null>(null);
+  const [resumable, setResumable] = useState<ResumableBookingDTO | null>(null);
+  const [isResuming, setIsResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
 
   const [buyerDetails, setBuyerDetails] = useState({
     name: "",
@@ -91,49 +96,74 @@ export function CheckoutClient() {
     fetchEvents();
   }, [items]);
 
-  // Check for existing pending bookings for the same event (only once on mount)
+  // Look for an unfinished booking to offer resuming (only once on mount).
+  //
+  // Deliberately NOT gated on `items.length` any more. That gate is why this
+  // never fired in the case it exists for: after a failed payment the cart is
+  // empty, so the check bailed out and the user got a bare "Your cart is
+  // empty" instead of the booking they had just tried to pay for. When the
+  // cart does have items we still narrow by event, so a resumable booking for
+  // what you're currently buying takes priority.
   const hasCheckedExistingBookings = useRef(false);
   useEffect(() => {
     const checkExistingBookings = async () => {
-      if (!user || items.length === 0 || hasCheckedExistingBookings.current)
-        return;
+      if (!user || hasCheckedExistingBookings.current) return;
       hasCheckedExistingBookings.current = true;
 
       const eventIds = Array.from(new Set(items.map((i) => i.eventId)));
+      const params = eventIds.length ? `?eventIds=${eventIds.join(",")}` : "";
 
       try {
-        const res = await fetch(
-          `/api/checkout/pending-booking?eventIds=${eventIds.join(",")}`,
-        );
-        const result = await res.json();
-        const booking = result.booking as {
-          id: number;
-          booking_reference: string;
-          total_amount: number;
-          event_id: number | null;
-          expires_at: string | null;
-        } | null;
+        const res = await fetch(`/api/checkout/resumable${params}`);
+        const result = (await res.json()) as ResumableResponse;
 
-        if (booking) {
-          // Check if booking is not expired and has valid reference
-          if (
-            booking.booking_reference &&
-            (!booking.expires_at || new Date(booking.expires_at) > new Date())
-          ) {
-            setExistingBooking({
-              id: booking.id,
-              booking_reference: booking.booking_reference,
-              total_amount: booking.total_amount,
-            });
+        // Expiry/eligibility is decided server-side now - re-checking
+        // `expires_at` here is what used to suppress a perfectly resumable
+        // booking whose short payment hold had lapsed.
+        if (result.booking) {
+          const dismissed = sessionStorage.getItem(RESUME_DISMISS_KEY);
+          if (dismissed !== String(result.booking.booking_id)) {
+            setResumable(result.booking);
           }
         }
       } catch (error) {
-        console.error("Failed to check existing bookings", error);
+        console.error("Failed to check for a resumable booking", error);
       }
     };
 
     checkExistingBookings();
   }, [user, items]);
+
+  const handleResume = async () => {
+    if (!resumable) return;
+    setIsResuming(true);
+    setResumeError(null);
+    try {
+      const res = await fetch(
+        `/api/bookings/${resumable.booking_id}/resume-payment`,
+        { method: "POST" },
+      );
+      const body = await res.json();
+      if (!res.ok) {
+        setResumeError(body?.error ?? "Couldn't resume this booking.");
+        return;
+      }
+      router.push(`/checkout/payment?bookingId=${resumable.booking_id}`);
+    } catch {
+      setResumeError("Couldn't resume this booking. Please try again.");
+    } finally {
+      setIsResuming(false);
+    }
+  };
+
+  const handleDismissResume = () => {
+    if (resumable) {
+      // Remember the choice for this tab so it doesn't re-prompt on every
+      // navigation. Booking id only - no PII.
+      sessionStorage.setItem(RESUME_DISMISS_KEY, String(resumable.booking_id));
+    }
+    setResumable(null);
+  };
 
   // Prefill User Details
   useEffect(() => {
@@ -260,8 +290,10 @@ export function CheckoutClient() {
         throw new Error(result.error || "Failed to create booking");
       }
 
-      // 3. Clear cart and redirect to payment
-      clearCart();
+      // 3. Redirect to payment. The cart is deliberately NOT cleared here:
+      // creating the booking row is not payment, and wiping it at this point
+      // is what left users with an empty cart after every failed attempt.
+      // `CheckoutSuccessContent` clears it once payment is actually confirmed.
       router.push(`/checkout/payment?bookingId=${result.bookingId}`);
     } catch (error: unknown) {
       console.error("Booking error:", error);
@@ -287,103 +319,18 @@ export function CheckoutClient() {
     );
   }
 
-  // Show existing booking prompt
-  if (existingBooking) {
+  // Offer to resume an unfinished booking before showing the cart. The user
+  // chooses - we never silently resume or silently discard.
+  if (resumable) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[50vh] w-full">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95, y: 20 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{ duration: 0.4, ease: "easeOut" }}
-          className="relative z-10 w-full max-w-lg p-0 sm:p-4"
-        >
-          <Card className="border-white/10 dark:border-white/10 shadow-2xl bg-white/40 dark:bg-black/40 backdrop-blur-md overflow-hidden ring-1 ring-black/5 dark:ring-white/5">
-            {/* Top Gradient Accent */}
-            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-amber-500/40 via-amber-500 to-amber-500/40" />
-
-            <CardContent className="px-5 pb-6 pt-8 sm:px-8 sm:pt-10 sm:pb-8 space-y-6 sm:space-y-8">
-              {/* Header Section */}
-              <div className="flex flex-col items-center text-center space-y-4 sm:space-y-5">
-                <div className="relative">
-                  <div className="absolute inset-0 bg-amber-500/20 blur-xl rounded-full" />
-                  <div className="relative h-14 w-14 sm:h-16 sm:w-16 rounded-2xl bg-gradient-to-br from-amber-500/10 to-amber-500/5 ring-1 ring-amber-500/20 flex items-center justify-center shadow-lg">
-                    <AlertCircle className="h-7 w-7 sm:h-8 sm:w-8 text-amber-500" />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <h3 className="text-xl sm:text-2xl font-bold tracking-tight text-foreground">
-                    Pending Booking Found
-                  </h3>
-                  <p className="text-muted-foreground text-sm leading-relaxed max-w-[90%] sm:max-w-[85%] mx-auto">
-                    We found an incomplete booking for this event. You can resume your payment securely or start fresh.
-                  </p>
-                </div>
-              </div>
-
-              {/* Booking Details Card */}
-              <motion.div
-                whileHover={{ scale: 1.01 }}
-                className="group relative overflow-hidden rounded-xl border border-border/50 bg-muted/30 p-4 sm:p-5 transition-all duration-300 hover:border-amber-500/30 hover:bg-muted/50"
-              >
-                {/* Subtle pattern overlay */}
-                <div className="absolute inset-0 opacity-[0.03] bg-[radial-gradient(#000_1px,transparent_1px)] dark:bg-[radial-gradient(#fff_1px,transparent_1px)] [background-size:16px_16px]" />
-
-                <div className="relative z-10 flex flex-col gap-3 sm:grid sm:grid-cols-2 sm:gap-6">
-                  <div className="flex items-center justify-between sm:block sm:space-y-1.5">
-                    <span className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">
-                      Reference ID
-                    </span>
-                    <p className="font-mono text-sm sm:text-base font-bold text-foreground">
-                      {existingBooking.booking_reference}
-                    </p>
-                  </div>
-
-                  <div className="flex items-center justify-between sm:block sm:space-y-1.5 sm:text-right">
-                    <span className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">
-                      Total Amount
-                    </span>
-                    <p className="font-bold text-base sm:text-lg text-primary">
-                      PKR {existingBooking.total_amount.toLocaleString()}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="relative z-10 mt-4 pt-3 border-t border-border/50 flex items-center justify-between">
-                  {existingBooking.id && (
-                    <div className="flex items-center gap-2 text-xs font-medium text-amber-600 dark:text-amber-500">
-                      <Clock className="w-3.5 h-3.5" />
-                      Awaiting Payment
-                    </div>
-                  )}
-                  {/* Decorative dot */}
-                  <div className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
-                </div>
-              </motion.div>
-
-              {/* Action Buttons */}
-              <div className="flex flex-col sm:flex-row gap-3 pt-2">
-                <Button
-                  className="flex-1 h-11 text-base bg-gradient-to-r from-amber-600 to-amber-500 text-white shadow-lg shadow-amber-500/20 border-0 transition-all duration-300 hover:shadow-xl hover:shadow-amber-500/40 hover:-translate-y-0.5"
-                  onClick={() => {
-                    router.push(
-                      `/checkout/payment?bookingId=${existingBooking.id}`
-                    );
-                  }}
-                >
-                  Resume Payment
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </Button>
-                <Button
-                  className="flex-1 h-11 text-base bg-gradient-to-r from-primary to-primary/90 text-primary-foreground shadow-lg shadow-primary/20 border-0 transition-all duration-300 hover:shadow-xl hover:shadow-primary/30 hover:-translate-y-0.5"
-                  onClick={() => setExistingBooking(null)}
-                >
-                  Create New Booking
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </motion.div>
+        <ResumeBookingCard
+          booking={resumable}
+          onResume={handleResume}
+          onDismiss={handleDismissResume}
+          isResuming={isResuming}
+          error={resumeError}
+        />
       </div>
     );
   }

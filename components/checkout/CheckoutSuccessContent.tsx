@@ -21,6 +21,7 @@ import {
   Gift,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCartStore } from "@/lib/context/cartStore";
 
 interface CheckoutSuccessContentProps {
   status: "paid" | "pending" | "security_failed";
@@ -37,6 +38,21 @@ export function CheckoutSuccessContent({
   errCode,
   errMsg: _errMsg, // Unused in paid/pending, but available for security_failed
 }: CheckoutSuccessContentProps) {
+  const clearCart = useCartStore((s) => s.clearCart);
+
+  // Clear the cart only once payment is actually confirmed.
+  //
+  // This used to happen back in `CheckoutClient` the moment the booking row was
+  // created - i.e. before the user had even seen the payment page - which is
+  // why a failed payment always dropped them back onto an empty cart. `status`
+  // here is derived from a server-validated PayFast callback hash (an invalid
+  // hash renders `security_failed` instead), so `paid` is trustworthy.
+  useEffect(() => {
+    if (status === "paid") {
+      clearCart();
+    }
+  }, [status, clearCart]);
+
   // Trigger confetti for successful payment
   useEffect(() => {
     if (status === "paid") {

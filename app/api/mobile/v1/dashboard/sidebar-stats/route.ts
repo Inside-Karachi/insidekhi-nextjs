@@ -93,6 +93,12 @@ export const GET = mobileRoute(async (request: NextRequest) => {
        (SELECT COUNT(*) FROM reviews WHERE user_id = $1) AS reviews,
        (SELECT COUNT(*) FROM bookings WHERE user_id = $1) AS bookings,
        (SELECT COUNT(*) FROM favorite_listings WHERE user_id = $1) AS favorites,
+       -- "Visits" on the profile screen: every place the user has physically
+       -- turned up at. Check-ins are not their own table - they land in
+       -- points_log under the two check-in XP slugs, the same pair the
+       -- activity feed maps to its checkin rows.
+       (SELECT COUNT(*) FROM points_log
+          WHERE user_id = $1 AND reason IN ('check_in', 'visit_location')) AS visits,
        (SELECT COALESCE(SUM(points), 0) FROM points_log
           WHERE user_id = $1 AND created_at >= $2) AS weekly_xp,
        (SELECT COUNT(*) FROM bookings
@@ -107,6 +113,7 @@ export const GET = mobileRoute(async (request: NextRequest) => {
       reviews: num(rows[0]?.reviews),
       bookings: num(rows[0]?.bookings),
       favorites: num(rows[0]?.favorites),
+      visits: num(rows[0]?.visits),
     },
     weekly: {
       xp_earned: num(rows[0]?.weekly_xp),

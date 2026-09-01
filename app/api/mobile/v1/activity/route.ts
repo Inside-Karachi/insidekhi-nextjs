@@ -35,6 +35,11 @@ type ActivityFeedItem = {
   href: string | null;
   xp: number | null;
   occurred_at: string;
+  /** Listing/event thumbnail for rows that resolve to one — favourites, a
+   * booked event, and points_log rows tied to a listing (leave_review,
+   * react_review). null for kinds with no photo to show (badges, rank-ups,
+   * check-ins) — the client falls back to its type icon there. */
+  image_url: string | null;
 };
 
 /**
@@ -55,6 +60,7 @@ type FeedRow = {
   detail: string | null;
   /** `xp_activities.activity_name` (xp kind only). */
   activity_name: string | null;
+  image_url: string | null;
   occurred_at: string;
   total_count?: string | number;
 };
@@ -127,6 +133,10 @@ const FEED_UNION_SQL = `
     NULL::text                                      AS detail,
     (SELECT xa.activity_name FROM public.xp_activities xa
       WHERE xa.activity_slug = pl.reason LIMIT 1)   AS activity_name,
+    (SELECT li.url FROM public.listing_images li
+      WHERE li.listing_id = COALESCE(lrev.id, lreact.id)
+      ORDER BY li.is_primary DESC NULLS LAST, li.display_order ASC
+      LIMIT 1)                                      AS image_url,
     pl.created_at                                   AS occurred_at
   FROM public.points_log pl
   LEFT JOIN public.listings lrev
@@ -143,6 +153,10 @@ const FEED_UNION_SQL = `
     'favorite:' || fl.listing_id, 'favourite',
     NULL::text, NULL::numeric,
     l.name, l.slug, NULL::text, NULL::text,
+    (SELECT li.url FROM public.listing_images li
+      WHERE li.listing_id = l.id
+      ORDER BY li.is_primary DESC NULLS LAST, li.display_order ASC
+      LIMIT 1),
     fl.created_at
   FROM public.favorite_listings fl
   JOIN public.listings l ON l.id = fl.listing_id
@@ -154,6 +168,10 @@ const FEED_UNION_SQL = `
     'booking:' || b.id, 'booking',
     NULL::text, NULL::numeric,
     e.name, NULL::text, NULL::text, NULL::text,
+    (SELECT ei.url FROM public.event_images ei
+      WHERE ei.event_id = e.id
+      ORDER BY ei.display_order ASC
+      LIMIT 1),
     b.created_at
   FROM public.bookings b
   LEFT JOIN public.events e ON e.id = b.event_id
@@ -165,6 +183,7 @@ const FEED_UNION_SQL = `
     'badge:' || ub.badge_id, 'badge',
     NULL::text, NULL::numeric,
     bd.name, NULL::text, bd.description, NULL::text,
+    NULL::text,
     ub.awarded_at
   FROM public.user_badges ub
   JOIN public.badges bd ON bd.id = ub.badge_id
@@ -176,6 +195,7 @@ const FEED_UNION_SQL = `
     'rank:' || ur.id, 'rank_up',
     NULL::text, NULL::numeric,
     rk.name, NULL::text, NULL::text, NULL::text,
+    NULL::text,
     ur.achieved_at
   FROM public.user_ranks ur
   JOIN public.ranks rk ON rk.id = ur.rank_id
@@ -206,6 +226,7 @@ function xpItem(row: FeedRow): ActivityFeedItem {
     // negative rows (moderation clawbacks) shouldn't read as an achievement.
     xp: Number.isFinite(points) && points > 0 ? points : null,
     occurred_at: row.occurred_at,
+    image_url: row.image_url ?? null,
   };
 }
 
@@ -220,6 +241,7 @@ function toItem(row: FeedRow): ActivityFeedItem {
         href: row.slug ? `/listing/${row.slug}` : "/dashboard/favorites",
         xp: null,
         occurred_at: row.occurred_at,
+        image_url: row.image_url ?? null,
       };
     case "booking":
       return {
@@ -230,6 +252,7 @@ function toItem(row: FeedRow): ActivityFeedItem {
         href: "/dashboard/bookings",
         xp: null,
         occurred_at: row.occurred_at,
+        image_url: row.image_url ?? null,
       };
     case "badge":
       return {
@@ -240,6 +263,7 @@ function toItem(row: FeedRow): ActivityFeedItem {
         href: "/dashboard/achievements",
         xp: null,
         occurred_at: row.occurred_at,
+        image_url: null,
       };
     case "rank_up":
       return {
@@ -250,6 +274,7 @@ function toItem(row: FeedRow): ActivityFeedItem {
         href: "/leaderboard",
         xp: null,
         occurred_at: row.occurred_at,
+        image_url: null,
       };
     default:
       return xpItem(row);

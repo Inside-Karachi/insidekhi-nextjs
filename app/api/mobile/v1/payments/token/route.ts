@@ -6,6 +6,7 @@ import { requireMobileUser } from "@/lib/mobile/auth";
 import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { query } from "@/lib/db";
+import { RESUME_WINDOW_MINUTES } from "@/lib/checkout/resume";
 import {
   fetchPayFastToken,
   generatePayFastFormFields,
@@ -20,8 +21,12 @@ export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
   basketId: z.string().min(1), // the booking_reference (see below)
-  customerMobile: z.string().min(1).max(40),
-  customerEmail: z.string().email(),
+  // Optional, and derived from the booking row when absent. Kept in the schema
+  // (rather than removed) so installs shipped before the resume flow, which
+  // always send them, keep working. The resume path deliberately sends neither
+  // - it holds no buyer PII on the device to send.
+  customerMobile: z.string().min(1).max(40).optional(),
+  customerEmail: z.string().email().optional(),
   transactionDescription: z.string().max(255).optional().default("Checkout"),
 });
 
@@ -45,16 +50,17 @@ export const POST = mobileRoute(async (request: NextRequest) => {
   if (!parsed.success) {
     throw new MobileApiError(
       "validation_error",
-      "basketId, customerMobile, and a valid customerEmail are required.",
+      "A valid basketId is required.",
       400,
       parsed.error.errors[0]?.path.join(".") || undefined,
     );
   }
-  const { basketId, customerMobile, customerEmail, transactionDescription } =
-    parsed.data;
+  const { basketId, transactionDescription } = parsed.data;
 
   const { rows: bookingRows } = await query(
-    `SELECT id, total_amount, basket_id, payment_status, expires_at
+    `SELECT id, total_amount, basket_id, payment_status, status, expires_at,
+            customer_email, customer_phone,
+            to_json(created_at) #>> '{}' AS created_at
      FROM bookings WHERE booking_reference = $1 AND user_id = $2`,
     [basketId, user.id],
   );
@@ -69,13 +75,49 @@ export const POST = mobileRoute(async (request: NextRequest) => {
       400,
     );
   }
-  if (booking.expires_at && new Date(booking.expires_at) < new Date()) {
+  if (booking.payment_status === "refunded") {
     throw new MobileApiError(
-      "booking_expired",
-      "This booking has expired. Resume it before paying.",
+      "booking_refunded",
+      "This booking has been refunded and cannot be paid again.",
+      400,
+    );
+  }
+  if (booking.status === "cancelled") {
+    throw new MobileApiError(
+      "booking_cancelled",
+      "This booking has been cancelled.",
+      400,
+    );
+  }
+  // Gated on `created_at`, NOT `expires_at`. The payment hold lapsing is
+  // exactly the state resume exists to repair - refusing here on `expires_at`
+  // is what made the old flow tell users to "resume it before paying" while
+  // resume-payment simultaneously refused to resume it.
+  const createdAtMs = Date.parse(booking.created_at);
+  if (
+    Number.isNaN(createdAtMs) ||
+    Date.now() - createdAtMs > RESUME_WINDOW_MINUTES * 60_000
+  ) {
+    throw new MobileApiError(
+      "resume_window_lapsed",
+      "This booking has expired. Please pick your tickets again.",
       410,
     );
   }
+
+  // Buyer contact details come from the booking row the server already holds,
+  // so the client never has to keep (or resend) that PII. The request body is
+  // only a fallback for older installs.
+  const customerEmail = (booking.customer_email as string | null) ?? parsed.data.customerEmail;
+  const customerMobile = (booking.customer_phone as string | null) ?? parsed.data.customerMobile;
+  if (!customerEmail || !customerMobile) {
+    throw new MobileApiError(
+      "validation_error",
+      "This booking is missing the contact details needed for payment.",
+      400,
+    );
+  }
+
   if (!booking.basket_id) {
     throw new MobileApiError(
       "internal_error",

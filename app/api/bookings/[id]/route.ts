@@ -2,20 +2,48 @@ import { query } from "@/lib/db";
 import { getSession } from "@/lib/auth/session";
 import { NextRequest, NextResponse } from "next/server";
 
+/**
+ * Columns this endpoint is allowed to return.
+ *
+ * This used to be `SELECT *` spread straight into the JSON response, which
+ * handed the browser `cnic_hash`, `verification_seed` and `basket_id` - the
+ * last of which is the key the PayFast callback resolves bookings by. An
+ * explicit allow-list, in the same spirit as `PROFILE_COLUMN_KEYS` in
+ * `lib/mobile/profile.ts`, so new columns are private by default.
+ */
+const BOOKING_COLUMNS = [
+  "id",
+  "user_id",
+  "event_id",
+  "booking_reference",
+  "total_amount",
+  "status",
+  "payment_status",
+  "customer_name",
+  "cnic_last4",
+  "created_at",
+  "expires_at",
+] as const;
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
+    const bookingId = parseInt(id, 10);
+    if (Number.isNaN(bookingId)) {
+      return NextResponse.json({ error: "Invalid booking ID" }, { status: 400 });
+    }
+
     const session = await getSession(request);
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { rows: bookingRows } = await query(
-      `SELECT * FROM bookings WHERE id = $1`,
-      [parseInt(id)]
+      `SELECT ${BOOKING_COLUMNS.join(", ")} FROM bookings WHERE id = $1`,
+      [bookingId]
     );
     const booking = bookingRows[0];
 

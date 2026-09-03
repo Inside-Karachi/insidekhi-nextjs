@@ -1,5 +1,6 @@
 import { MobileApiError } from "@/lib/mobile/errors";
 import {
+  buildAlgorithmOutingPlan,
   buildCandidatePool,
   pickForSlot,
 } from "@/lib/outing/algorithm-plan";
@@ -129,18 +130,36 @@ Hard rules:
 }
 
 /**
- * AI outing plan: template slots → balanced DB pool → Groq arc → fill missing roles.
+ * AI outing plan: intent places mode uses the algorithm places ranker (DB-only
+ * IDs) with AI reasons when Groq is available; arc mode keeps Groq slot picks.
  */
 export async function buildAiOutingPlan(
   prompt: string,
 ): Promise<OutingPlanResponse> {
   const { ctx, candidates, byRole } = await buildCandidatePool(prompt);
 
+  // Places mode (hangout / date / bowling / food-first): never force a meal arc.
+  if (ctx.intent.mode === "places") {
+    const base = await buildAlgorithmOutingPlan(prompt);
+    return {
+      ...base,
+      mode: "ai",
+      interpretation: base.interpretation,
+    };
+  }
+
   if (candidates.length === 0) {
     return {
       mode: "ai",
       interpretation: "No places found for that prompt",
       stops: [],
+      intent: {
+        mode: ctx.intent.mode,
+        primaryNeed: ctx.intent.primaryNeed,
+        excludeFood: ctx.intent.excludeFood,
+        budgetMaxPkr: ctx.intent.budgetMaxPkr,
+        partySize: ctx.intent.partySize,
+      },
     };
   }
 
@@ -193,7 +212,10 @@ export async function buildAiOutingPlan(
   for (const slot of ctx.slots) {
     if (stops.length >= MAX_STOPS) break;
     if (filledRoles.has(slot.role)) continue;
-    const listing = await pickForSlot(slot, ctx.area, used);
+    if (ctx.intent.excludeFood && /dinner|eat|sweet|meal|cafe/.test(slot.role)) {
+      continue;
+    }
+    const listing = await pickForSlot(slot, ctx.area, used, ctx.intent);
     if (!listing) {
       const fromPool = (byRole.get(slot.role) ?? []).find((l) => !used.has(l.id));
       if (!fromPool) continue;
@@ -246,5 +268,12 @@ export async function buildAiOutingPlan(
     mode: "ai",
     interpretation,
     stops: stops.slice(0, MAX_STOPS),
+    intent: {
+      mode: ctx.intent.mode,
+      primaryNeed: ctx.intent.primaryNeed,
+      excludeFood: ctx.intent.excludeFood,
+      budgetMaxPkr: ctx.intent.budgetMaxPkr,
+      partySize: ctx.intent.partySize,
+    },
   };
 }

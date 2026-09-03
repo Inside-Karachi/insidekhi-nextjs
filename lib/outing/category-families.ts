@@ -50,6 +50,48 @@ export const FOOD_FAMILIES: CategoryFamily[] = [
   "fine_dining",
 ];
 
+/** Diversity buckets for mixed plans (1 restaurant + 1 cafe + hangout…). */
+export type OutingDiversityBucket =
+  | "meal"
+  | "cafe"
+  | "sweet"
+  | "hangout"
+  | "other";
+
+const BUCKET_CAPS: Record<OutingDiversityBucket, number> = {
+  // One restaurant / fine dining / fast-food meal — not a stack of eateries
+  meal: 1,
+  cafe: 1,
+  sweet: 1,
+  hangout: 3,
+  other: 2,
+};
+
+export function diversityBucketForFamily(
+  family: CategoryFamily,
+): OutingDiversityBucket {
+  if (family === "restaurants" || family === "fine_dining" || family === "fast_food") {
+    return "meal";
+  }
+  if (family === "cafes") return "cafe";
+  if (family === "bakeries") return "sweet";
+  if (
+    family === "entertainment" ||
+    family === "gaming" ||
+    family === "live_music" ||
+    family === "parks" ||
+    family === "cinema" ||
+    family === "sports"
+  ) {
+    return "hangout";
+  }
+  return "other";
+}
+
+export function diversityBucketCap(bucket: OutingDiversityBucket): number {
+  return BUCKET_CAPS[bucket];
+}
+
 export function familyForSlug(slug: string | null | undefined): CategoryFamily {
   if (!slug) return "other";
   return SLUG_TO_FAMILY[slug] ?? "other";

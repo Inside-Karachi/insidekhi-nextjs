@@ -9,9 +9,12 @@ import {
 } from "@/lib/outing/intent";
 import {
   DATE_DEMOTE_SLUGS,
+  diversityBucketCap,
+  diversityBucketForFamily,
   familyForCategoryName,
   familyForSlug,
   FOOD_FAMILIES,
+  type OutingDiversityBucket,
 } from "@/lib/outing/category-families";
 import {
   MAX_STOPS,
@@ -313,25 +316,52 @@ export async function pickForSlot(
   return null;
 }
 
+function listingFamily(listing: OutingListingCard) {
+  return familyForSlug(listing.category_slug) !== "other"
+    ? familyForSlug(listing.category_slug)
+    : familyForCategoryName(listing.category_name);
+}
+
+function listingBucket(listing: OutingListingCard): OutingDiversityBucket {
+  return diversityBucketForFamily(listingFamily(listing));
+}
+
+/** Track how many stops we've taken per diversity bucket. */
+function canAddBucket(
+  counts: Record<OutingDiversityBucket, number>,
+  bucket: OutingDiversityBucket,
+): boolean {
+  return counts[bucket] < diversityBucketCap(bucket);
+}
+
+function bumpBucket(
+  counts: Record<OutingDiversityBucket, number>,
+  bucket: OutingDiversityBucket,
+) {
+  counts[bucket] += 1;
+}
+
+function emptyBucketCounts(): Record<OutingDiversityBucket, number> {
+  return { meal: 0, cafe: 0, sweet: 0, hangout: 0, other: 0 };
+}
+
 function selectPlaces(
   filtered: OutingListingCard[],
   intent: OutingIntent,
 ): OutingListingCard[] {
   // Explicit food asks ("burger places", biryani, …) may return many restaurants.
-  // Every other vibe: at most one food stop so plans don't collapse into a
-  // restaurant list.
   if (intent.primaryNeed === "food") {
     return filtered.slice(0, PLACES_LIMIT);
   }
 
+  // Mixed vibes: allow 1 meal + 1 cafe + hangout spots, not a restaurant stack.
   const picks: OutingListingCard[] = [];
-  let foodCount = 0;
+  const counts = emptyBucketCounts();
   for (const listing of filtered) {
     if (picks.length >= PLACES_LIMIT) break;
-    if (isFoodListing(listing)) {
-      if (foodCount >= 1) continue;
-      foodCount += 1;
-    }
+    const bucket = listingBucket(listing);
+    if (!canAddBucket(counts, bucket)) continue;
+    bumpBucket(counts, bucket);
     picks.push(listing);
   }
   return picks;
@@ -390,24 +420,25 @@ async function buildArcPlan(
   const stops: OutingPlanStopDTO[] = [];
   const used = new Set<number>();
   const allowManyFood = intent.primaryNeed === "food";
-  let foodStops = 0;
+  const counts = emptyBucketCounts();
 
   for (const slot of ctx.slots) {
     if (stops.length >= MAX_STOPS) break;
     if (intent.excludeFood && FOOD_FAMILIES.includes(familyForSlug(slot.categorySlug))) {
       continue;
     }
-    const slotIsFood = FOOD_FAMILIES.includes(familyForSlug(slot.categorySlug));
-    if (!allowManyFood && slotIsFood && foodStops >= 1) {
+    const slotBucket = diversityBucketForFamily(familyForSlug(slot.categorySlug));
+    if (!allowManyFood && !canAddBucket(counts, slotBucket)) {
       continue;
     }
     const listing = await pickForSlot(slot, ctx.area, used, intent);
     if (!listing) continue;
-    if (!allowManyFood && isFoodListing(listing) && foodStops >= 1) {
+    const bucket = listingBucket(listing);
+    if (!allowManyFood && !canAddBucket(counts, bucket)) {
       continue;
     }
     used.add(listing.id);
-    if (isFoodListing(listing)) foodStops += 1;
+    bumpBucket(counts, bucket);
     stops.push({
       listing,
       role: slot.role,
@@ -415,10 +446,10 @@ async function buildArcPlan(
     });
   }
 
-  // Pad only when food is allowed — and still respect the single-restaurant rule
+  // Pad with non-meal diversity when short (never a second restaurant)
   if (stops.length < MIN_STOPS && !intent.excludeFood) {
-    const canPadFood = allowManyFood || foodStops < 1;
-    if (canPadFood) {
+    const canPadMeal = allowManyFood || canAddBucket(counts, "meal");
+    if (canPadMeal) {
       const extra = await fetchListingCards({
         categorySlug: "restaurants-cafes",
         search: ctx.area,
@@ -426,18 +457,19 @@ async function buildArcPlan(
       });
       for (const listing of filterCandidates([...extra].sort(byRatingDesc), intent)) {
         if (used.has(listing.id)) continue;
+        const bucket = listingBucket(listing);
+        if (!allowManyFood && !canAddBucket(counts, bucket)) continue;
         used.add(listing.id);
-        foodStops += 1;
+        bumpBucket(counts, bucket);
         stops.push({
           listing,
           role: "extra",
           reason: "Extra stop · top-rated restaurant",
         });
-        break; // at most one pad restaurant
+        break;
       }
     }
   } else if (stops.length < MIN_STOPS && intent.excludeFood) {
-    // Pad from hangout categories, never restaurants
     const extra = await fetchPoolForIntent({
       ...intent,
       categorySlugs: intent.categorySlugs.length
@@ -453,7 +485,10 @@ async function buildArcPlan(
     )) {
       if (used.has(listing.id)) continue;
       if (isFoodListing(listing)) continue;
+      const bucket = listingBucket(listing);
+      if (!canAddBucket(counts, bucket)) continue;
       used.add(listing.id);
+      bumpBucket(counts, bucket);
       stops.push({
         listing,
         role: "place",

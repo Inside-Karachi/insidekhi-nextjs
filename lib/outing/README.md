@@ -10,6 +10,8 @@
  *
  * - **places** — ranked matching listings (hangout, date, bowling, food-first)
  * - **arc** — optional 2–3 stop itinerary only for broad “plan my night out”
+ * - Non-food asks return **at most one** restaurant/cafe; food-first prompts
+ *   (“burger places”, biryani, …) may return several
  *
  * ## Data backfill (ops)
  *

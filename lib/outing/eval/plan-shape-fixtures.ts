@@ -197,6 +197,37 @@ export function runPlanShapeAssertions(): IntentAssertFailure[] {
       return (b.avg_rating ?? 0) - (a.avg_rating ?? 0);
     });
 
+    if (intent.excludeFood) {
+      const foodHit = filtered.find((l) =>
+        /restaurant|biryani|burger|fine dining|fast food|pakistani/i.test(
+          `${l.category_name} ${l.category_slug}`,
+        ),
+      );
+      if (foodHit) {
+        failures.push({
+          fixtureId: fixture.id,
+          prompt: fixture.prompt,
+          message: `filterCandidates leaked food listing "${foodHit.name}"`,
+        });
+      }
+    }
+
+    if (intent.budgetMaxPkr != null) {
+      const party = intent.partySize ?? 2;
+      for (const l of filtered) {
+        if (
+          l.min_price_per_person != null &&
+          l.min_price_per_person * party > intent.budgetMaxPkr
+        ) {
+          failures.push({
+            fixtureId: fixture.id,
+            prompt: fixture.prompt,
+            message: `filterCandidates kept over-budget "${l.name}"`,
+          });
+        }
+      }
+    }
+
     // Mirror selectPlaces: food-first may list many restaurants; others max 1 food.
     const picks: typeof filtered = [];
     if (intent.primaryNeed === "food") {

@@ -1,6 +1,7 @@
 import { type NextRequest } from "next/server";
 import { query } from "@/lib/db";
 import { MobileApiError } from "@/lib/mobile/errors";
+import { fetchPrimaryImagesByEventId } from "@/lib/mobile/event-images";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { toEventCard, type EventCardRow } from "@/lib/mobile/mappers";
 import {
@@ -76,12 +77,37 @@ export const GET = mobileRoute(async (request: NextRequest) => {
       ),
     ]);
 
-    const events = (eventsResult.rows as RecentlyAnnouncedEventRow[]).map(
-      (row) => ({
-        ...toEventCard(toEventCardRow(row)),
-        announced_at: row.announced_at,
-      }),
-    );
+    const eventRows = eventsResult.rows as RecentlyAnnouncedEventRow[];
+    const eventCardRows = eventRows.map(toEventCardRow);
+
+    // Cover images, so the home-feed rows render a thumbnail instead of a
+    // bare date block. Sequential (not part of the Promise.all above) because
+    // the production pool is capped at one connection per instance, and soft
+    // failing so a slow image query costs the thumbnails, not the section.
+    let primaryImageByEvent = new Map<number, string>();
+    try {
+      primaryImageByEvent = await fetchPrimaryImagesByEventId(
+        eventCardRows
+          .map((row) => row.event_id)
+          .filter((id): id is number => id != null),
+      );
+    } catch (error) {
+      console.error(
+        "[mobile-api] recently announced event image query failed:",
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    const events = eventCardRows.map((row, i) => ({
+      ...toEventCard(
+        row,
+        undefined,
+        row.event_id != null
+          ? (primaryImageByEvent.get(row.event_id) ?? null)
+          : null,
+      ),
+      announced_at: eventRows[i].announced_at,
+    }));
 
     return ok(events, {
       pagination: buildPaginationMeta(

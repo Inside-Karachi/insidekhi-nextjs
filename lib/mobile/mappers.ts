@@ -4,6 +4,7 @@
  * other users' auth UUIDs are never exposed (only `is_own` + display fields).
  */
 import type { Database, Json } from "@/types/database";
+import type { ListingDeals, ListingDealSummaryDTO } from "@/lib/mobile/listing-deals";
 import type {
   NotificationFeedItem,
   NotificationChannel,
@@ -35,6 +36,16 @@ export type ListingCardDTO = {
   menu_pdf_url: string | null;
   google_maps_url: string | null;
   images: ListingImageDTO[];
+  /**
+   * The listing's strongest active offer, for the badge on a browse row.
+   * Only present on endpoints that opt in by passing `deals` to
+   * {@link toListingCard} - absent means "not loaded", `null` means "loaded,
+   * and this listing has no active deal". Clients must treat the two the same
+   * way (no badge) rather than rendering an empty slot.
+   */
+  best_deal?: ListingDealSummaryDTO | null;
+  /** Active deals on the listing, so a row can say "+2 more". */
+  deal_count?: number;
 };
 
 /**
@@ -99,9 +110,16 @@ export function toNumericListingRow(row: Record<string, unknown>): ListingRowLik
   } as unknown as ListingRowLike;
 }
 
+/**
+ * `deals` is opt-in: pass the entry from {@link fetchBestDealsByListing} to
+ * emit `best_deal`/`deal_count` on the card, or omit it entirely on endpoints
+ * that don't load deals. Passing `undefined` leaves both keys off the payload
+ * rather than sending a misleading `deal_count: 0`.
+ */
 export function toListingCard(
   row: ListingRowLike,
   images: ListingImageDTO[],
+  deals?: ListingDeals | null,
 ): ListingCardDTO {
   return {
     id: row.id as number,
@@ -120,6 +138,9 @@ export function toListingCard(
     menu_pdf_url: row.menu_pdf_url,
     google_maps_url: row.google_maps_url,
     images,
+    ...(deals !== undefined
+      ? { best_deal: deals?.best ?? null, deal_count: deals?.count ?? 0 }
+      : {}),
   };
 }
 

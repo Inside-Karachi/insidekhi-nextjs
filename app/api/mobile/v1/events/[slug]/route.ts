@@ -101,6 +101,17 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
 
   const organizerProfile = organizerRes.rows[0];
 
+  // `tickets` is ordered by price ASC above, so the ends of the list are the
+  // cheapest / dearest tiers. Mirrors the list routes' `from_price`/`to_price`
+  // so every EventCard consumer reads price the same way.
+  const ticketPrices = tickets
+    .map((t) => t.price)
+    .filter((p): p is number => p != null);
+  const priceRange = {
+    from: ticketPrices.length > 0 ? Math.min(...ticketPrices) : null,
+    to: ticketPrices.length > 0 ? Math.max(...ticketPrices) : null,
+  };
+
   // "N people going" for the detail screen's attendee strip. Fail-soft and
   // sequential (not folded into the Promise.all above): the production pool is
   // capped at one connection per instance, so a slow "who's going" lookup must
@@ -122,6 +133,8 @@ export const GET = mobileRoute(async (request: NextRequest, { params }) => {
           event_id: eventId,
         } as unknown as EventCardRow,
         attendeesPreview.get(eventId),
+        undefined,
+        priceRange,
       ),
       organizer_username: organizerProfile?.username ?? null,
       organizer_is_verified: organizerProfile?.is_verified_organizer ?? false,

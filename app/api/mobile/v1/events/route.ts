@@ -9,6 +9,7 @@ import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
 import { toEventCard, type EventCardRow } from "@/lib/mobile/mappers";
 import { getAttendeesPreviewByEvent } from "@/lib/mobile/attendees";
 import { fetchPrimaryImagesByEventId } from "@/lib/mobile/event-images";
+import { fetchPriceRangeByEventId, type EventPriceRange } from "@/lib/mobile/event-pricing";
 
 export const dynamic = "force-dynamic";
 
@@ -134,6 +135,7 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     ReturnType<typeof getAttendeesPreviewByEvent>
   > = new Map();
   let primaryImageByEvent = new Map<number, string>();
+  let priceRangeByEvent = new Map<number, EventPriceRange>();
   try {
     // Sequential for the same reason as the count query above - a `max: 1`
     // pool turns concurrent queries into queued ones racing a 10s acquisition
@@ -147,10 +149,15 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     // `display_order = 1`, which left an event whose images are merely ordered
     // from 0 (or 2 up) with no cover at all.
     const imagesByEvent = await fetchPrimaryImagesByEventId(eventIds);
+    const pricesByEvent = await fetchPriceRangeByEventId(eventIds);
     attendeesPreviewByEvent = attendeesResult;
     primaryImageByEvent = imagesByEvent;
+    priceRangeByEvent = pricesByEvent;
   } catch (error) {
-    console.error("[mobile-api] attendees preview / image query failed:", error);
+    console.error(
+      "[mobile-api] attendees preview / image / price query failed:",
+      error,
+    );
   }
 
   const events = eventCardRows.map((row) =>
@@ -158,6 +165,9 @@ export const GET = mobileRoute(async (request: NextRequest) => {
       row,
       row.event_id != null ? attendeesPreviewByEvent.get(row.event_id) : undefined,
       row.event_id != null ? (primaryImageByEvent.get(row.event_id) ?? null) : null,
+      row.event_id != null
+        ? (priceRangeByEvent.get(row.event_id) ?? { from: null, to: null })
+        : { from: null, to: null },
     ),
   );
 

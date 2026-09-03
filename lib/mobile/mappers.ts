@@ -240,6 +240,12 @@ export type EventCardDTO = {
   latitude: number | null;
   longitude: number | null;
   image_url?: string | null;
+  /** Cheapest / dearest ticket price across the event's ticket types, so a
+   * list card can show "From PKR X" without pulling the full ticket list.
+   * `0` is a real value (a free tier); `null` means the event has no ticket
+   * types. Both omitted when the caller doesn't pass a price range in. */
+  from_price?: number | null;
+  to_price?: number | null;
   /** "N people going" preview, based on paid ticket bookings. Omitted (not
    * just empty) when the caller doesn't pass one in, e.g. the detail route. */
   attendees_preview?: AttendeePreviewDTO[];
@@ -276,6 +282,7 @@ export function toEventCard(
   row: EventCardRow,
   attendeesPreview?: { users: AttendeePreviewDTO[]; total_count: number },
   imageUrl?: string | null,
+  priceRange?: { from: number | null; to: number | null },
 ): EventCardDTO {
   return {
     event_id: row.event_id,
@@ -293,6 +300,9 @@ export function toEventCard(
     latitude: row.latitude,
     longitude: row.longitude,
     ...(imageUrl !== undefined ? { image_url: imageUrl } : {}),
+    ...(priceRange !== undefined
+      ? { from_price: priceRange.from, to_price: priceRange.to }
+      : {}),
     ...(attendeesPreview
       ? {
           attendees_preview: attendeesPreview.users,

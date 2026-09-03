@@ -2,6 +2,7 @@ import { type NextRequest } from "next/server";
 import { query } from "@/lib/db";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { fetchPrimaryImagesByEventId } from "@/lib/mobile/event-images";
+import { fetchPriceRangeByEventId, type EventPriceRange } from "@/lib/mobile/event-pricing";
 import { mobileRoute } from "@/lib/mobile/handler";
 import { toEventCard, type EventCardRow } from "@/lib/mobile/mappers";
 import {
@@ -85,15 +86,16 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     // the production pool is capped at one connection per instance, and soft
     // failing so a slow image query costs the thumbnails, not the section.
     let primaryImageByEvent = new Map<number, string>();
+    let priceRangeByEvent = new Map<number, EventPriceRange>();
     try {
-      primaryImageByEvent = await fetchPrimaryImagesByEventId(
-        eventCardRows
-          .map((row) => row.event_id)
-          .filter((id): id is number => id != null),
-      );
+      const eventIds = eventCardRows
+        .map((row) => row.event_id)
+        .filter((id): id is number => id != null);
+      primaryImageByEvent = await fetchPrimaryImagesByEventId(eventIds);
+      priceRangeByEvent = await fetchPriceRangeByEventId(eventIds);
     } catch (error) {
       console.error(
-        "[mobile-api] recently announced event image query failed:",
+        "[mobile-api] recently announced event image / price query failed:",
         error instanceof Error ? error.message : error,
       );
     }
@@ -105,6 +107,9 @@ export const GET = mobileRoute(async (request: NextRequest) => {
         row.event_id != null
           ? (primaryImageByEvent.get(row.event_id) ?? null)
           : null,
+        row.event_id != null
+          ? (priceRangeByEvent.get(row.event_id) ?? { from: null, to: null })
+          : { from: null, to: null },
       ),
       announced_at: eventRows[i].announced_at,
     }));

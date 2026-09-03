@@ -2,12 +2,14 @@ import { normalizeSearchText } from "@/lib/utils/places-search";
 import { extractArea } from "@/lib/outing/templates";
 import {
   DATE_CATEGORY_SLUGS,
+  FRIENDS_CATEGORY_SLUGS,
   HANGOUT_CATEGORY_SLUGS,
   type CategoryFamily,
 } from "@/lib/outing/category-families";
 
 export type OutingPrimaryNeed =
   | "hangout"
+  | "friends"
   | "date"
   | "activity"
   | "food"
@@ -227,6 +229,19 @@ const STRONG_FOOD_PHRASES = [
 const FAMILY_PHRASES = ["family", "kids", "children", "toddler", "zoo"];
 const SHOPPING_PHRASES = ["shopping", "mall", "retail", "clothes", "fashion"];
 const SELF_CARE_PHRASES = ["self care", "spa", "salon", "massage", "facial"];
+const FRIENDS_PHRASES = [
+  "friends visiting",
+  "out of town",
+  "out-of-town",
+  "impress guests",
+  "show them karachi",
+  "guests in town",
+  "visiting karachi",
+  "no tours",
+];
+const PEACE_PHRASES = ["need peace", "quiet", "peaceful", "slow down"];
+const QUICK_PHRASES = ["one hour", "quick nearby", "something quick", "hour free"];
+const NEW_PHRASES = ["recently added", "something new", "new places"];
 const ARC_NIGHT_PHRASES = [
   "plan my night",
   "night out",
@@ -234,6 +249,7 @@ const ARC_NIGHT_PHRASES = [
   "bar hop",
   "club hop",
 ];
+const LATE_NIGHT_MOOD_PHRASES = ["late night open", "open when the city"];
 
 function includesAny(normalized: string, phrases: string[]): boolean {
   return phrases.some((p) => {
@@ -341,23 +357,50 @@ export function extractOutingIntent(prompt: string): OutingIntent {
 
   const activities = matchActivities(normalized);
   const hangout = includesAny(normalized, HANGOUT_PHRASES);
+  const friends = includesAny(normalized, FRIENDS_PHRASES);
   const date = includesAny(normalized, DATE_PHRASES);
   const posh = includesAny(normalized, POSH_PHRASES);
   const strongFood = includesAny(normalized, STRONG_FOOD_PHRASES);
   const foodFirst =
     includesAny(normalized, FOOD_PHRASES) &&
     !hangout &&
+    !friends &&
     activities.length === 0 &&
     !date &&
     !(posh && !strongFood);
   const family = includesAny(normalized, FAMILY_PHRASES);
   const shopping = includesAny(normalized, SHOPPING_PHRASES);
   const selfCare = includesAny(normalized, SELF_CARE_PHRASES);
+  const peace = includesAny(normalized, PEACE_PHRASES);
+  const quick = includesAny(normalized, QUICK_PHRASES);
+  const somethingNew = includesAny(normalized, NEW_PHRASES);
+  const lateNightMood = includesAny(normalized, LATE_NIGHT_MOOD_PHRASES);
   const broadNightOut =
     includesAny(normalized, ARC_NIGHT_PHRASES) &&
     !hangout &&
+    !friends &&
     !date &&
     activities.length === 0;
+
+  // --- Friends visiting / impress guests (food + fun, no tours) ---
+  if (friends && !date) {
+    if (partySize == null) partySize = 4;
+    return {
+      mode: "places",
+      primaryNeed: "friends",
+      activityKeywords: [],
+      vibeTags: [...vibeTags, "guests"],
+      area,
+      budgetMaxPkr,
+      partySize,
+      timePreference: time,
+      excludeFood: false,
+      categorySlugs: [...FRIENDS_CATEGORY_SLUGS],
+      interpretation: area
+        ? `Guest-worthy picks near ${area}`
+        : "Impress out-of-town guests",
+    };
+  }
 
   // --- Self-care before generic activity lexicon (spa is not a "hangout") ---
   if (selfCare && !date) {
@@ -373,6 +416,94 @@ export function extractOutingIntent(prompt: string): OutingIntent {
       excludeFood: false,
       categorySlugs: ["salons-spas"],
       interpretation: "Self-care picks",
+    };
+  }
+
+  // --- Quiet / need peace ---
+  if (peace && !hangout && !date) {
+    return {
+      mode: "places",
+      primaryNeed: "hangout",
+      activityKeywords: [],
+      vibeTags: [...vibeTags, "quiet"],
+      area,
+      budgetMaxPkr,
+      partySize,
+      timePreference: time,
+      excludeFood: false,
+      categorySlugs: [
+        "parks-outdoor-spaces",
+        "cafes-coworking-spots",
+        "salons-spas",
+      ],
+      interpretation: "Quiet spots to slow down",
+    };
+  }
+
+  // --- One hour free / quick ---
+  if (quick && !hangout && !date && activities.length === 0) {
+    return {
+      mode: "places",
+      primaryNeed: "hangout",
+      activityKeywords: [],
+      vibeTags,
+      area,
+      budgetMaxPkr,
+      partySize,
+      timePreference: time ?? "now",
+      excludeFood: false,
+      categorySlugs: [
+        "cafes-coworking-spots",
+        "bakeries-desserts",
+        "juice-bars-beverages",
+        "fast-food-street-food",
+      ],
+      interpretation: "Quick things nearby",
+    };
+  }
+
+  // --- Late night mood (food + hang allowed) ---
+  if (lateNightMood) {
+    return {
+      mode: "places",
+      primaryNeed: "hangout",
+      activityKeywords: [],
+      vibeTags: [...vibeTags, "late"],
+      area,
+      budgetMaxPkr,
+      partySize,
+      timePreference: "night",
+      excludeFood: false,
+      categorySlugs: [
+        "entertainment-recreation",
+        "restaurants-cafes",
+        "pakistani-desi-cuisine",
+        "bakeries-desserts",
+        "live-music-comedy-venues",
+      ],
+      interpretation: "Late-night picks still open",
+    };
+  }
+
+  // --- Something new ---
+  if (somethingNew) {
+    return {
+      mode: "places",
+      primaryNeed: "generic",
+      activityKeywords: [],
+      vibeTags: [...vibeTags, "new"],
+      area,
+      budgetMaxPkr,
+      partySize,
+      timePreference: time,
+      excludeFood: false,
+      categorySlugs: [
+        "restaurants-cafes",
+        "entertainment-recreation",
+        "cafes-coworking-spots",
+        "cinemas-amusement-parks",
+      ],
+      interpretation: "Recently added spots",
     };
   }
 
@@ -563,7 +694,15 @@ export function forbidFamiliesForIntent(
     return ["restaurants", "cafes", "fast_food", "bakeries", "fine_dining"];
   }
   if (intent.primaryNeed === "date") {
-    return ["fast_food"];
+    return ["fast_food", "tourism"];
+  }
+  if (
+    intent.primaryNeed === "friends" ||
+    intent.primaryNeed === "hangout" ||
+    intent.primaryNeed === "family" ||
+    intent.primaryNeed === "activity"
+  ) {
+    return ["tourism"];
   }
   return [];
 }
@@ -574,6 +713,16 @@ export function allowFamiliesForIntent(
   switch (intent.primaryNeed) {
     case "hangout":
       return ["entertainment", "gaming", "live_music", "parks", "cinema", "sports"];
+    case "friends":
+      return [
+        "entertainment",
+        "cinema",
+        "live_music",
+        "fine_dining",
+        "restaurants",
+        "cafes",
+        "shopping",
+      ];
     case "date":
       return ["fine_dining", "cafes", "live_music", "restaurants"];
     case "activity":

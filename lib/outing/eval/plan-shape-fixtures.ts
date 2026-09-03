@@ -173,6 +173,29 @@ const FIXTURE_POOL: OutingListingCard[] = [
     min_guest_capacity: 2,
     max_guest_capacity: 10,
   },
+  {
+    id: 8,
+    name: "River Routes Tours",
+    slug: "river-routes",
+    description: "Tour booking agency",
+    address: "Clifton",
+    category_id: 8,
+    category_name: "Travel & Tourism",
+    latitude: null,
+    longitude: null,
+    avg_rating: 4.8,
+    review_count: 90,
+    is_featured: true,
+    status: "published",
+    menu_pdf_url: null,
+    google_maps_url: null,
+    images: [],
+    category_slug: "travel-tourism",
+    min_price_per_person: null,
+    max_price_per_person: null,
+    min_guest_capacity: null,
+    max_guest_capacity: null,
+  },
 ];
 
 /** Run layer-2 plan shape assertions for core golden prompts. */
@@ -228,24 +251,37 @@ export function runPlanShapeAssertions(): IntentAssertFailure[] {
       }
     }
 
-    // Mirror selectPlaces: food-first may list many restaurants; others max 1 food.
+    // Mirror selectPlaces diversity: food-first many; else 1 meal + cafe + hangout…
     const picks: typeof filtered = [];
     if (intent.primaryNeed === "food") {
       picks.push(...filtered.slice(0, 5));
     } else {
-      let foodCount = 0;
-      for (const listing of filtered) {
-        if (picks.length >= 5) break;
-        const isFood =
-          /restaurant|biryani|burger|fine dining|fast food|pakistani|bakery|cafe/i.test(
-            `${listing.category_name} ${listing.category_slug}`,
-          );
-        if (isFood) {
-          if (foodCount >= 1) continue;
-          foodCount += 1;
+      const counts = { meal: 0, cafe: 0, sweet: 0, hangout: 0, other: 0 };
+      const caps = { meal: 1, cafe: 1, sweet: 1, hangout: 3, other: 2 };
+      const bucketOf = (listing: (typeof filtered)[number]) => {
+        const blob = `${listing.category_name} ${listing.category_slug}`.toLowerCase();
+        if (/fine.?dining|restaurant|pakistani|fast.?food|burger|biryani/.test(blob)) {
+          return "meal" as const;
         }
+        if (/cafe|coffee/.test(blob)) return "cafe" as const;
+        if (/bakery|dessert/.test(blob)) return "sweet" as const;
+        if (/entertainment|gaming|music|park|cinema|sport/.test(blob)) {
+          return "hangout" as const;
+        }
+        return "other" as const;
+      };
+      const tryAdd = (listing: (typeof filtered)[number]) => {
+        if (picks.length >= 5 || picks.some((p) => p.id === listing.id)) return;
+        const b = bucketOf(listing);
+        if (counts[b] >= caps[b]) return;
+        counts[b] += 1;
         picks.push(listing);
+      };
+      for (const b of ["meal", "cafe", "hangout", "sweet", "other"] as const) {
+        const hit = filtered.find((l) => bucketOf(l) === b);
+        if (hit) tryAdd(hit);
       }
+      for (const listing of filtered) tryAdd(listing);
     }
 
     const stops = picks.map((listing) => ({

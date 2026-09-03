@@ -14,6 +14,7 @@ import {
   familyForCategoryName,
   familyForSlug,
   FOOD_FAMILIES,
+  TOURISM_EXCLUDED_NEEDS,
   type OutingDiversityBucket,
 } from "@/lib/outing/category-families";
 import {
@@ -39,6 +40,7 @@ export function resolvePlanContext(prompt: string): MatchedPlanContext {
   const useIntentSlots =
     intent.mode === "places" ||
     intent.primaryNeed === "hangout" ||
+    intent.primaryNeed === "friends" ||
     intent.primaryNeed === "date" ||
     intent.primaryNeed === "activity" ||
     intent.primaryNeed === "food";
@@ -46,7 +48,12 @@ export function resolvePlanContext(prompt: string): MatchedPlanContext {
   if (useIntentSlots && intent.mode === "places") {
     const slots: OutingSlot[] = intent.categorySlugs.slice(0, 3).map((slug, i) => ({
       role: i === 0 ? "place" : `place_${i}`,
-      label: intent.primaryNeed === "date" ? "Date spot" : "Place",
+      label:
+        intent.primaryNeed === "date"
+          ? "Date spot"
+          : intent.primaryNeed === "friends"
+            ? "Guest pick"
+            : "Place",
       categorySlug: slug,
       fallbackSlugs: intent.categorySlugs.filter((s) => s !== slug).slice(0, 3),
     }));
@@ -172,6 +179,20 @@ export function filterCandidates(
     if (intent.primaryNeed === "date" && (fam === "fast_food" || fam === "bakeries")) {
       return false;
     }
+    if (TOURISM_EXCLUDED_NEEDS.has(intent.primaryNeed) && fam === "tourism") {
+      return false;
+    }
+    if (intent.primaryNeed === "friends" && fam === "tourism") {
+      return false;
+    }
+    // Always drop travel agencies for friends (explicit) even if family mis-tagged
+    if (
+      (intent.primaryNeed === "friends" || TOURISM_EXCLUDED_NEEDS.has(intent.primaryNeed)) &&
+      (l.category_slug === "travel-tourism" ||
+        /travel|tourism|tour/i.test(l.category_name ?? ""))
+    ) {
+      return false;
+    }
     if (!passesBudget(l, intent)) return false;
     if (!passesCapacity(l, intent)) return false;
     return true;
@@ -186,6 +207,8 @@ function buildReason(
   const bits: string[] = [];
   if (intent.primaryNeed === "hangout") {
     bits.push("Good hangout vibe");
+  } else if (intent.primaryNeed === "friends") {
+    bits.push("Great for out-of-town guests");
   } else if (intent.primaryNeed === "date") {
     bits.push("Fits a dressier date");
   } else if (intent.activityKeywords.length) {
@@ -354,15 +377,36 @@ function selectPlaces(
     return filtered.slice(0, PLACES_LIMIT);
   }
 
-  // Mixed vibes: allow 1 meal + 1 cafe + hangout spots, not a restaurant stack.
+  // Mixed vibes: aim for 1 meal + 1 cafe + hangout (not a restaurant stack).
   const picks: OutingListingCard[] = [];
+  const pickedIds = new Set<number>();
   const counts = emptyBucketCounts();
-  for (const listing of filtered) {
-    if (picks.length >= PLACES_LIMIT) break;
+
+  const tryAdd = (listing: OutingListingCard) => {
+    if (picks.length >= PLACES_LIMIT || pickedIds.has(listing.id)) return;
     const bucket = listingBucket(listing);
-    if (!canAddBucket(counts, bucket)) continue;
+    if (!canAddBucket(counts, bucket)) return;
     bumpBucket(counts, bucket);
+    pickedIds.add(listing.id);
     picks.push(listing);
+  };
+
+  // Pass 1 — seed one of each useful bucket (best-ranked already in `filtered`)
+  const seedOrder: OutingDiversityBucket[] = [
+    "meal",
+    "cafe",
+    "hangout",
+    "sweet",
+    "other",
+  ];
+  for (const bucket of seedOrder) {
+    const hit = filtered.find((l) => listingBucket(l) === bucket);
+    if (hit) tryAdd(hit);
+  }
+
+  // Pass 2 — fill remaining slots by score, still respecting caps
+  for (const listing of filtered) {
+    tryAdd(listing);
   }
   return picks;
 }

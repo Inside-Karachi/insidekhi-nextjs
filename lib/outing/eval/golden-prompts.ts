@@ -150,6 +150,53 @@ export const GOLDEN_PROMPTS: GoldenPromptFixture[] = [
     },
     resultAssertions: { allPublished: true },
   },
+  {
+    id: "friends-visiting",
+    prompt:
+      "friends visiting Karachi — food, fun hangouts, impress guests, no tours",
+    isCore: true,
+    expect: {
+      mode: "places",
+      primaryNeed: "friends",
+      excludeFood: false,
+      partySize: 4,
+      allowCategoryFamilies: [
+        "entertainment",
+        "cinema",
+        "live_music",
+        "fine_dining",
+        "restaurants",
+        "cafes",
+        "shopping",
+      ],
+      forbidCategoryFamilies: ["tourism"],
+    },
+    resultAssertions: { allPublished: true },
+  },
+  {
+    id: "family-day-mood",
+    prompt: "family day out with kids",
+    isCore: true,
+    expect: {
+      mode: "arc",
+      primaryNeed: "family",
+      excludeFood: false,
+      forbidCategoryFamilies: ["tourism"],
+    },
+    resultAssertions: { allPublished: true },
+  },
+  {
+    id: "late-night-mood",
+    prompt: "late night open when the city winds down",
+    isCore: true,
+    expect: {
+      mode: "places",
+      primaryNeed: "hangout",
+      excludeFood: false,
+      forbidCategoryFamilies: ["tourism"],
+    },
+    resultAssertions: { allPublished: true },
+  },
 
   // ---- Extended corpus ----
   {

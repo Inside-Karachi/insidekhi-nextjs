@@ -174,21 +174,39 @@ export function assertPlanMatchesFixture(
     }
   }
 
-  // Non-food-first plans: at most one restaurant/cafe/food stop
+  // Tourism agencies must never pad social moods
+  if (
+    (intent.primaryNeed === "friends" ||
+      intent.primaryNeed === "hangout" ||
+      intent.primaryNeed === "family" ||
+      intent.primaryNeed === "date" ||
+      intent.primaryNeed === "activity") &&
+    stops.length > 0
+  ) {
+    for (const s of stops) {
+      const fam = familyForCategoryName(s.listing.category_name);
+      const slugBlob = `${s.listing.name ?? ""} ${s.listing.category_name ?? ""}`.toLowerCase();
+      if (fam === "tourism" || /tour agency|travel & tourism|tourism/.test(slugBlob)) {
+        fail(
+          `tourism pad in results: "${s.listing.name}" (${s.listing.category_name})`,
+        );
+      }
+    }
+  }
+
+  // Non-food-first plans: at most one *meal* restaurant (cafe + hangout OK)
   if (intent.primaryNeed !== "food" && stops.length > 1) {
-    const foodFamilies: CategoryFamily[] = [
+    const mealFamilies: CategoryFamily[] = [
       "restaurants",
-      "cafes",
-      "fast_food",
-      "bakeries",
       "fine_dining",
+      "fast_food",
     ];
-    const foodStops = stops.filter((s) =>
-      foodFamilies.includes(familyForCategoryName(s.listing.category_name)),
+    const mealStops = stops.filter((s) =>
+      mealFamilies.includes(familyForCategoryName(s.listing.category_name)),
     );
-    if (foodStops.length > 1) {
+    if (mealStops.length > 1) {
       fail(
-        `expected at most 1 food stop for primaryNeed=${intent.primaryNeed}, got ${foodStops.length}: ${foodStops.map((s) => s.listing.name).join(", ")}`,
+        `expected at most 1 meal restaurant for primaryNeed=${intent.primaryNeed}, got ${mealStops.length}: ${mealStops.map((s) => s.listing.name).join(", ")}`,
       );
     }
   }

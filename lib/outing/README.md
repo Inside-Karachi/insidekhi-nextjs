@@ -1,17 +1,19 @@
 /**
  * Activity / outing answer contracts.
  *
- * Spec: hangout / date / bowling / budget prompts must never collapse into a
- * dinner → dessert night-out arc. Golden fixtures in
- * `lib/outing/eval/golden-prompts.ts` (~100 prompts; 7 core merge blockers) +
- * `npm run outing:eval` (CI: `.github/workflows/outing-eval.yml`) enforce this.
+ * Spec: hangout / date / bowling / budget / friends-visiting prompts must never
+ * collapse into a dinner → dessert night-out arc or surface travel agencies.
+ * Golden fixtures in `lib/outing/eval/golden-prompts.ts` (~100 prompts; core
+ * merge blockers) + `npm run outing:eval` (CI: `.github/workflows/outing-eval.yml`)
+ * enforce this.
  *
  * ## Modes
  *
  * - **places** — ranked matching listings (hangout, date, bowling, food-first)
  * - **arc** — optional 2–3 stop itinerary only for broad “plan my night out”
- * - Non-food asks return **at most one** restaurant/cafe; food-first prompts
- *   (“burger places”, biryani, …) may return several
+ * - Non-food asks: **at most one meal restaurant**, but a cafe + hangout
+ *   (and optional dessert) can sit alongside it. Food-first prompts
+ *   (“burger places”, biryani, …) may return several restaurants.
  *
  * ## Data backfill (ops)
  *

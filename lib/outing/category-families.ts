@@ -17,6 +17,7 @@ export type CategoryFamily =
   | "shopping"
   | "self_care"
   | "sports"
+  | "tourism"
   | "other";
 
 const SLUG_TO_FAMILY: Record<string, CategoryFamily> = {
@@ -38,7 +39,7 @@ const SLUG_TO_FAMILY: Record<string, CategoryFamily> = {
   "cosmetics-fragrances": "self_care",
   "padel-cricket-futsal-clubs": "sports",
   "gyms-fitness-centers": "sports",
-  "travel-tourism": "entertainment",
+  "travel-tourism": "tourism",
   "venues-rentals": "entertainment",
 };
 
@@ -115,6 +116,7 @@ export function familyForCategoryName(
   if (/salon|spa|massage/.test(n)) return "self_care";
   if (/shop|mall|fashion/.test(n)) return "shopping";
   if (/padel|cricket|futsal|gym|sport/.test(n)) return "sports";
+  if (/travel|tourism|tour|agency/.test(n)) return "tourism";
   if (/entertainment|recreation|fun/.test(n)) return "entertainment";
   return "other";
 }
@@ -125,6 +127,17 @@ export const HANGOUT_CATEGORY_SLUGS = [
   "cinemas-amusement-parks",
   "live-music-comedy-venues",
   "parks-outdoor-spaces",
+] as const;
+
+/** Friends visiting / impress guests — food + fun, never tour desks. */
+export const FRIENDS_CATEGORY_SLUGS = [
+  "entertainment-recreation",
+  "cinemas-amusement-parks",
+  "live-music-comedy-venues",
+  "fine-dining-buffets",
+  "restaurants-cafes",
+  "cafes-coworking-spots",
+  "shopping-malls-outlets",
 ] as const;
 
 export const DATE_CATEGORY_SLUGS = [
@@ -139,3 +152,14 @@ export const DATE_DEMOTE_SLUGS = new Set([
   "bakeries-desserts",
   "pakistani-desi-cuisine",
 ]);
+
+/** Social outing needs that must never surface travel agencies. */
+export const TOURISM_EXCLUDED_NEEDS = new Set([
+  "hangout",
+  "friends",
+  "date",
+  "family",
+  "activity",
+]);
+
+export const TOURISM_SLUG = "travel-tourism";

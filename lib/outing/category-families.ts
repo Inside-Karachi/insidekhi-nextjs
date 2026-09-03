@@ -163,3 +163,31 @@ export const TOURISM_EXCLUDED_NEEDS = new Set([
 ]);
 
 export const TOURISM_SLUG = "travel-tourism";
+
+/** Gyms are not social hangouts even when miscategorized as entertainment. */
+export const GYM_SLUG = "gyms-fitness-centers";
+
+const GYM_NAME_RE =
+  /\b(gym|fitness|fitnest|workout|crossfit|dumbbells?|weight.?train|personal trainer|yoga studio)\b/i;
+
+export function isGymLikeListing(listing: {
+  name?: string | null;
+  description?: string | null;
+  category_name?: string | null;
+  category_slug?: string | null;
+}): boolean {
+  if (listing.category_slug === GYM_SLUG) return true;
+  if (/gym|fitness/i.test(listing.category_name ?? "")) return true;
+  return GYM_NAME_RE.test(
+    `${listing.name ?? ""} ${listing.description ?? ""}`,
+  );
+}
+
+/** Social outing needs that must never surface gyms / fitness centers. */
+export const GYM_EXCLUDED_NEEDS = new Set([
+  "hangout",
+  "friends",
+  "date",
+  "family",
+]);
+

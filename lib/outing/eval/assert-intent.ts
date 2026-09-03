@@ -194,6 +194,22 @@ export function assertPlanMatchesFixture(
     }
   }
 
+  // Gyms are not hangouts / date / friends picks
+  if (
+    (intent.primaryNeed === "friends" ||
+      intent.primaryNeed === "hangout" ||
+      intent.primaryNeed === "family" ||
+      intent.primaryNeed === "date") &&
+    stops.length > 0
+  ) {
+    for (const s of stops) {
+      const blob = `${s.listing.name ?? ""} ${s.listing.description ?? ""} ${s.listing.category_name ?? ""}`.toLowerCase();
+      if (/\b(gym|fitness|fitnest|workout|crossfit|dumbbell)\b/.test(blob)) {
+        fail(`gym pad in results: "${s.listing.name}"`);
+      }
+    }
+  }
+
   // Non-food-first plans: at most one *meal* restaurant (cafe + hangout OK)
   if (intent.primaryNeed !== "food" && stops.length > 1) {
     const mealFamilies: CategoryFamily[] = [

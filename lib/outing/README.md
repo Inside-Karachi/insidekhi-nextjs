@@ -9,11 +9,13 @@
  *
  * ## Modes
  *
- * - **places** — ranked matching listings (hangout, date, bowling, food-first)
- * - **arc** — optional 2–3 stop itinerary only for broad “plan my night out”
+ * - **places** — AI picks ranked matching listings from a filtered DB pool
+ * - **arc** — AI builds optional 2–3 stop itinerary for broad “plan my night out”
+ * - Explore mood tiles + free-text both call `mode=ai` (no algorithm fallback)
  * - Non-food asks: **at most one meal restaurant**, but a cafe + hangout
  *   (and optional dessert) can sit alongside it. Food-first prompts
  *   (“burger places”, biryani, …) may return several restaurants.
+ * - Gyms and travel agencies are hard-excluded from social moods
  *
  * ## Data backfill (ops)
  *

@@ -14,6 +14,8 @@ import {
   familyForCategoryName,
   familyForSlug,
   FOOD_FAMILIES,
+  GYM_EXCLUDED_NEEDS,
+  isGymLikeListing,
   TOURISM_EXCLUDED_NEEDS,
   type OutingDiversityBucket,
 } from "@/lib/outing/category-families";
@@ -191,6 +193,10 @@ export function filterCandidates(
       (l.category_slug === "travel-tourism" ||
         /travel|tourism|tour/i.test(l.category_name ?? ""))
     ) {
+      return false;
+    }
+    // Gyms are not hangouts — Fitnest etc. often sit under entertainment by mistake
+    if (GYM_EXCLUDED_NEEDS.has(intent.primaryNeed) && isGymLikeListing(l)) {
       return false;
     }
     if (!passesBudget(l, intent)) return false;

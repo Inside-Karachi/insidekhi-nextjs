@@ -6,6 +6,7 @@ import { enforceMobileRateLimit } from "@/lib/mobile/rate-limit";
 import { parsePagination, buildPaginationMeta } from "@/lib/mobile/pagination";
 import { MobileApiError } from "@/lib/mobile/errors";
 import { toListingImage } from "@/lib/mobile/mappers";
+import { sanitizeSearchTerm } from "@/lib/utils/search-sanitization";
 import {
   normalizeCardName,
   toMobileDealPreview,
@@ -34,8 +35,10 @@ type DealSqlRow = DealFeedRow & { listing_id: number | string };
  * Deal-first catalog for the mobile Discounts tab. Active deals on published
  * listings, shaped as `DealPreview` (merchant, cardMatches, coords, image).
  *
- * Peekaboo `valid_card_variants` are often external typeIds — we resolve to
- * local `card_variants` via id and via metadata.card_associations names.
+ * Query params:
+ * - `search` — ILIKE across merchant, deal title/description/discount, bank, category
+ * - `bankId`, `cardVariantId`, `category` — optional filters
+ * - `page` / `limit` — pagination
  */
 export const GET = mobileRoute(async (request: NextRequest) => {
   await enforceMobileRateLimit(request);
@@ -49,6 +52,9 @@ export const GET = mobileRoute(async (request: NextRequest) => {
   const bankIdRaw = searchParams.get("bankId");
   const cardVariantIdRaw = searchParams.get("cardVariantId");
   const categoryRaw = searchParams.get("category");
+  const rawSearch = searchParams.get("search");
+  const sanitizedSearch =
+    rawSearch && rawSearch.trim() ? sanitizeSearchTerm(rawSearch) : "";
 
   const bankId =
     bankIdRaw && /^\d+$/.test(bankIdRaw) ? parseInt(bankIdRaw, 10) : null;
@@ -60,6 +66,29 @@ export const GET = mobileRoute(async (request: NextRequest) => {
     categoryRaw && DEAL_CATEGORIES.has(categoryRaw as MobileDealCategory)
       ? (categoryRaw as MobileDealCategory)
       : null;
+
+  const where: string[] = [
+    "d.is_active = true",
+    "l.status = 'published'",
+    "(d.start_date IS NULL OR d.start_date <= NOW())",
+    "(d.end_date IS NULL OR d.end_date >= NOW())",
+  ];
+  const params: unknown[] = [];
+
+  if (sanitizedSearch) {
+    params.push(`%${sanitizedSearch}%`);
+    const i = params.length;
+    where.push(`(
+      l.name ILIKE $${i}
+      OR COALESCE(d.title, '') ILIKE $${i}
+      OR COALESCE(d.description, '') ILIKE $${i}
+      OR COALESCE(d.discount_value, '') ILIKE $${i}
+      OR COALESCE(b.name, '') ILIKE $${i}
+      OR COALESCE(l.category_name, '') ILIKE $${i}
+      OR COALESCE(c.name, '') ILIKE $${i}
+      OR COALESCE(l.address, '') ILIKE $${i}
+    )`);
+  }
 
   let dealRows: DealSqlRow[];
   try {
@@ -85,12 +114,10 @@ export const GET = mobileRoute(async (request: NextRequest) => {
        INNER JOIN listings_with_details l ON l.id = d.listing_id
        LEFT JOIN banks b ON b.id = d.bank_id
        LEFT JOIN categories c ON c.id = l.category_id
-       WHERE d.is_active = true
-         AND l.status = 'published'
-         AND (d.start_date IS NULL OR d.start_date <= NOW())
-         AND (d.end_date IS NULL OR d.end_date >= NOW())
+       WHERE ${where.join(" AND ")}
        ORDER BY d.created_at DESC
        LIMIT 2000`,
+      params,
     );
     dealRows = rows as DealSqlRow[];
   } catch (error) {
